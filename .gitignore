@@ -1,0 +1,31 @@
+# Python predecessor — kept only as a reference for the Swift port. Not part of
+# this project; delete it once the Mac app reaches parity.
+py/
+
+# Swift / SwiftPM
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+# Package.resolved IS committed: this becomes an app, so pinning the exact
+# dependency graph is what makes a clean checkout build identically.
+
+# Python bytecode (from the reference spike script)
+__pycache__/
+*.pyc
+
+# Local run artifacts — the probe writes a real Gmail header cache here.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Secrets — never commit credentials of any kind.
+.env
+.envrc
+*.app-password
+credentials.json
+token*.json
+
+# macOS
+.DS_Store

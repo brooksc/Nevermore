@@ -1,0 +1,267 @@
+import Foundation
+import GRDB
+
+/// Local SQLite store for message headers. Bodies are never stored.
+///
+/// WAL + `synchronous = NORMAL`: this is a cache that can be rebuilt from Gmail
+/// in seconds, so the Python version's `FULL` + `journal_mode = DELETE` bought
+/// durability nobody needed at a large cost in write speed.
+public final class MessageStore: Sendable {
+    private let pool: DatabasePool
+
+    public init(path: String) throws {
+        var config = Configuration()
+        config.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA synchronous = NORMAL")
+        }
+        pool = try DatabasePool(path: path, configuration: config)
+        try Self.migrator.migrate(pool)
+    }
+
+    /// In-memory store, for tests.
+    public static func inMemory() throws -> MessageStore {
+        try MessageStore(path: ":memory:")
+    }
+
+    // MARK: - Schema
+
+    static var migrator: DatabaseMigrator {
+        var m = DatabaseMigrator()
+
+        m.registerMigration("v1") { db in
+            try db.create(table: "message") { t in
+                t.primaryKey("uid", .integer)
+                t.column("senderAddress", .text).notNull().indexed()
+                t.column("senderHost", .text).notNull()
+                t.column("senderName", .text).notNull().defaults(to: "")
+                t.column("subject", .text).notNull().defaults(to: "")
+                t.column("receivedAt", .double).notNull().indexed()
+                t.column("isUnread", .boolean).notNull().defaults(to: true)
+                t.column("unsubscribeRaw", .text)
+                t.column("unsubscribePost", .text)
+                t.column("deliveredTo", .text).notNull().defaults(to: "")
+                t.column("syncedAt", .double).notNull()
+            }
+
+            // Keyed by GroupID.storageKey, which carries whether the key is a
+            // domain or an address. The Python schema named this column `domain`
+            // but stored an address in it for split groups.
+            try db.create(table: "unsubscribeHistory") { t in
+                t.primaryKey("groupKey", .text)
+                t.column("url", .text)
+                t.column("attemptedAt", .double).notNull()
+                // 'requested' | 'confirmed' | 'failed'. The Python client always
+                // reported success, which is why reappearing senders needed a
+                // whole separate detection feature.
+                t.column("outcome", .text).notNull()
+            }
+
+            // Ignoring is a sender-level decision. Storing it per-message, as
+            // the Python version did, means new mail from an ignored sender
+            // reappears at the next sync.
+            try db.create(table: "ignoredSender") { t in
+                t.primaryKey("groupKey", .text)
+                t.column("ignoredAt", .double).notNull()
+            }
+
+            try db.create(table: "syncState") { t in
+                t.primaryKey("key", .text)
+                t.column("value", .text).notNull()
+            }
+        }
+        return m
+    }
+
+    // MARK: - Messages
+
+    public func upsert(_ messages: [EmailMessage]) throws {
+        guard !messages.isEmpty else { return }
+        let now = Date().timeIntervalSince1970
+        try pool.write { db in
+            for m in messages {
+                try db.execute(
+                    sql: """
+                        INSERT INTO message
+                          (uid, senderAddress, senderHost, senderName, subject, receivedAt,
+                           isUnread, unsubscribeRaw, unsubscribePost, deliveredTo, syncedAt)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(uid) DO UPDATE SET
+                          isUnread = excluded.isUnread,
+                          syncedAt = excluded.syncedAt,
+                          -- Re-sync heals rows written by an older, buggier
+                          -- version rather than leaving them stale forever.
+                          unsubscribeRaw = excluded.unsubscribeRaw,
+                          unsubscribePost = excluded.unsubscribePost,
+                          deliveredTo = excluded.deliveredTo
+                        """,
+                    arguments: [
+                        Int(m.uid.value), m.sender.address, m.sender.host, m.sender.displayName,
+                        m.subject, m.receivedAt.timeIntervalSince1970, m.isUnread,
+                        m.unsubscribe?.webTargets.first?.absoluteString
+                            ?? m.unsubscribe?.mailtoTargets.first.map { "mailto:\($0.address)" },
+                        // Store the canonical RFC 8058 token, because that is
+                        // exactly what ListUnsubscribe looks for when decoding.
+                        m.unsubscribe?.supportsOneClick == true
+                            ? "List-Unsubscribe=One-Click" : nil,
+                        m.deliveredTo, now,
+                    ])
+            }
+        }
+    }
+
+    /// All stored messages, newest first, excluding ignored senders.
+    public func allMessages() throws -> [EmailMessage] {
+        let ignored = try ignoredGroupKeys()
+        return try pool.read { db in
+            try Row.fetchAll(db, sql: "SELECT * FROM message ORDER BY receivedAt DESC")
+                .compactMap(Self.decode)
+        }
+        .filter { message in
+            // A group key can be either kind, so check both forms.
+            let byAddress = GroupID(kind: .address, key: message.sender.address).storageKey
+            let byDomain = GroupID(
+                kind: .domain, key: RegistrableDomain.of(message.sender.host)
+            ).storageKey
+            return !ignored.contains(byAddress) && !ignored.contains(byDomain)
+        }
+    }
+
+    public func count() throws -> Int {
+        try pool.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM message") ?? 0
+        }
+    }
+
+    public func delete(uids: [MessageUID]) throws {
+        guard !uids.isEmpty else { return }
+        try pool.write { db in
+            for chunk in stride(from: 0, to: uids.count, by: 500).map({
+                Array(uids[$0..<min($0 + 500, uids.count)])
+            }) {
+                let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+                try db.execute(
+                    sql: "DELETE FROM message WHERE uid IN (\(placeholders))",
+                    arguments: StatementArguments(chunk.map { Int($0.value) })
+                )
+            }
+        }
+    }
+
+    public func deleteAllMessages() throws {
+        _ = try pool.write { db in try db.execute(sql: "DELETE FROM message") }
+    }
+
+    private static func decode(_ row: Row) -> EmailMessage? {
+        guard let uid: Int = row["uid"] else { return nil }
+        let raw: String? = row["unsubscribeRaw"]
+        return EmailMessage(
+            uid: MessageUID(UInt32(uid)),
+            sender: EmailSender(
+                displayName: row["senderName"] ?? "",
+                address: row["senderAddress"] ?? "",
+                host: row["senderHost"] ?? ""
+            ),
+            subject: row["subject"] ?? "",
+            receivedAt: Date(timeIntervalSince1970: row["receivedAt"] ?? 0),
+            isUnread: row["isUnread"] ?? false,
+            unsubscribe: ListUnsubscribe(
+                header: raw.map { "<\($0)>" }, postHeader: row["unsubscribePost"]
+            ),
+            deliveredTo: row["deliveredTo"] ?? ""
+        )
+    }
+
+    // MARK: - Ignored senders
+
+    public func ignore(_ id: GroupID) throws {
+        try pool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO ignoredSender (groupKey, ignoredAt) VALUES (?, ?)
+                    ON CONFLICT(groupKey) DO NOTHING
+                    """,
+                arguments: [id.storageKey, Date().timeIntervalSince1970])
+        }
+    }
+
+    public func unignore(_ id: GroupID) throws {
+        try pool.write { db in
+            try db.execute(
+                sql: "DELETE FROM ignoredSender WHERE groupKey = ?", arguments: [id.storageKey])
+        }
+    }
+
+    public func ignoredGroupKeys() throws -> Set<String> {
+        try pool.read { db in
+            Set(try String.fetchAll(db, sql: "SELECT groupKey FROM ignoredSender"))
+        }
+    }
+
+    // MARK: - Unsubscribe history
+
+    public enum Outcome: String, Sendable {
+        /// The request was sent and accepted, but nothing confirms it worked.
+        case requested
+        /// A confirmation page or reply positively acknowledged the request.
+        case confirmed
+        case failed
+    }
+
+    public func recordUnsubscribe(_ id: GroupID, url: String?, outcome: Outcome) throws {
+        try pool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO unsubscribeHistory (groupKey, url, attemptedAt, outcome)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(groupKey) DO UPDATE SET
+                      url = excluded.url, attemptedAt = excluded.attemptedAt,
+                      outcome = excluded.outcome
+                    """,
+                arguments: [id.storageKey, url, Date().timeIntervalSince1970, outcome.rawValue])
+        }
+    }
+
+    public func unsubscribeHistory() throws -> [String: (attemptedAt: Date, outcome: Outcome)] {
+        try pool.read { db in
+            var out: [String: (Date, Outcome)] = [:]
+            for row in try Row.fetchAll(db, sql: "SELECT * FROM unsubscribeHistory") {
+                guard let key: String = row["groupKey"],
+                    let outcome = Outcome(rawValue: row["outcome"] ?? "")
+                else { continue }
+                out[key] = (Date(timeIntervalSince1970: row["attemptedAt"] ?? 0), outcome)
+            }
+            return out
+        }
+    }
+
+    public func forgetUnsubscribe(_ id: GroupID) throws {
+        try pool.write { db in
+            try db.execute(
+                sql: "DELETE FROM unsubscribeHistory WHERE groupKey = ?",
+                arguments: [id.storageKey])
+        }
+    }
+
+    // MARK: - Sync state
+
+    public func syncToken() throws -> SyncToken? {
+        let raw = try pool.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT value FROM syncState WHERE key = 'syncToken'")
+        }
+        guard let data = raw?.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(SyncToken.self, from: data)
+    }
+
+    public func setSyncToken(_ token: SyncToken) throws {
+        let json = String(decoding: try JSONEncoder().encode(token), as: UTF8.self)
+        try pool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO syncState (key, value) VALUES ('syncToken', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                arguments: [json])
+        }
+    }
+}
