@@ -45,12 +45,16 @@ public struct UnsubscribeEngine: Sendable {
     ) async -> Outcome {
         // Prefer HTTP: it's silent and needs no From address.
         if let url = unsubscribe.webTargets.first {
+            let host = url.host ?? "?"
             if unsubscribe.supportsOneClick {
+                Log.unsubscribe.detail("one-click POST -> \(host)")
                 return await oneClickPost(url)
             }
+            Log.unsubscribe.detail("GET -> \(host)")
             return await get(url)
         }
         if let mail = unsubscribe.mailtoTargets.first {
+            Log.unsubscribe.detail("mailto -> \(mail.address)\(fromAddress.map { " (from \($0))" } ?? "")")
             do {
                 try await sendMail(mail.address, mail.subject, mail.body, fromAddress)
                 // Sending the email is not proof the sender honoured it.

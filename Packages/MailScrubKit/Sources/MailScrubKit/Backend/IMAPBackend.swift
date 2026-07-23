@@ -45,6 +45,7 @@ public actor IMAPBackend: MailBackend {
 
     private func connected() async throws -> IMAPServer {
         if let server { return server }
+        Log.backend.detail("connecting to \(config.imapHost):\(config.imapPort)")
         let s = IMAPServer(
             host: config.imapHost,
             port: config.imapPort,
@@ -56,8 +57,10 @@ public actor IMAPBackend: MailBackend {
             try await s.connect()
             try await s.login(username: primaryAddress, password: password)
         } catch {
+            Log.backend.problem("login failed: \(error.localizedDescription)")
             throw MailBackendError.authenticationFailed(error.localizedDescription)
         }
+        Log.backend.detail("connected and authenticated")
         server = s
         return s
     }
@@ -65,6 +68,7 @@ public actor IMAPBackend: MailBackend {
     public func disconnect() async {
         try? await server?.disconnect()
         server = nil
+        Log.backend.detail("disconnected")
     }
 
     // MARK: - Discovery
@@ -84,16 +88,19 @@ public actor IMAPBackend: MailBackend {
         // timeout. Windowing also lets Gmail use its date index, and gives the
         // UI something honest to show during the slowest part of first run.
         let windows = Self.dateWindows()
+        Log.backend.event("full discovery: \(windows.count) date windows")
         var found: Set<UInt32> = []
 
         for (index, window) in windows.enumerated() {
             try Task.checkCancellation()
             let uids = try await searchWindow(window, on: server, depth: 0)
             found.formUnion(uids)
+            Log.backend.detail("window \(index + 1)/\(windows.count): +\(uids.count), \(found.count) total")
             progress(.discovering(window: index + 1, of: windows.count, found: found.count))
         }
 
         let sorted = found.sorted()
+        Log.backend.event("discovery found \(sorted.count) messages; fetching headers")
         let messages = try await fetch(
             uids: UIDSet(sorted.map { UID($0) }), from: server, progress: progress
         )
@@ -170,6 +177,7 @@ public actor IMAPBackend: MailBackend {
         // UIDVALIDITY changing means the server's UID space was reset and every
         // stored UID is meaningless. Only a full rediscovery is correct.
         guard selection.uidValidity.value == token.uidValidity else {
+            Log.backend.event("UIDVALIDITY changed — full rediscovery")
             return try await discoverAll(progress: progress)
         }
 
@@ -178,6 +186,7 @@ public actor IMAPBackend: MailBackend {
         // the overlap avoids dropping messages at the boundary; re-fetched UIDs
         // collapse harmlessly on the store's primary key.
         guard let lastSync = token.lastSyncedAt else {
+            Log.backend.event("no lastSyncedAt in token — full rediscovery")
             return try await discoverAll(progress: progress)
         }
         let since = lastSync.addingTimeInterval(-2 * 86400)
@@ -185,6 +194,7 @@ public actor IMAPBackend: MailBackend {
         let candidates: UIDSet = try await server.search(
             criteria: [.header("List-Unsubscribe", ""), .not(.flagged), .since(since)]
         )
+        Log.backend.event("incremental sync since \(lastSync): \(candidates.count) candidate messages")
 
         let messages = try await fetch(uids: candidates, from: server, progress: progress)
         return (
@@ -232,6 +242,7 @@ public actor IMAPBackend: MailBackend {
             offset = end
             progress(.fetching(done: offset, of: total))
         }
+        Log.backend.detail("fetched headers for \(result.count)/\(total) messages")
         return result
     }
 
@@ -283,6 +294,7 @@ public actor IMAPBackend: MailBackend {
         try await server.move(
             messages: UIDSet(uids.map { UID($0.value) }), to: config.trashMailbox
         )
+        Log.backend.event("trashed \(uids.count) messages to \(config.trashMailbox)")
     }
 
     public func sendMail(to: String, subject: String, body: String, from: String?) async throws {

@@ -72,6 +72,7 @@ final class AppModel {
         guard let password = Keychain.appPassword(for: account) else {
             // The account is registered but its Keychain item is unreadable.
             // Keep it selected and flag re-auth so the UI can explain why.
+            Log.app.event("keychain read failed for \(account) — needs re-auth")
             reauthAccount = account
             return
         }
@@ -79,11 +80,13 @@ final class AppModel {
         do {
             store = try MessageStore(path: registry.databasePath(for: account))
         } catch {
+            Log.app.problem("could not open database: \(error.localizedDescription)")
             syncState = .failed("Could not open local database: \(error.localizedDescription)")
             return
         }
         backend = IMAPBackend(address: account, appPassword: password)
         currentAccount = account
+        Log.app.event("opened account \(account)")
         await reloadFromStore()
         await sync()
     }
@@ -140,6 +143,7 @@ final class AppModel {
         let maxAttempts = 3
         for attempt in 1...maxAttempts {
             do {
+                Log.sync.event("sync start (attempt \(attempt)/\(maxAttempts))")
                 let token = try store.syncToken()
                 let (messages, newToken) = try await backend.changes(since: token) {
                     [weak self] phase in
@@ -152,21 +156,26 @@ final class AppModel {
                 await notifyNewReappearances()
                 syncState = .idle
                 lastSyncedAt = Date()
+                Log.sync.event("sync complete: \(messages.count) new, \(groups.count) senders")
                 return
             } catch is CancellationError {
+                Log.sync.detail("sync cancelled")
                 syncState = .idle
                 return
             } catch {
                 // Bad credentials won't fix themselves on retry.
                 if case MailBackendError.authenticationFailed = error {
+                    Log.sync.problem("sync auth failed: \(friendly(error))")
                     syncState = .failed(friendly(error))
                     return
                 }
                 await backend.disconnect()  // drop the poisoned connection
                 if attempt == maxAttempts {
+                    Log.sync.problem("sync failed after \(maxAttempts) attempts: \(friendly(error))")
                     syncState = .failed(friendly(error))
                     return
                 }
+                Log.sync.event("sync attempt \(attempt) failed (\(friendly(error))); reconnecting")
                 // Exponential backoff gives Gmail's rate limiter room to recover.
                 try? await Task.sleep(for: .seconds(Double(attempt) * 2))
             }
@@ -330,6 +339,7 @@ final class AppModel {
         try? targets.forEach { try store.ignore($0.id) }
         ignoredKeys = (try? store.ignoredGroupKeys()) ?? ignoredKeys
         selection.subtract(ids)
+        Log.app.event("ignored \(targets.count) sender(s): \(targets.map(\.id.key).joined(separator: ", "))")
         showToast(
             "Ignored \(targets.count) sender\(targets.count == 1 ? "" : "s")",
             undoLabel: "Undo"
@@ -357,8 +367,10 @@ final class AppModel {
             await reloadFromStore()
             selection.subtract(ids)
             let n = uids.count
+            Log.app.event("trashed \(n) messages from \(targets.count) sender(s)")
             showToast("Trashed \(n) message\(n == 1 ? "" : "s")", undoLabel: nil, undo: nil)
         } catch {
+            Log.app.problem("trash failed: \(friendly(error))")
             showToast("Trash failed: \(friendly(error))", undoLabel: nil, undo: nil)
         }
     }
@@ -402,6 +414,15 @@ final class AppModel {
         return sendAsAddresses.contains(deliveredTo) ? deliveredTo : nil
     }
 
+    private func describe(_ outcome: UnsubscribeEngine.Outcome) -> String {
+        switch outcome {
+        case .confirmed(let d): "confirmed (\(d))"
+        case .requested(let d): "requested (\(d))"
+        case .failed(let d): "failed (\(d))"
+        case .needsManual: "needs manual"
+        }
+    }
+
     /// Perform unsubscribes one at a time, reporting progress via `onProgress`.
     /// Returns the targets annotated with outcomes.
     func performUnsubscribe(
@@ -428,6 +449,8 @@ final class AppModel {
             let from = sendAsFrom(for: source.deliveredTo)
             let outcome = await engine.run(unsub, fromAddress: from)
             results[index].outcome = outcome
+            Log.unsubscribe.event(
+                "\(group.id.key) [\(SenderRow.method(for: group))]: \(describe(outcome))")
 
             if outcome.isSuccess {
                 let storeOutcome: MessageStore.Outcome =

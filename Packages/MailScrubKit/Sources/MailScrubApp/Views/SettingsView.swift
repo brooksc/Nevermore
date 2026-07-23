@@ -1,4 +1,5 @@
 import SwiftUI
+import MailScrubKit
 
 /// Settings window (design 1m, spec §11). Standard four-tab layout.
 struct SettingsView: View {
@@ -101,11 +102,38 @@ struct SettingsView: View {
                 Text("Correct how senders are grouped. Host → group name.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section {
+            Section("Diagnostics") {
                 Toggle("Verbose logging", isOn: $verboseLogging)
+                Text("When on, detailed events are recorded to the system log and shown in Console. Sender addresses are logged; message contents and your password never are.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Export Diagnostics…") { exportDiagnostics() }
                 Button("Reset All Grouping Overrides", role: .destructive) {}
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// Dump the last hour of MailScrub's unified log to a file and reveal it, so
+    /// the user can hand it over when something's wrong.
+    private func exportDiagnostics() {
+        let out = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MailScrub-diagnostics.log")
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/log")
+        task.arguments = [
+            "show", "--predicate", "subsystem == \"\(Log.subsystem)\"",
+            "--last", "1h", "--info", "--debug", "--style", "compact",
+        ]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        do {
+            try task.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit()
+            try data.write(to: out)
+            NSWorkspace.shared.activateFileViewerSelecting([out])
+        } catch {
+            Log.app.problem("export diagnostics failed: \(error.localizedDescription)")
+        }
     }
 }
