@@ -60,11 +60,13 @@ struct InspectorView: View {
 
                 historySection(group)
 
+                // Actions sit directly under the sender summary — the primary
+                // reason the panel is open — above the secondary message list.
+                Divider()
+                actions(for: group)
+
                 Divider()
                 recentMessages(group)
-
-                Spacer(minLength: 8)
-                actions(for: group)
             }
             .padding(16)
         }
