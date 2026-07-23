@@ -315,6 +315,29 @@ final class AppModel {
         }
     }
 
+    /// Table sort order. Lives in the model (not the view) so keyboard
+    /// navigation moves through the same order the table displays.
+    var sortOrder = [KeyPathComparator(\SenderRow.lastReceived, order: .reverse)]
+    var sortedRows: [SenderRow] { rows.sorted(using: sortOrder) }
+
+    /// Whether the keyboard-shortcuts help overlay is showing (⌘? / Help menu).
+    var showShortcuts = false
+
+    /// Move the single selection up (-1) or down (+1) through the visible list.
+    func moveSelection(by delta: Int) {
+        let list = sortedRows
+        guard !list.isEmpty else { return }
+        let current = selection.first.flatMap { id in list.firstIndex { $0.id == id } }
+        let next: Int
+        if let current {
+            next = max(0, min(list.count - 1, current + delta))
+        } else {
+            next = delta > 0 ? 0 : list.count - 1  // no selection → jump to an edge
+        }
+        selection = [list[next].id]
+        showInspector = true
+    }
+
     private func outcome(for id: GroupID) -> MessageStore.Outcome? {
         history[id.storageKey]?.outcome
     }

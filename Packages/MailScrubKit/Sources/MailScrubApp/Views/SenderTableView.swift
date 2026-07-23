@@ -4,13 +4,12 @@ import MailScrubKit
 /// The sender table — native multi-selection, no checkbox column (spec §5).
 struct SenderTableView: View {
     @Bindable var model: AppModel
-    @Binding var sortOrder: [KeyPathComparator<SenderRow>]
     var onUnsubscribe: (Set<GroupID>) -> Void
     var onManual: (GroupID) -> Void
     var onDoubleClick: (GroupID) -> Void
 
     var body: some View {
-        Table(rows, selection: $model.selection, sortOrder: $sortOrder) {
+        Table(rows, selection: $model.selection, sortOrder: $model.sortOrder) {
             TableColumn("Sender", value: \.name) { row in
                 VStack(alignment: .leading, spacing: 1) {
                     Text(row.name)
@@ -61,10 +60,27 @@ struct SenderTableView: View {
         } primaryAction: { ids in
             if let id = ids.first { onDoubleClick(id) }
         }
+        // Single-key triage while the list is focused. j/k move; u/i/d act on the
+        // selection; ? opens the shortcut list. (⌘-shortcuts also work via menus.)
+        .onKeyPress("j") { model.moveSelection(by: 1); return .handled }
+        .onKeyPress("k") { model.moveSelection(by: -1); return .handled }
+        .onKeyPress("u") {
+            if !model.selection.isEmpty { onUnsubscribe(model.selection) }
+            return .handled
+        }
+        .onKeyPress("i") {
+            if !model.selection.isEmpty { model.ignore(model.selection) }
+            return .handled
+        }
+        .onKeyPress("d") {
+            if !model.selection.isEmpty { model.requestTrash(model.selection) }
+            return .handled
+        }
+        .onKeyPress(.init("?")) { model.showShortcuts = true; return .handled }
     }
 
     private var rows: [SenderRow] {
-        model.rows.sorted(using: sortOrder)
+        model.sortedRows
     }
 
     @ViewBuilder

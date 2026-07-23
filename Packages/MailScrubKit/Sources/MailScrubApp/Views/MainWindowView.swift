@@ -6,7 +6,6 @@ import MailScrubKit
 /// it can collapse independently.
 struct MainWindowView: View {
     @Bindable var model: AppModel
-    @State private var sortOrder = [KeyPathComparator(\SenderRow.lastReceived, order: .reverse)]
     @State private var unsubTargets: [AppModel.UnsubTarget]?
     @State private var manualTarget: AppModel.ManualUnsubscribe?
 
@@ -27,6 +26,9 @@ struct MainWindowView: View {
         }
         .sheet(item: $manualTarget) { target in
             WebUnsubscribeSheet(model: model, target: target)
+        }
+        .sheet(isPresented: $model.showShortcuts) {
+            KeyboardShortcutsView()
         }
         .confirmationDialog(
             "Move messages to Trash?",
@@ -70,7 +72,6 @@ struct MainWindowView: View {
                 } else {
                     SenderTableView(
                         model: model,
-                        sortOrder: $sortOrder,
                         onUnsubscribe: beginUnsubscribe,
                         onManual: beginManual,
                         onDoubleClick: { id in

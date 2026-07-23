@@ -32,6 +32,13 @@ struct AppCommands: Commands {
                 .disabled(!model.canUndo)
         }
 
+        // Help → Keyboard Shortcuts (⌘? works from anywhere; plain ? works while
+        // the list is focused, handled by the table).
+        CommandGroup(replacing: .help) {
+            Button("Keyboard Shortcuts") { model.showShortcuts = true }
+                .keyboardShortcut("?", modifiers: .command)
+        }
+
         // Actions — the app's verbs
         CommandMenu("Actions") {
             Button("Unsubscribe") { unsubscribeSelected() }
