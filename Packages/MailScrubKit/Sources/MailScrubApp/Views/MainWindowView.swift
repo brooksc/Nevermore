@@ -6,7 +6,7 @@ import MailScrubKit
 /// it can collapse independently.
 struct MainWindowView: View {
     @Bindable var model: AppModel
-    @State private var sortOrder = [KeyPathComparator(\SenderRow.count, order: .reverse)]
+    @State private var sortOrder = [KeyPathComparator(\SenderRow.lastReceived, order: .reverse)]
     @State private var unsubTargets: [AppModel.UnsubTarget]?
     @State private var manualTarget: AppModel.ManualUnsubscribe?
 
@@ -30,6 +30,10 @@ struct MainWindowView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .unsubscribeSelected)) { _ in
             beginUnsubscribe(model.selection)
+        }
+        // Clicking a row (selecting it) opens the inspector by default.
+        .onChange(of: model.selection) { _, selection in
+            if !selection.isEmpty { model.showInspector = true }
         }
         .task { await model.start() }
     }

@@ -344,4 +344,33 @@ Harness.suite("GroupID") {
     }
 }
 
+// MARK: - Browser confirmation heuristic
+
+Harness.suite("UnsubscribeEngine.looksLikeConfirmation") {
+    Harness.test("matches common success confirmations") {
+        for page in [
+            "You have been unsubscribed from our newsletter.",
+            "Success! You will no longer receive these emails.",
+            "Your subscription has been removed.",
+            "You're unsubscribed. Sorry to see you go.",
+            "Email preferences updated — you opted out of marketing.",
+        ] {
+            expect(UnsubscribeEngine.looksLikeConfirmation(page), "should match: \(page)")
+        }
+    }
+    Harness.test("does not match a page still asking for action") {
+        for page in [
+            "Enter your email to unsubscribe.",
+            "Click the button below to confirm your unsubscribe request.",
+            "Manage your subscription preferences.",
+            "Welcome! Confirm your account to get started.",
+        ] {
+            expect(!UnsubscribeEngine.looksLikeConfirmation(page), "should NOT match: \(page)")
+        }
+    }
+    Harness.test("is case-insensitive") {
+        expect(UnsubscribeEngine.looksLikeConfirmation("UNSUBSCRIBED SUCCESSFULLY"), "upper")
+    }
+}
+
 exit(Harness.finish())

@@ -14,12 +14,17 @@ struct WebUnsubscribeSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var copied = false
+    /// Set when the loaded page looks like a successful-unsubscribe confirmation.
+    @State private var detectedConfirmation = false
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
-            WebView(url: target.url)
+            ZStack(alignment: .top) {
+                WebView(url: target.url) { detectedConfirmation = true }
+                if detectedConfirmation { confirmationBanner }
+            }
             Divider()
             footer
         }
@@ -64,6 +69,29 @@ struct WebUnsubscribeSheet: View {
         .padding(12)
     }
 
+    /// Surfaced when the page auto-detects as a confirmation (design 1i).
+    private var confirmationBanner: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.seal.fill").foregroundStyle(.green)
+            Text("This page looks like a confirmation. Mark this unsubscribe as confirmed?")
+                .font(.callout)
+            Spacer()
+            Button("Not Yet") { detectedConfirmation = false }
+                .controlSize(.small)
+            Button("Mark Confirmed") {
+                model.recordManual(target.id, confirmed: true)
+                dismiss()
+            }
+            .controlSize(.small)
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.green.opacity(0.4)))
+        .padding(12)
+        .shadow(radius: 8, y: 2)
+    }
+
     private var footer: some View {
         HStack {
             if target.isEscalation {
@@ -89,18 +117,48 @@ struct WebUnsubscribeSheet: View {
     }
 }
 
-/// A WKWebView with a non-persistent data store.
+/// A WKWebView with a non-persistent data store that watches for a
+/// confirmation-looking page and reports it back.
 private struct WebView: NSViewRepresentable {
     let url: URL
+    let onLikelyConfirmation: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onLikelyConfirmation) }
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()  // isolate from the real browser
         let webView = WKWebView(frame: .zero, configuration: config)
+        webView.navigationDelegate = context.coordinator
         webView.customUserAgent = "Mozilla/5.0 (Macintosh) MailScrub/1.0"
         webView.load(URLRequest(url: url))
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {}
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        private let onLikelyConfirmation: () -> Void
+        private var alreadyReported = false
+
+        init(_ onLikelyConfirmation: @escaping () -> Void) {
+            self.onLikelyConfirmation = onLikelyConfirmation
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            guard !alreadyReported else { return }
+            // Read the visible text and test it (plus the URL) against common
+            // "you've been unsubscribed" confirmation phrasings. Heuristic by
+            // nature — the user still confirms; this just surfaces the prompt.
+            webView.evaluateJavaScript("document.body ? document.body.innerText : ''") {
+                [weak self] result, _ in
+                guard let self else { return }
+                let haystack = (result as? String ?? "") + " " + (webView.url?.absoluteString ?? "")
+                if UnsubscribeEngine.looksLikeConfirmation(haystack) {
+                    self.alreadyReported = true
+                    self.onLikelyConfirmation()
+                }
+            }
+        }
+    }
 }

@@ -32,6 +32,15 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSPrincipalClass</key><string>NSApplication</string>
+  <!-- Unsubscribe requests (and the manual browser sheet) hit arbitrary,
+       user-directed third-party endpoints, some of which publish http-only
+       List-Unsubscribe URLs. App Transport Security blocks those by default,
+       so allow arbitrary loads. Justified: the destinations are chosen by the
+       mail sender, not the app, and the tool's whole job is to reach them. -->
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsArbitraryLoads</key><true/>
+  </dict>
 </dict>
 </plist>
 PLIST

@@ -264,4 +264,30 @@ public final class MessageStore: Sendable {
                 arguments: [json])
         }
     }
+
+    /// A persisted set of strings under `key`. Best-effort — used for
+    /// bookkeeping (e.g. which reappeared senders have already been notified).
+    public func stringSet(forKey key: String) -> Set<String> {
+        let raw = try? pool.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT value FROM syncState WHERE key = ?", arguments: [key])
+        }
+        guard let value = raw ?? nil, let data = value.data(using: .utf8),
+            let array = try? JSONDecoder().decode([String].self, from: data)
+        else { return [] }
+        return Set(array)
+    }
+
+    public func setStringSet(_ set: Set<String>, forKey key: String) {
+        let json = (try? JSONEncoder().encode(Array(set)))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        try? pool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO syncState (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                arguments: [key, json])
+        }
+    }
 }

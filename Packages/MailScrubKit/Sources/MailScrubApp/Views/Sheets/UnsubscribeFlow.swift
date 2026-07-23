@@ -153,9 +153,12 @@ struct UnsubscribeFlow: View {
             .frame(maxHeight: 280)
 
             HStack {
-                if !confirmed.isEmpty {
-                    Button("Delete Messages from Confirmed Senders") {
-                        let ids = confirmed.map(\.id)
+                // Offer to clear the backlog from every sender we unsubscribed
+                // from (confirmed + requested) — failures are left in place.
+                let succeeded = confirmed + requested
+                if !succeeded.isEmpty {
+                    Button("Delete Messages from \(succeeded.count) Unsubscribed Sender\(succeeded.count == 1 ? "" : "s")") {
+                        let ids = succeeded.map(\.id)
                         Task { await model.deleteMessages(for: ids); dismiss() }
                     }
                 }

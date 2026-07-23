@@ -53,7 +53,8 @@ public struct UnsubscribeEngine: Sendable {
         if let mail = unsubscribe.mailtoTargets.first {
             do {
                 try await sendMail(mail.address, mail.subject, mail.body, fromAddress)
-                return .confirmed(detail: "unsubscribe email sent")
+                // Sending the email is not proof the sender honoured it.
+                return .requested(detail: "unsubscribe email sent, unverifiable")
             } catch {
                 return .failed(detail: error.localizedDescription)
             }
@@ -75,18 +76,37 @@ public struct UnsubscribeEngine: Sendable {
         do {
             let (_, response) = try await session.data(for: request)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            if (200..<300).contains(code) {
-                // A one-click POST returning 2xx is the strongest signal short of
-                // reading the body, so treat it as confirmed.
-                return .confirmed(detail: "endpoint acknowledged (HTTP \(code))")
-            }
+            // A 2xx on a one-click POST means the request was *accepted*, not
+            // that the unsubscribe took effect — we don't read the body, and
+            // endpoints routinely 200 without acting. "Confirmed" is reserved
+            // for a human verifying the sender's page (the browser flow). The
+            // real safety net is reappearance detection, which fires regardless.
             if code < 400 {
-                return .requested(detail: "accepted (HTTP \(code)), unverifiable")
+                return .requested(detail: "one-click accepted (HTTP \(code)), unverifiable")
             }
             return .failed(detail: "endpoint returned HTTP \(code)")
         } catch {
             return .failed(detail: error.localizedDescription)
         }
+    }
+
+    /// Heuristic: does this page text (plus URL) read like a *completed*
+    /// unsubscribe confirmation? Used by the browser sheet to offer marking it
+    /// confirmed. Matches specific past-tense confirmation phrases rather than a
+    /// loose keyword combination, to avoid firing on pages that merely mention
+    /// unsubscribing or ask you to confirm. Conservative — the user still decides.
+    public static func looksLikeConfirmation(_ rawText: String) -> Bool {
+        let text = rawText.lowercased()
+        let phrases = [
+            "you have been unsubscribed", "you've been unsubscribed",
+            "you're unsubscribed", "you are unsubscribed",
+            "successfully unsubscribed", "unsubscribed successfully", "unsubscribe successful",
+            "will no longer receive", "no longer receive these",
+            "has been removed", "have been removed", "successfully removed",
+            "removed from the list", "removed from this list",
+            "opted out", "your email preferences have been updated",
+        ]
+        return phrases.contains { text.contains($0) }
     }
 
     private func get(_ url: URL) async -> Outcome {

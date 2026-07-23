@@ -1,6 +1,7 @@
 import Foundation
 import MailScrubKit
 import Observation
+import UserNotifications
 
 /// The single source of UI truth. Bridges MailScrubKit's actor backend and
 /// GRDB store to SwiftUI, on the main actor.
@@ -148,6 +149,7 @@ final class AppModel {
                 try store.setSyncToken(newToken)
                 sendAsAddresses = try await backend.sendAsAddresses()
                 await reloadFromStore()
+                await notifyNewReappearances()
                 syncState = .idle
                 lastSyncedAt = Date()
                 return
@@ -211,11 +213,15 @@ final class AppModel {
     /// macOS escalates to an AppKit constraint-update exception and aborts.
     private func matches(_ g: SenderGroup, in collection: Collection) -> Bool {
         let ignored = ignoredKeys.contains(g.id.storageKey)
+        let unsubscribed = history[g.id.storageKey] != nil
         switch collection {
-        // All Senders excludes ones already reappeared, so they live in one place.
-        case .allSenders: return !ignored && !isReappeared(g)
+        // Once a sender has been unsubscribed it leaves the working list — it
+        // lives in Unsubscribed, or in Reappeared if it starts mailing again.
+        // (`unsubscribed` already implies not-reappeared, since reappearance
+        // requires a history record.)
+        case .allSenders: return !ignored && !unsubscribed
         case .ignored: return ignored
-        case .unsubscribed: return history[g.id.storageKey] != nil
+        case .unsubscribed: return unsubscribed && !isReappeared(g)
         case .reappeared: return !ignored && isReappeared(g)
         }
     }
@@ -225,6 +231,38 @@ final class AppModel {
     /// a manual browser unsubscribe rather than silently retrying it.
     func hasPriorAttempt(_ id: GroupID) -> Bool {
         history[id.storageKey] != nil
+    }
+
+    // MARK: - Reappearance notifications
+
+    private static let notifiedReappearedKey = "notifiedReappeared"
+
+    /// After a sync, notify the user about senders that have *newly* started
+    /// mailing again after an unsubscribe. Only genuinely new ones fire a
+    /// notification; keys that stop reappearing are cleared so they can notify
+    /// again if they come back later.
+    private func notifyNewReappearances() async {
+        guard let store else { return }
+        let current = Set(groups.filter(isReappeared).map(\.id.storageKey))
+        let alreadyNotified = store.stringSet(forKey: Self.notifiedReappearedKey)
+        let fresh = current.subtracting(alreadyNotified)
+        store.setStringSet(current, forKey: Self.notifiedReappearedKey)
+        guard !fresh.isEmpty else { return }
+
+        let center = UNUserNotificationCenter.current()
+        guard let granted = try? await center.requestAuthorization(options: [.alert, .sound]),
+            granted
+        else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "Senders ignored your unsubscribe"
+        content.body = fresh.count == 1
+            ? "1 sender kept emailing after you unsubscribed. Open MailScrub to finish it in the browser."
+            : "\(fresh.count) senders kept emailing after you unsubscribed. Open MailScrub to finish them in the browser."
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString, content: content, trigger: nil)
+        try? await center.add(request)
     }
 
     /// A sender that mailed again after a recorded unsubscribe attempt.
