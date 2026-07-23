@@ -76,15 +76,21 @@ struct RootView: View {
                 if wants { showOnboarding = true }
             }
             .alert("MailScrub uses your Keychain", isPresented: $showKeychainInfo) {
+                // Default: proceed but keep warning next launch. Only the explicit
+                // opt-out suppresses it, so a single (or accidental) dismissal —
+                // including during testing — doesn't disable the warning forever.
                 Button("Continue") {
+                    Task { await model.start() }
+                }
+                Button("Don't Show This Again") {
                     keychainInfoShown = true
                     Task { await model.start() }
                 }
             } message: {
                 Text("MailScrub stores your Gmail app password in the macOS Keychain so you don't have to re-enter it. macOS may ask you to allow MailScrub to use it — that's expected. Choose \u{201C}Always Allow\u{201D} so you're not asked again.")
             }
-            // Gate the first Keychain access behind the explanation; afterwards
-            // start directly.
+            // Gate Keychain access behind the explanation unless the user opted
+            // out of seeing it.
             .task {
                 if keychainInfoShown {
                     await model.start()
