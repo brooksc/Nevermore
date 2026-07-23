@@ -153,10 +153,13 @@ struct UnsubscribeFlow: View {
             .frame(maxHeight: 280)
 
             HStack {
-                // Offer to clear the backlog from every sender we unsubscribed
-                // from (confirmed + requested) — failures are left in place.
                 let succeeded = confirmed + requested
-                if !succeeded.isEmpty {
+                if alsoDelete {
+                    // Deletion already ran as part of "Unsubscribe and Delete".
+                    Label("Their messages were moved to Trash.", systemImage: "trash")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if !succeeded.isEmpty {
+                    // Plain unsubscribe — offer to clear the backlog now.
                     Button("Delete Messages from \(succeeded.count) Unsubscribed Sender\(succeeded.count == 1 ? "" : "s")") {
                         let ids = succeeded.map(\.id)
                         Task { await model.deleteMessages(for: ids); dismiss() }
