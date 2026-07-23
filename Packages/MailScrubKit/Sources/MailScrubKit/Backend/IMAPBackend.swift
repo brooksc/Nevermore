@@ -72,6 +72,14 @@ public actor IMAPBackend: MailBackend {
         Log.backend.detail("disconnected")
     }
 
+    /// Prove the credentials work by forcing an authenticated connection.
+    /// Throws `MailBackendError.authenticationFailed` on bad credentials (unlike
+    /// `sendAsAddresses`, which swallows connection errors), or a transient
+    /// error on network/throttle issues.
+    public func verifyConnection() async throws {
+        _ = try await connected()
+    }
+
     // MARK: - Discovery
 
     public func discoverAll(
@@ -136,8 +144,11 @@ public actor IMAPBackend: MailBackend {
         return windows
     }
 
-    /// Search one window, halving it on timeout until it fits inside the
-    /// library's command timeout.
+    /// Search one date window, halving it on error until it fits within the
+    /// library's command timeout *and* under swift-nio-imap's fixed 8 KB frame
+    /// limit (a `SEARCH` whose one-line UID result exceeds that throws
+    /// PayloadTooLargeError). Halves down to a one-hour floor — far below the
+    /// point any personal account produces >1000 unsubscribe emails in a window.
     private func searchWindow(
         _ window: (start: Date, end: Date),
         on server: IMAPServer,
@@ -154,10 +165,8 @@ public actor IMAPBackend: MailBackend {
             )
             return uids.toArray().map(\.value)
         } catch {
-            // Give up splitting below roughly a week — at that point the window
-            // isn't the problem and re-raising is more honest than looping.
             let span = window.end.timeIntervalSince(window.start)
-            guard depth < 8, span > 7 * 86400 else { throw error }
+            guard depth < 14, span > 3600 else { throw error }
 
             let mid = window.start.addingTimeInterval(span / 2)
             let first = try await searchWindow((window.start, mid), on: server, depth: depth + 1)
@@ -192,9 +201,13 @@ public actor IMAPBackend: MailBackend {
         }
         let since = lastSync.addingTimeInterval(-2 * 86400)
 
-        let candidates: UIDSet = try await server.search(
-            criteria: [.header("List-Unsubscribe", ""), .not(.flagged), .since(since)]
-        )
+        // Use the same adaptive windowing as discovery so a busy window can't
+        // overflow the 8 KB frame limit.
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let ceiling = calendar.date(byAdding: .day, value: 1, to: Date()) ?? Date()
+        let uidValues = try await searchWindow((since, ceiling), on: server, depth: 0)
+        let candidates = UIDSet(uidValues.map { UID($0) })
         Log.backend.event("incremental sync since \(lastSync): \(candidates.count) candidate messages")
 
         let messages = try await fetch(uids: candidates, from: server, progress: progress)

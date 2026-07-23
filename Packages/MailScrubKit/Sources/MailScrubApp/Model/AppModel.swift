@@ -123,12 +123,29 @@ final class AppModel {
 
     // MARK: - Onboarding
 
-    /// Validate credentials by attempting a connection, then persist and open.
+    /// Validate credentials by authenticating, then persist and open. Retries a
+    /// couple of times on transient failures (Gmail throttling / flaky network)
+    /// so a bad moment doesn't look like a wrong password; a genuine auth failure
+    /// is reported immediately.
     func addAccount(email: String, appPassword: String) async throws {
         let candidate = IMAPBackend(address: email, appPassword: appPassword)
-        // A cheap authenticated call proves the credentials before we store them.
-        _ = try await candidate.sendAsAddresses()
-        await candidate.disconnect()
+        defer { Task { await candidate.disconnect() } }
+
+        var lastError: Error?
+        for attempt in 1...3 {
+            do {
+                try await candidate.verifyConnection()
+                lastError = nil
+                break
+            } catch MailBackendError.authenticationFailed(let detail) {
+                throw MailBackendError.authenticationFailed(detail)  // won't self-fix
+            } catch {
+                lastError = error
+                await candidate.disconnect()
+                if attempt < 3 { try? await Task.sleep(for: .seconds(Double(attempt) * 2)) }
+            }
+        }
+        if let lastError { throw lastError }
 
         try Keychain.store(appPassword: appPassword, for: email)
         registry.add(email)
@@ -253,10 +270,14 @@ final class AppModel {
                 syncState = .idle
                 return
             } catch {
-                // Bad credentials won't fix themselves on retry.
+                // Bad credentials won't fix themselves on retry — prompt re-auth
+                // (works for background syncs too, where a status message alone
+                // would be missed).
                 if case MailBackendError.authenticationFailed = error {
                     Log.sync.problem("sync auth failed: \(friendly(error))")
-                    syncState = .failed(friendly(error))
+                    syncState = .idle
+                    if let account = currentAccount { reauthAccount = account }
+                    stopBackgroundSync()
                     return
                 }
                 await backend.disconnect()  // drop the poisoned connection
