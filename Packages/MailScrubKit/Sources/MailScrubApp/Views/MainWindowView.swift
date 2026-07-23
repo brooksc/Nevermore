@@ -46,6 +46,8 @@ struct MainWindowView: View {
             switch model.collection {
             case .ignored:
                 IgnoredCollectionView(model: model)
+            case .unsubscribed:
+                HistoryView(model: model)
             case .reappeared:
                 ReappearedCollectionView(
                     model: model, onUnsubscribe: beginUnsubscribe, onManual: beginManual)

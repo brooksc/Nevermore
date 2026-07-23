@@ -69,6 +69,16 @@ public final class MessageStore: Sendable {
                 t.column("value", .text).notNull()
             }
         }
+
+        // Self-contained unsubscribe history: keep enough about each sender that
+        // the record survives after its messages are deleted.
+        m.registerMigration("v2-history-metadata") { db in
+            try db.alter(table: "unsubscribeHistory") { t in
+                t.add(column: "senderName", .text).notNull().defaults(to: "")
+                t.add(column: "senderEmail", .text).notNull().defaults(to: "")
+                t.add(column: "senderDomain", .text).notNull().defaults(to: "")
+            }
+        }
         return m
     }
 
@@ -207,28 +217,63 @@ public final class MessageStore: Sendable {
         case failed
     }
 
-    public func recordUnsubscribe(_ id: GroupID, url: String?, outcome: Outcome) throws {
+    /// A durable record of one unsubscribe, independent of whether the sender's
+    /// messages still exist locally.
+    public struct UnsubscribeRecord: Sendable, Identifiable {
+        public let groupKey: String
+        public let senderName: String
+        public let senderEmail: String
+        public let senderDomain: String
+        /// The unsubscribe / email-preferences URL, if the sender published one —
+        /// the closest thing to a "manage or re-subscribe" link.
+        public let url: String?
+        public let attemptedAt: Date
+        public let outcome: Outcome
+
+        public var id: String { groupKey }
+    }
+
+    public func recordUnsubscribe(
+        _ id: GroupID,
+        senderName: String,
+        senderEmail: String,
+        senderDomain: String,
+        url: String?,
+        outcome: Outcome
+    ) throws {
         try pool.write { db in
             try db.execute(
                 sql: """
-                    INSERT INTO unsubscribeHistory (groupKey, url, attemptedAt, outcome)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO unsubscribeHistory
+                      (groupKey, senderName, senderEmail, senderDomain, url, attemptedAt, outcome)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(groupKey) DO UPDATE SET
-                      url = excluded.url, attemptedAt = excluded.attemptedAt,
-                      outcome = excluded.outcome
+                      senderName = excluded.senderName, senderEmail = excluded.senderEmail,
+                      senderDomain = excluded.senderDomain, url = excluded.url,
+                      attemptedAt = excluded.attemptedAt, outcome = excluded.outcome
                     """,
-                arguments: [id.storageKey, url, Date().timeIntervalSince1970, outcome.rawValue])
+                arguments: [
+                    id.storageKey, senderName, senderEmail, senderDomain, url,
+                    Date().timeIntervalSince1970, outcome.rawValue,
+                ])
         }
     }
 
-    public func unsubscribeHistory() throws -> [String: (attemptedAt: Date, outcome: Outcome)] {
+    public func unsubscribeHistory() throws -> [String: UnsubscribeRecord] {
         try pool.read { db in
-            var out: [String: (Date, Outcome)] = [:]
+            var out: [String: UnsubscribeRecord] = [:]
             for row in try Row.fetchAll(db, sql: "SELECT * FROM unsubscribeHistory") {
                 guard let key: String = row["groupKey"],
                     let outcome = Outcome(rawValue: row["outcome"] ?? "")
                 else { continue }
-                out[key] = (Date(timeIntervalSince1970: row["attemptedAt"] ?? 0), outcome)
+                out[key] = UnsubscribeRecord(
+                    groupKey: key,
+                    senderName: row["senderName"] ?? "",
+                    senderEmail: row["senderEmail"] ?? "",
+                    senderDomain: row["senderDomain"] ?? "",
+                    url: row["url"],
+                    attemptedAt: Date(timeIntervalSince1970: row["attemptedAt"] ?? 0),
+                    outcome: outcome)
             }
             return out
         }

@@ -31,7 +31,7 @@ final class AppModel {
 
     private(set) var groups: [SenderGroup] = []
     private var ignoredKeys: Set<String> = []
-    private var history: [String: (attemptedAt: Date, outcome: MessageStore.Outcome)] = [:]
+    private var history: [String: MessageStore.UnsubscribeRecord] = [:]
     private(set) var sendAsAddresses: [String] = []
 
     // MARK: - UI state
@@ -199,8 +199,30 @@ final class AppModel {
         history[id.storageKey]?.outcome
     }
 
-    func unsubscribeRecord(for id: GroupID) -> (attemptedAt: Date, outcome: MessageStore.Outcome)? {
+    func unsubscribeRecord(for id: GroupID) -> MessageStore.UnsubscribeRecord? {
         history[id.storageKey]
+    }
+
+    /// The durable unsubscribe log for the History view — every recorded
+    /// unsubscribe that hasn't started mailing again, newest first. Read from
+    /// the history table, so it survives after the sender's messages are gone.
+    var unsubscribedRecords: [MessageStore.UnsubscribeRecord] {
+        history.values
+            .filter { !isReappearedRecord($0) }
+            .sorted { $0.attemptedAt > $1.attemptedAt }
+    }
+
+    private func isReappearedRecord(_ r: MessageStore.UnsubscribeRecord) -> Bool {
+        guard let g = groups.first(where: { $0.id.storageKey == r.groupKey }) else { return false }
+        return g.messages.contains { $0.receivedAt > r.attemptedAt }
+    }
+
+    /// Drop a record entirely (e.g. an accidental unsubscribe the user wants to
+    /// forget). Also clears the notified-reappeared bookkeeping for that key.
+    func forgetRecord(_ groupKey: String) {
+        guard let store, let id = GroupID(storageKey: groupKey) else { return }
+        try? store.forgetUnsubscribe(id)
+        history = (try? store.unsubscribeHistory()) ?? history
     }
 
     private func matchesCollection(_ g: SenderGroup) -> Bool {
@@ -282,7 +304,10 @@ final class AppModel {
     // MARK: - Counts for the sidebar
 
     func count(for collection: Collection) -> Int {
-        groups.filter { matches($0, in: collection) }.count
+        // Unsubscribed is counted from the durable history log, not from
+        // messages, so it's correct even after a sender's mail is deleted.
+        if collection == .unsubscribed { return unsubscribedRecords.count }
+        return groups.filter { matches($0, in: collection) }.count
     }
 
     var totalMessages: Int { rows.reduce(0) { $0 + $1.count } }
@@ -409,6 +434,9 @@ final class AppModel {
                     { if case .confirmed = outcome { return .confirmed } else { return .requested } }()
                 try? store.recordUnsubscribe(
                     group.id,
+                    senderName: group.displayName,
+                    senderEmail: source.sender.address,
+                    senderDomain: source.sender.host,
                     url: unsub.webTargets.first?.absoluteString,
                     outcome: storeOutcome
                 )
@@ -460,11 +488,18 @@ final class AppModel {
     /// Record the result of a manual browser unsubscribe and drop the sender.
     func recordManual(_ id: GroupID, confirmed: Bool) {
         guard let store, let group = self.group(for: id) else { return }
-        let url = group.unsubscribeSource?.unsubscribe?.webTargets.first?.absoluteString
-        try? store.recordUnsubscribe(id, url: url, outcome: confirmed ? .confirmed : .requested)
+        let source = group.unsubscribeSource
+        let url = source?.unsubscribe?.webTargets.first?.absoluteString
+        try? store.recordUnsubscribe(
+            id,
+            senderName: group.displayName,
+            senderEmail: source?.sender.address ?? group.id.key,
+            senderDomain: source?.sender.host ?? "",
+            url: url,
+            outcome: confirmed ? .confirmed : .requested)
         history = (try? store.unsubscribeHistory()) ?? history
-        // A confirmed manual unsubscribe clears the reappeared state; forget the
-        // old attempt so it doesn't linger, then re-record the fresh outcome.
+        // Updating attemptedAt to now clears the reappeared state — old messages
+        // predate it — so a re-unsubscribed sender leaves Reappeared.
         selection.remove(id)
     }
 
