@@ -62,36 +62,41 @@ public struct Grouping: Sendable {
         "substack.com", "beehiiv.com", "ghost.io", "buttondown.email", "convertkit-mail.com",
     ]
 
-    /// User-defined overrides mapping a host to an explicit group key.
-    public var overrides: [String: String]
+    /// A user correction to the automatic grouping of one registrable domain.
+    public enum Rule: String, Sendable, Codable {
+        /// Force this domain to split into one group per sender address
+        /// (e.g. `notifications@github.com` where each message is a different person).
+        case split
+        /// Force this domain to stay a single group, overriding the auto-split
+        /// (e.g. a brand the app split apart because its display names vary).
+        case merge
+    }
 
-    public init(overrides: [String: String] = [:]) {
-        self.overrides = overrides
+    /// Per-registrable-domain overrides, set by the user via Merge/Split.
+    public var rules: [String: Rule]
+
+    public init(rules: [String: Rule] = [:]) {
+        self.rules = rules
     }
 
     public func group(_ messages: [EmailMessage]) -> [SenderGroup] {
-        // Bucket by the key that would merge senders together.
-        var buckets: [GroupID: [EmailMessage]] = [:]
+        // Bucket by registrable domain, then decide split-vs-merge per bucket.
+        var buckets: [String: [EmailMessage]] = [:]
         for m in messages {
-            buckets[mergeKey(for: m), default: []].append(m)
+            buckets[RegistrableDomain.of(m.sender.host), default: []].append(m)
         }
 
         var groups: [SenderGroup] = []
-        for (id, msgs) in buckets {
-            // Distinct display names within one domain indicate distinct
-            // newsletters sharing a platform (Substack) rather than one brand
-            // sending from many addresses (Amazon).
-            let names = Set(msgs.map(\.sender.displayName).filter { !$0.isEmpty })
-            if names.count > 1 {
+        for (domain, msgs) in buckets {
+            if shouldSplit(domain: domain, messages: msgs) {
                 var byAddress: [String: [EmailMessage]] = [:]
                 for m in msgs { byAddress[m.sender.address, default: []].append(m) }
                 for (address, group) in byAddress {
                     groups.append(
-                        SenderGroup(id: GroupID(kind: .address, key: address), messages: group)
-                    )
+                        SenderGroup(id: GroupID(kind: .address, key: address), messages: group))
                 }
             } else {
-                groups.append(SenderGroup(id: id, messages: msgs))
+                groups.append(SenderGroup(id: GroupID(kind: .domain, key: domain), messages: msgs))
             }
         }
 
@@ -100,23 +105,15 @@ public struct Grouping: Sendable {
         }
     }
 
-    /// The key that decides which messages are *candidates* to merge.
-    ///
-    /// Returns a full ``GroupID`` rather than a bare string so the kind travels
-    /// with the key: on a shared platform the key is an address, and labelling
-    /// that `.domain` reintroduces exactly the ambiguity ``GroupID`` removes.
-    func mergeKey(for message: EmailMessage) -> GroupID {
-        let host = message.sender.host
-        if let override = overrides[host] {
-            return GroupID(kind: .domain, key: override)
-        }
-
-        let registrable = RegistrableDomain.of(host)
-        // On a shared platform the domain identifies the ESP, not the sender,
-        // so key on the address instead.
-        if Grouping.sharedSendingPlatforms.contains(registrable) {
-            return GroupID(kind: .address, key: message.sender.address)
-        }
-        return GroupID(kind: .domain, key: registrable)
+    /// Whether a registrable domain's messages should split into per-address
+    /// groups. A user rule wins; otherwise shared platforms and domains with
+    /// several distinct display names split, and single-brand domains merge.
+    func shouldSplit(domain: String, messages: [EmailMessage]) -> Bool {
+        if let rule = rules[domain] { return rule == .split }
+        if Grouping.sharedSendingPlatforms.contains(domain) { return true }
+        // Distinct display names within one domain indicate distinct newsletters
+        // sharing a platform rather than one brand sending from many addresses.
+        let names = Set(messages.map(\.sender.displayName).filter { !$0.isEmpty })
+        return names.count > 1
     }
 }

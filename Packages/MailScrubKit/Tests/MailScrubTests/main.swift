@@ -224,12 +224,31 @@ Harness.suite("Grouping") {
                 msg(2, from: "Receipts <b@shop.com>"),
             ]).count, 2)
     }
-    Harness.test("applies user overrides ahead of the registrable domain") {
-        eq(
-            Grouping(overrides: ["weird-cdn.net": "mybrand.com"]).group([
-                msg(1, from: "Brand <a@weird-cdn.net>"),
-                msg(2, from: "Brand <b@mybrand.com>"),
-            ]).count, 1)
+    Harness.test("a split rule forces a single-brand domain into per-address rows") {
+        // Amazon-style: one display name, several addresses — normally merged.
+        let merged = Grouping().group([
+            msg(1, from: "Amazon <a@amazon.com>"),
+            msg(2, from: "Amazon <b@amazon.com>"),
+        ])
+        eq(merged.count, 1)
+        let split = Grouping(rules: ["amazon.com": .split]).group([
+            msg(1, from: "Amazon <a@amazon.com>"),
+            msg(2, from: "Amazon <b@amazon.com>"),
+        ])
+        eq(split.count, 2)
+    }
+    Harness.test("a merge rule keeps an auto-split domain as one group") {
+        // Distinct display names normally split; a merge rule overrides that.
+        let split = Grouping().group([
+            msg(1, from: "Deals <a@shop.com>"),
+            msg(2, from: "Receipts <b@shop.com>"),
+        ])
+        eq(split.count, 2)
+        let merged = Grouping(rules: ["shop.com": .merge]).group([
+            msg(1, from: "Deals <a@shop.com>"),
+            msg(2, from: "Receipts <b@shop.com>"),
+        ])
+        eq(merged.count, 1)
     }
     Harness.test("sorts by message count descending") {
         let groups = Grouping().group([

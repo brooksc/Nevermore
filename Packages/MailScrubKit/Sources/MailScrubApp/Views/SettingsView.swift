@@ -98,16 +98,30 @@ struct SettingsView: View {
 
     private var advanced: some View {
         Form {
-            Section("Grouping overrides") {
-                Text("Correct how senders are grouped. Host → group name.")
-                    .font(.caption).foregroundStyle(.secondary)
+            Section("Grouping corrections") {
+                if model.groupingRules.isEmpty {
+                    Text("Right-click a sender to Split by Address or Keep as One Group when the automatic grouping gets it wrong. Your corrections appear here.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ForEach(model.groupingRules.sorted(by: { $0.key < $1.key }), id: \.key) { domain, rule in
+                        HStack {
+                            Text(domain)
+                            Spacer()
+                            Text(rule == .split ? "Split by address" : "Kept as one group")
+                                .foregroundStyle(.secondary)
+                        }
+                        .font(.callout)
+                    }
+                    Button("Reset All Grouping Corrections", role: .destructive) {
+                        model.resetGroupingRules()
+                    }
+                }
             }
             Section("Diagnostics") {
                 Toggle("Verbose logging", isOn: $verboseLogging)
                 Text("When on, detailed events are recorded to the system log and shown in Console. Sender addresses are logged; message contents and your password never are.")
                     .font(.caption).foregroundStyle(.secondary)
                 Button("Export Diagnostics…") { exportDiagnostics() }
-                Button("Reset All Grouping Overrides", role: .destructive) {}
             }
         }
         .formStyle(.grouped)

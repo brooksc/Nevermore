@@ -153,7 +153,7 @@ struct InspectorView: View {
             HStack(spacing: 8) {
                 Button("Ignore") { model.ignore([group.id]) }
                     .frame(maxWidth: .infinity)
-                Button("Trash Messages") { Task { await model.trash([group.id]) } }
+                Button("Trash Messages") { model.requestTrash([group.id]) }
                     .frame(maxWidth: .infinity)
             }
         }
@@ -180,7 +180,7 @@ struct InspectorView: View {
             HStack(spacing: 8) {
                 Button("Ignore") { model.ignore(model.selection) }
                     .frame(maxWidth: .infinity)
-                Button("Trash Messages") { Task { await model.trash(model.selection) } }
+                Button("Trash Messages") { model.requestTrash(model.selection) }
                     .frame(maxWidth: .infinity)
             }
         }

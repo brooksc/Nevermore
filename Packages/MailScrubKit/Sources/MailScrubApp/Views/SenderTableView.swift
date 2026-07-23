@@ -76,7 +76,17 @@ struct SenderTableView: View {
         }
         Divider()
         Button("Ignore Sender") { model.ignore(targets) }
-        Button("Move Messages to Trash…") { Task { await model.trash(targets) } }
+        Button("Move Messages to Trash…") { model.requestTrash(targets) }
+        if targets.count == 1, let id = targets.first {
+            Divider()
+            // Correct the automatic grouping: split an over-merged domain into
+            // per-sender rows, or keep an over-split sender as one group.
+            if id.kind == .domain {
+                Button("Split by Address") { model.splitByAddress(id) }
+            } else {
+                Button("Keep as One Group") { model.keepAsOneGroup(id) }
+            }
+        }
         Divider()
         Button("View in Gmail") { openGmail(targets) }
         Button("Copy Sender Address") { copyAddress(targets) }

@@ -36,7 +36,7 @@ struct AppCommands: Commands {
             Button("Unignore") { model.unignore(model.selection) }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
                 .disabled(model.selection.isEmpty)
-            Button("Move Messages to Trash…") { Task { await model.trash(model.selection) } }
+            Button("Move Messages to Trash…") { model.requestTrash(model.selection) }
                 .keyboardShortcut(.delete, modifiers: .command)
                 .disabled(model.selection.isEmpty)
             Divider()

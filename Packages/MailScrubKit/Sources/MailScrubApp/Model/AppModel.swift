@@ -88,7 +88,35 @@ final class AppModel {
         currentAccount = account
         Log.app.event("opened account \(account)")
         await reloadFromStore()
-        await sync()
+        if AppSettings.syncOnLaunch { await sync() }
+        startBackgroundSync()
+    }
+
+    // MARK: - Background sync
+
+    private var backgroundSyncTask: Task<Void, Never>?
+
+    /// Periodically re-syncs per the Settings interval. Re-reads the interval
+    /// each loop so changing it (or turning it off) takes effect without relaunch.
+    private func startBackgroundSync() {
+        backgroundSyncTask?.cancel()
+        backgroundSyncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let seconds = AppSettings.backgroundIntervalSeconds else {
+                    try? await Task.sleep(for: .seconds(300))  // "off" — re-check later
+                    continue
+                }
+                try? await Task.sleep(for: .seconds(seconds))
+                if Task.isCancelled { break }
+                Log.sync.detail("background sync tick")
+                await self?.sync()
+            }
+        }
+    }
+
+    private func stopBackgroundSync() {
+        backgroundSyncTask?.cancel()
+        backgroundSyncTask = nil
     }
 
     // MARK: - Onboarding
@@ -110,6 +138,7 @@ final class AppModel {
         registry.remove(email)
         accounts = registry.accounts()
         if currentAccount == email {
+            stopBackgroundSync()
             currentAccount = accounts.first
             store = nil
             backend = nil
@@ -120,16 +149,57 @@ final class AppModel {
 
     // MARK: - Loading & sync
 
+    private(set) var groupingRules: [String: Grouping.Rule] = [:]
+
     private func reloadFromStore() async {
         guard let store else { return }
         do {
             let messages = try store.allMessages()
-            let overrides = [String: String]()  // user overrides land here later
-            groups = Grouping(overrides: overrides).group(messages)
+            groupingRules = store.groupingRules()
+            groups = Grouping(rules: groupingRules).group(messages)
             ignoredKeys = try store.ignoredGroupKeys()
             history = try store.unsubscribeHistory()
         } catch {
             syncState = .failed(error.localizedDescription)
+        }
+    }
+
+    // MARK: - Grouping corrections (Merge / Split)
+
+    /// Force a sender's registrable domain to split into per-address groups.
+    func splitByAddress(_ id: GroupID) {
+        applyRule(.split, forDomainOf: id)
+    }
+
+    /// Force a sender's registrable domain to stay one merged group.
+    func keepAsOneGroup(_ id: GroupID) {
+        applyRule(.merge, forDomainOf: id)
+    }
+
+    private func applyRule(_ rule: Grouping.Rule, forDomainOf id: GroupID) {
+        guard let store, let domain = domain(of: id) else { return }
+        groupingRules[domain] = rule
+        store.setGroupingRules(groupingRules)
+        Log.app.event("grouping rule for \(domain): \(rule.rawValue)")
+        selection = []
+        Task { await reloadFromStore() }
+    }
+
+    func resetGroupingRules() {
+        guard let store else { return }
+        groupingRules = [:]
+        store.setGroupingRules([:])
+        Task { await reloadFromStore() }
+    }
+
+    /// The registrable domain a group belongs to (the group key for a domain
+    /// group, or the address's host reduced to eTLD+1 for an address group).
+    private func domain(of id: GroupID) -> String? {
+        switch id.kind {
+        case .domain: return id.key
+        case .address:
+            let host = id.key.split(separator: "@").last.map(String.init) ?? ""
+            return RegistrableDomain.of(host)
         }
     }
 
@@ -154,6 +224,7 @@ final class AppModel {
                 sendAsAddresses = try await backend.sendAsAddresses()
                 await reloadFromStore()
                 await notifyNewReappearances()
+                await notifyNewSenders()
                 syncState = .idle
                 lastSyncedAt = Date()
                 Log.sync.event("sync complete: \(messages.count) new, \(groups.count) senders")
@@ -296,6 +367,37 @@ final class AppModel {
         try? await center.add(request)
     }
 
+    private static let knownSendersKey = "knownSenders"
+
+    /// Notify about senders that have newly appeared since the last sync, when
+    /// the setting is on. The first sync just seeds the known set — otherwise it
+    /// would "announce" the entire mailbox.
+    private func notifyNewSenders() async {
+        guard let store, AppSettings.notifyNewSenders else { return }
+        let current = Set(
+            groups
+                .filter { !ignoredKeys.contains($0.id.storageKey) && history[$0.id.storageKey] == nil }
+                .map(\.id.storageKey))
+        let known = store.stringSet(forKey: Self.knownSendersKey)
+        store.setStringSet(current, forKey: Self.knownSendersKey)
+        guard !known.isEmpty else { return }  // first run — seed only
+        let fresh = current.subtracting(known)
+        guard !fresh.isEmpty else { return }
+
+        let center = UNUserNotificationCenter.current()
+        guard let granted = try? await center.requestAuthorization(options: [.alert, .sound]),
+            granted
+        else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "New senders in MailScrub"
+        content.body = fresh.count == 1
+            ? "1 new sender to review."
+            : "\(fresh.count) new senders to review."
+        content.sound = .default
+        try? await center.add(
+            UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+    }
+
     /// A sender that mailed again after a recorded unsubscribe attempt.
     private func isReappeared(_ g: SenderGroup) -> Bool {
         guard let record = history[g.id.storageKey] else { return false }
@@ -357,6 +459,34 @@ final class AppModel {
         selection.subtract(ids)
     }
 
+    /// A large trash awaiting confirmation (Settings threshold).
+    struct PendingTrash: Identifiable {
+        let id = UUID()
+        let ids: Set<GroupID>
+        let messageCount: Int
+        let senderCount: Int
+    }
+    var pendingTrash: PendingTrash?
+
+    /// Entry point for trashing from the UI: confirms first if the batch exceeds
+    /// the Settings threshold, otherwise trashes immediately. Trashing is
+    /// recoverable from Gmail's Trash for 30 days, so small batches don't prompt.
+    func requestTrash(_ ids: Set<GroupID>) {
+        let targets = groups.filter { ids.contains($0.id) }
+        let count = targets.reduce(0) { $0 + $1.messages.count }
+        if count > AppSettings.trashConfirmThreshold {
+            pendingTrash = PendingTrash(ids: ids, messageCount: count, senderCount: targets.count)
+        } else {
+            Task { await trash(ids) }
+        }
+    }
+
+    func confirmPendingTrash() {
+        guard let pending = pendingTrash else { return }
+        pendingTrash = nil
+        Task { await trash(pending.ids) }
+    }
+
     func trash(_ ids: Set<GroupID>) async {
         guard let backend, let store else { return }
         let targets = groups.filter { ids.contains($0.id) }
@@ -368,7 +498,11 @@ final class AppModel {
             selection.subtract(ids)
             let n = uids.count
             Log.app.event("trashed \(n) messages from \(targets.count) sender(s)")
-            showToast("Trashed \(n) message\(n == 1 ? "" : "s")", undoLabel: nil, undo: nil)
+            // No in-app undo (untrashing Gmail by IMAP UID is unreliable), but
+            // Gmail keeps trashed mail recoverable for 30 days.
+            showToast(
+                "Trashed \(n) message\(n == 1 ? "" : "s") — recoverable in Gmail Trash for 30 days",
+                undoLabel: nil, undo: nil)
         } catch {
             Log.app.problem("trash failed: \(friendly(error))")
             showToast("Trash failed: \(friendly(error))", undoLabel: nil, undo: nil)

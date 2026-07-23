@@ -119,20 +119,15 @@ public final class MessageStore: Sendable {
         }
     }
 
-    /// All stored messages, newest first, excluding ignored senders.
+    /// All stored messages, newest first.
+    ///
+    /// Ignored senders are *not* filtered here — that would keep them out of the
+    /// grouped model entirely, so the Ignored collection would have nothing to
+    /// show. Ignore is applied per-collection in the model instead.
     public func allMessages() throws -> [EmailMessage] {
-        let ignored = try ignoredGroupKeys()
-        return try pool.read { db in
+        try pool.read { db in
             try Row.fetchAll(db, sql: "SELECT * FROM message ORDER BY receivedAt DESC")
                 .compactMap(Self.decode)
-        }
-        .filter { message in
-            // A group key can be either kind, so check both forms.
-            let byAddress = GroupID(kind: .address, key: message.sender.address).storageKey
-            let byDomain = GroupID(
-                kind: .domain, key: RegistrableDomain.of(message.sender.host)
-            ).storageKey
-            return !ignored.contains(byAddress) && !ignored.contains(byDomain)
         }
     }
 
@@ -304,6 +299,32 @@ public final class MessageStore: Sendable {
             try db.execute(
                 sql: """
                     INSERT INTO syncState (key, value) VALUES ('syncToken', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                arguments: [json])
+        }
+    }
+
+    // MARK: - Grouping rules
+
+    /// Persisted per-domain grouping corrections (domain -> "split"/"merge").
+    public func groupingRules() -> [String: Grouping.Rule] {
+        let raw = try? pool.read { db in
+            try String.fetchOne(db, sql: "SELECT value FROM syncState WHERE key = 'groupingRules'")
+        }
+        guard let value = raw ?? nil, let data = value.data(using: .utf8),
+            let decoded = try? JSONDecoder().decode([String: Grouping.Rule].self, from: data)
+        else { return [:] }
+        return decoded
+    }
+
+    public func setGroupingRules(_ rules: [String: Grouping.Rule]) {
+        let json = (try? JSONEncoder().encode(rules))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        try? pool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO syncState (key, value) VALUES ('groupingRules', ?)
                     ON CONFLICT(key) DO UPDATE SET value = excluded.value
                     """,
                 arguments: [json])

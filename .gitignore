@@ -1,7 +1,3 @@
-# Python predecessor — kept only as a reference for the Swift port. Not part of
-# this project; delete it once the Mac app reaches parity.
-py/
-
 # Swift / SwiftPM
 .build/
 .swiftpm/

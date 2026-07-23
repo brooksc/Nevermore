@@ -49,9 +49,15 @@ struct MailScrubApp: App {
 struct RootView: View {
     @Bindable var model: AppModel
     @State private var showOnboarding = false
+    /// One-time explanation shown before the app first touches the Keychain, so
+    /// the macOS "allow access" prompt isn't a surprise.
+    @AppStorage("keychainInfoShown") private var keychainInfoShown = false
+    @State private var showKeychainInfo = false
+    @AppStorage("appearance") private var appearance = "system"
 
     var body: some View {
         MainWindowView(model: model)
+            .preferredColorScheme(colorScheme)
             .sheet(isPresented: $showOnboarding) {
                 OnboardingSheet(model: model, reauthAccount: model.reauthAccount) {
                     showOnboarding = false
@@ -61,5 +67,30 @@ struct RootView: View {
             .onChange(of: model.needsOnboarding, initial: true) { _, needs in
                 showOnboarding = needs
             }
+            .alert("MailScrub uses your Keychain", isPresented: $showKeychainInfo) {
+                Button("Continue") {
+                    keychainInfoShown = true
+                    Task { await model.start() }
+                }
+            } message: {
+                Text("MailScrub stores your Gmail app password in the macOS Keychain so you don't have to re-enter it. macOS may ask you to allow MailScrub to use it — that's expected. Choose \u{201C}Always Allow\u{201D} so you're not asked again.")
+            }
+            // Gate the first Keychain access behind the explanation; afterwards
+            // start directly.
+            .task {
+                if keychainInfoShown {
+                    await model.start()
+                } else {
+                    showKeychainInfo = true
+                }
+            }
+    }
+
+    private var colorScheme: ColorScheme? {
+        switch appearance {
+        case "light": .light
+        case "dark": .dark
+        default: nil  // follow the system
+        }
     }
 }

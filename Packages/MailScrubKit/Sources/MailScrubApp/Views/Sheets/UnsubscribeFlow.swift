@@ -27,6 +27,13 @@ struct UnsubscribeFlow: View {
         }
         .frame(width: 460)
         .padding(24)
+        .onAppear {
+            // Honor "Ask before unsubscribing": when off, skip the confirm and
+            // go straight to the action, deleting if that's the default.
+            if !AppSettings.askBeforeUnsubscribe, stage == .confirm {
+                start(delete: AppSettings.deleteIsDefault)
+            }
+        }
     }
 
     // MARK: - Confirm (design 1f)
@@ -78,9 +85,17 @@ struct UnsubscribeFlow: View {
             HStack {
                 Button("Cancel", role: .cancel) { dismiss() }
                 Spacer()
-                Button("Unsubscribe and Delete Messages") { start(delete: true) }
-                Button("Unsubscribe") { start(delete: false) }
-                    .buttonStyle(.borderedProminent)
+                // The prominent default follows the "Make Delete the default"
+                // setting.
+                if AppSettings.deleteIsDefault {
+                    Button("Unsubscribe") { start(delete: false) }
+                    Button("Unsubscribe and Delete Messages") { start(delete: true) }
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    Button("Unsubscribe and Delete Messages") { start(delete: true) }
+                    Button("Unsubscribe") { start(delete: false) }
+                        .buttonStyle(.borderedProminent)
+                }
             }
         }
     }

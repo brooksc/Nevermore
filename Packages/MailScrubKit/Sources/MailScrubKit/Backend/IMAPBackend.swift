@@ -352,18 +352,21 @@ public actor IMAPBackend: MailBackend {
 
         var found: Set<String> = [primaryAddress.lowercased()]
         if let server = try? await connected(),
-            (try? await select(config.sentMailbox, on: server)) != nil
+            let selection = try? await select(config.sentMailbox, on: server),
+            selection.messageCount > 0
         {
-            let recent: UIDSet = try await server.search(criteria: [.all])
-            let sample = Array(recent.toArray().suffix(300))
-            if !sample.isEmpty {
-                let infos = try await server.fetchMessageInfosBulk(
-                    using: UIDSet(sample), options: .slim
-                )
-                for info in infos {
-                    let addr = EmailSender(header: info.from ?? "").address
-                    if addr.contains("@") { found.insert(addr) }
-                }
+            // Fetch the last 300 sent messages by *sequence number*. A `SEARCH
+            // ALL` returns every UID on a single line, which for a large Sent
+            // folder exceeds swift-nio-imap's fixed 8 KB frame limit and throws
+            // PayloadTooLargeError; a bounded sequence range avoids that entirely.
+            let count = selection.messageCount
+            let low = max(1, count - 299)
+            let infos = try await server.fetchMessageInfosBulk(
+                using: SequenceNumberSet(low...count), options: .slim
+            )
+            for info in infos {
+                let addr = EmailSender(header: info.from ?? "").address
+                if addr.contains("@") { found.insert(addr) }
             }
         }
         let result = found.sorted()

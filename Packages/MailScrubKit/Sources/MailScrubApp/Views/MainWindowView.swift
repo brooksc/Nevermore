@@ -28,6 +28,20 @@ struct MainWindowView: View {
         .sheet(item: $manualTarget) { target in
             WebUnsubscribeSheet(model: model, target: target)
         }
+        .confirmationDialog(
+            "Move messages to Trash?",
+            isPresented: Binding(
+                get: { model.pendingTrash != nil },
+                set: { if !$0 { model.pendingTrash = nil } }),
+            presenting: model.pendingTrash
+        ) { pending in
+            Button("Move \(pending.messageCount) Messages to Trash", role: .destructive) {
+                model.confirmPendingTrash()
+            }
+            Button("Cancel", role: .cancel) { model.pendingTrash = nil }
+        } message: { pending in
+            Text("This trashes \(pending.messageCount) messages from \(pending.senderCount) sender\(pending.senderCount == 1 ? "" : "s"). They stay recoverable in Gmail Trash for 30 days.")
+        }
         .onReceive(NotificationCenter.default.publisher(for: .unsubscribeSelected)) { _ in
             beginUnsubscribe(model.selection)
         }
@@ -35,7 +49,6 @@ struct MainWindowView: View {
         .onChange(of: model.selection) { _, selection in
             if !selection.isEmpty { model.showInspector = true }
         }
-        .task { await model.start() }
     }
 
     // MARK: - Content region (table or collection-specific view + status bar)
@@ -120,7 +133,7 @@ struct MainWindowView: View {
             .disabled(model.selection.isEmpty)
         }
         ToolbarItem(placement: .primaryAction) {
-            Button { Task { await model.trash(model.selection) } } label: {
+            Button { model.requestTrash(model.selection) } label: {
                 Image(systemName: "trash")
             }
             .help("Trash messages from selected")
