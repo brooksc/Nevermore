@@ -58,6 +58,25 @@ struct MainWindowView: View {
     @ViewBuilder
     private var content: some View {
         VStack(spacing: 0) {
+            if !model.hasLoadedOnce {
+                // Nothing has loaded yet (e.g. behind the Keychain dialog or
+                // during first connect) — don't claim any status.
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("Loading your mailbox…").foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                collectionContent
+            }
+            Divider()
+            StatusBarView(model: model)
+        }
+    }
+
+    @ViewBuilder
+    private var collectionContent: some View {
+        Group {
             switch model.collection {
             case .ignored:
                 IgnoredCollectionView(model: model)
@@ -80,8 +99,6 @@ struct MainWindowView: View {
                         })
                 }
             }
-            Divider()
-            StatusBarView(model: model)
         }
     }
 

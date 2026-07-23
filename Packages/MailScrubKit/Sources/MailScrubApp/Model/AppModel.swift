@@ -187,6 +187,10 @@ final class AppModel {
 
     private(set) var groupingRules: [String: Grouping.Rule] = [:]
 
+    /// False until the store has been read at least once. Before that, the UI
+    /// must not claim a status like "all caught up" — nothing has loaded yet.
+    private(set) var hasLoadedOnce = false
+
     private func reloadFromStore() async {
         guard let store else { return }
         do {
@@ -195,6 +199,7 @@ final class AppModel {
             groups = Grouping(rules: groupingRules).group(messages)
             ignoredKeys = try store.ignoredGroupKeys()
             history = try store.unsubscribeHistory()
+            hasLoadedOnce = true
         } catch {
             syncState = .failed(error.localizedDescription)
         }
@@ -336,6 +341,43 @@ final class AppModel {
         }
         selection = [list[next].id]
         showInspector = true
+    }
+
+    /// The row to select after the current one is removed — the next one down,
+    /// or the previous if it was last. Keeps keyboard triage flowing.
+    private func rowAfterSelection() -> GroupID? {
+        guard let current = selection.first else { return nil }
+        let list = sortedRows
+        guard let idx = list.firstIndex(where: { $0.id == current }) else { return nil }
+        if idx + 1 < list.count { return list[idx + 1].id }
+        if idx > 0 { return list[idx - 1].id }
+        return nil
+    }
+
+    private func advance(to id: GroupID?) {
+        if let id {
+            selection = [id]
+            showInspector = true
+        } else {
+            selection = []
+        }
+    }
+
+    /// Ignore the selection and move to the next row (keyboard triage).
+    func ignoreAndAdvance() {
+        guard !selection.isEmpty else { return }
+        let next = rowAfterSelection()
+        ignore(selection)
+        advance(to: next)
+    }
+
+    /// Trash the selection and move to the next row — unless the trash needs
+    /// confirmation, in which case selection stays until the user confirms.
+    func trashAndAdvance() {
+        guard !selection.isEmpty else { return }
+        let next = rowAfterSelection()
+        requestTrash(selection)
+        if pendingTrash == nil { advance(to: next) }
     }
 
     private func outcome(for id: GroupID) -> MessageStore.Outcome? {

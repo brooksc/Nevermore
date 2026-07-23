@@ -68,14 +68,9 @@ struct SenderTableView: View {
             if !model.selection.isEmpty { onUnsubscribe(model.selection) }
             return .handled
         }
-        .onKeyPress("i") {
-            if !model.selection.isEmpty { model.ignore(model.selection) }
-            return .handled
-        }
-        .onKeyPress("d") {
-            if !model.selection.isEmpty { model.requestTrash(model.selection) }
-            return .handled
-        }
+        // Ignore/trash advance to the next row so triage keeps flowing.
+        .onKeyPress("i") { model.ignoreAndAdvance(); return .handled }
+        .onKeyPress("d") { model.trashAndAdvance(); return .handled }
         .onKeyPress(.init("?")) { model.showShortcuts = true; return .handled }
     }
 
