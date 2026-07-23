@@ -8,6 +8,7 @@ let package = Package(
         .library(name: "MailScrubKit", targets: ["MailScrubKit"]),
         .executable(name: "mailscrub-probe", targets: ["Probe"]),
         .executable(name: "mailscrub-tests", targets: ["MailScrubTests"]),
+        .executable(name: "MailScrubApp", targets: ["MailScrubApp"]),
     ],
     dependencies: [
         // SwiftMail 1.8.0 depends on a branch-pinned swift-nio-imap, so SPM rejects
@@ -42,6 +43,13 @@ let package = Package(
             name: "MailScrubTests",
             dependencies: ["MailScrubKit"],
             path: "Tests/MailScrubTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        // The SwiftUI app (M5). Built as a plain executable here and wrapped into
+        // a .app bundle by make-app.sh; needs full Xcode for the SDK.
+        .executableTarget(
+            name: "MailScrubApp",
+            dependencies: ["MailScrubKit"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]

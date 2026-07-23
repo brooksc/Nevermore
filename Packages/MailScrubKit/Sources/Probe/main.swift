@@ -6,6 +6,26 @@ import MailScrubKit
 //   MAILSCRUB_EMAIL=you@gmail.com MAILSCRUB_APP_PASSWORD=xxxx \
 //     swift run mailscrub-probe [--full]
 
+// Diagnostic: open the app's real Application Support DB and report what
+// AppModel would see, without any network. `mailscrub-probe --count-appdb <email>`
+if CommandLine.arguments.contains("--count-appdb") {
+    guard let email = CommandLine.arguments.last, email.contains("@") else {
+        print("usage: mailscrub-probe --count-appdb <email>")
+        exit(2)
+    }
+    let path = AccountRegistry.shared.databasePath(for: email)
+    print("app-support DB: \(path)")
+    let store = try MessageStore(path: path)
+    let all = try store.allMessages()
+    print("store.count(): \(try store.count())")
+    print("allMessages(): \(all.count)")
+    print("ignoredGroupKeys: \(try store.ignoredGroupKeys().count)")
+    print("history: \(try store.unsubscribeHistory().count)")
+    let groups = Grouping().group(all)
+    print("grouped: \(groups.count) senders")
+    exit(0)
+}
+
 let env = ProcessInfo.processInfo.environment
 guard let address = env["MAILSCRUB_EMAIL"], let password = env["MAILSCRUB_APP_PASSWORD"] else {
     print("Set MAILSCRUB_EMAIL and MAILSCRUB_APP_PASSWORD.")
