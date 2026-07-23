@@ -53,8 +53,10 @@ struct RootView: View {
     var body: some View {
         MainWindowView(model: model)
             .sheet(isPresented: $showOnboarding) {
-                OnboardingSheet(model: model) { showOnboarding = false }
-                    .interactiveDismissDisabled(model.accounts.isEmpty)
+                OnboardingSheet(model: model, reauthAccount: model.reauthAccount) {
+                    showOnboarding = false
+                }
+                .interactiveDismissDisabled(model.accounts.isEmpty)
             }
             .onChange(of: model.needsOnboarding, initial: true) { _, needs in
                 showOnboarding = needs

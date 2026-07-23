@@ -11,7 +11,16 @@ final class AppModel {
 
     private(set) var accounts: [String]
     private(set) var currentAccount: String?
-    var needsOnboarding: Bool { currentAccount == nil }
+
+    /// Set when a *registered* account's password can't be read from the
+    /// Keychain — e.g. after an app update signed with a rotated certificate,
+    /// moving the app, or restoring from backup. The UI explains this and asks
+    /// the user to re-enter, rather than showing a silent empty window.
+    private(set) var reauthAccount: String?
+
+    /// Show the add/re-auth sheet when there's no account yet, or a saved one
+    /// couldn't be unlocked.
+    var needsOnboarding: Bool { currentAccount == nil || reauthAccount != nil }
 
     private let registry = AccountRegistry.shared
     private var store: MessageStore?
@@ -60,9 +69,12 @@ final class AppModel {
 
     private func open(account: String) async {
         guard let password = Keychain.appPassword(for: account) else {
-            currentAccount = nil
+            // The account is registered but its Keychain item is unreadable.
+            // Keep it selected and flag re-auth so the UI can explain why.
+            reauthAccount = account
             return
         }
+        reauthAccount = nil
         do {
             store = try MessageStore(path: registry.databasePath(for: account))
         } catch {

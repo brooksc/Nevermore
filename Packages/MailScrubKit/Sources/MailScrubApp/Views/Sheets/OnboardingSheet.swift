@@ -4,6 +4,9 @@ import SwiftUI
 /// validation. One view, three states, no wizard chrome.
 struct OnboardingSheet: View {
     @Bindable var model: AppModel
+    /// Non-nil when re-authenticating a saved account whose Keychain item became
+    /// unreadable (rather than adding a brand-new account).
+    var reauthAccount: String?
     var onDone: () -> Void
 
     @State private var email = ""
@@ -19,15 +22,31 @@ struct OnboardingSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 12) {
-                Image(systemName: "envelope.badge.person.crop")
+                Image(systemName: reauthAccount == nil
+                    ? "envelope.badge.person.crop" : "key.horizontal")
                     .font(.system(size: 32))
                     .foregroundStyle(Tokens.brandBlue)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Add Your Gmail Account").font(.title2.weight(.semibold))
+                    Text(reauthAccount == nil
+                        ? "Add Your Gmail Account" : "Re-enter Your App Password")
+                        .font(.title2.weight(.semibold))
                     Text("MailScrub reads message headers only — never bodies — and stores them on this Mac. It signs in with a Gmail app password.")
                         .font(.callout).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+            }
+
+            // Re-auth: explain *why* this appeared, so it isn't confusing.
+            if let account = reauthAccount {
+                Label {
+                    Text("macOS couldn't unlock the saved password for **\(account)**. This can happen after an app update or if the app was moved. Your local mail library is untouched — just re-enter the app password to reconnect.")
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "info.circle")
+                }
+                .font(.callout)
+                .padding(10)
+                .background(Tokens.brandBlue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -46,10 +65,17 @@ struct OnboardingSheet: View {
             Form {
                 TextField("Email", text: $email, prompt: Text("you@gmail.com"))
                     .textContentType(.username)
+                    .disabled(reauthAccount != nil)  // fixed when re-authenticating
                 SecureField("App password", text: $password,
                     prompt: Text("xxxx xxxx xxxx xxxx"))
             }
             .disabled(phase == .validating)
+
+            Label(
+                "Saved securely in your macOS Keychain — never written to disk in the clear.",
+                systemImage: "lock.fill"
+            )
+            .font(.caption).foregroundStyle(.secondary)
 
             if case .validating = phase {
                 HStack(spacing: 6) {
@@ -76,6 +102,7 @@ struct OnboardingSheet: View {
         }
         .padding(24)
         .frame(width: 460)
+        .onAppear { if let account = reauthAccount { email = account } }
     }
 
     private var canSubmit: Bool {

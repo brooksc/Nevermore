@@ -31,7 +31,7 @@ mailbox on 2026-07-22.
 
 ## 2. What the spike proved
 
-Measured on `brookscutter@gmail.com`, 132,883 messages in All Mail:
+Measured on a real test account, 132,883 messages in All Mail:
 
 | Capability | Result |
 |---|---|

@@ -36,6 +36,27 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Ad-hoc sign so Keychain access and window focus work locally.
-codesign --force --sign - "$APP" >/dev/null 2>&1 || true
+# Sign with a stable identity so Keychain items survive rebuilds. An ad-hoc
+# signature (`-`) gets a fresh code identity every build, which invalidates the
+# ACL on any Keychain item the app created — so the app can't read its own saved
+# password after a rebuild. A Developer ID cert has a persistent designated
+# requirement, which keeps the Keychain ACL valid across rebuilds.
+#
+# Identity resolution: $MAILSCRUB_SIGN_IDENTITY, else the first Developer ID
+# Application cert in the keychain, else ad-hoc (with a warning).
+SIGN_ID="${MAILSCRUB_SIGN_IDENTITY:-}"
+if [ -z "$SIGN_ID" ]; then
+  SIGN_ID=$(security find-identity -v -p codesigning \
+    | awk -F'"' '/Developer ID Application/{print $2; exit}')
+fi
+
+if [ -n "$SIGN_ID" ]; then
+  codesign --force --options runtime --sign "$SIGN_ID" "$APP"
+  echo "signed: $SIGN_ID" >&2
+else
+  codesign --force --sign - "$APP" >/dev/null 2>&1 || true
+  echo "WARNING: ad-hoc signed — no Developer ID cert found. The saved app" >&2
+  echo "         password will not persist across rebuilds. Set" >&2
+  echo "         MAILSCRUB_SIGN_IDENTITY to a signing identity to fix this." >&2
+fi
 echo "$APP"

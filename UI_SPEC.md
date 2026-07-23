@@ -307,7 +307,7 @@ passwords disabled by a Workspace administrator*; network unreachable.
 - **Body:** the sender list, plus a per-method breakdown: *"2 use one-click. 1
   will open a web page."*
 - **Alias warning** where the mail was delivered to a non-primary address:
-  *"Will send as brooksc@brooksc.com"*, or, if that address has no verified
+  *"Will send as you@example.com"*, or, if that address has no verified
   send-as alias, a caution that the request may be rejected.
 - **Buttons:** `Unsubscribe` (default) · `Unsubscribe and Delete Messages` ·
   `Cancel`. Verbs, never Yes/No.
