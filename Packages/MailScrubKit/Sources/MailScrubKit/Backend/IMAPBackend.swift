@@ -17,6 +17,7 @@ public actor IMAPBackend: MailBackend {
         public var mailbox = "[Gmail]/All Mail"
         public var sentMailbox = "[Gmail]/Sent Mail"
         public var trashMailbox = "[Gmail]/Trash"
+        public var inboxMailbox = "INBOX"
 
         public init() {}
     }
@@ -225,8 +226,10 @@ public actor IMAPBackend: MailBackend {
         // `Delivered-To` is set by Gmail's delivery layer, so it survives
         // forwarding in a way the sender-controlled `To` does not — it is what
         // makes send-as alias detection work.
+        // Message-ID is fetched explicitly so trash-undo can find a message again
+        // in the Trash folder (IMAP UIDs differ per folder).
         let headerFields =
-            FetchMessageInfoOptions.newsletterHeaderFields + ["Delivered-To", "To"]
+            FetchMessageInfoOptions.newsletterHeaderFields + ["Delivered-To", "To", "Message-ID"]
 
         var offset = 0
         while offset < total {
@@ -273,7 +276,8 @@ public actor IMAPBackend: MailBackend {
             receivedAt: info.internalDate ?? info.date ?? .distantPast,
             isUnread: !info.flags.contains(.seen),
             unsubscribe: unsubscribe,
-            deliveredTo: EmailSender(header: deliveredTo).address
+            deliveredTo: EmailSender(header: deliveredTo).address,
+            messageId: info.messageId?.description ?? header("Message-ID") ?? ""
         )
     }
 
@@ -295,6 +299,28 @@ public actor IMAPBackend: MailBackend {
             messages: UIDSet(uids.map { UID($0.value) }), to: config.trashMailbox
         )
         Log.backend.event("trashed \(uids.count) messages to \(config.trashMailbox)")
+    }
+
+    /// Restore messages from Trash by their RFC Message-IDs. Returns how many
+    /// were found and moved back to the Inbox. IMAP has no "untrash", so we
+    /// search the Trash folder for each Message-ID (its Trash UID differs from
+    /// the one we had) and move it out.
+    public func untrash(messageIDs: [String]) async throws -> Int {
+        let ids = messageIDs.filter { !$0.isEmpty }
+        guard !ids.isEmpty else { return 0 }
+        let server = try await connected()
+        _ = try await select(config.trashMailbox, on: server)
+
+        var restored = 0
+        for messageID in ids {
+            let uids: UIDSet = try await server.search(
+                criteria: [.header("Message-ID", messageID)])
+            guard !uids.isEmpty else { continue }
+            try await server.move(messages: uids, to: config.inboxMailbox)
+            restored += uids.count
+        }
+        Log.backend.event("untrashed \(restored)/\(ids.count) messages")
+        return restored
     }
 
     public func sendMail(to: String, subject: String, body: String, from: String?) async throws {

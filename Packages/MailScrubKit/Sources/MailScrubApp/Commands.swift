@@ -8,6 +8,7 @@ struct AppCommands: Commands {
     var body: some Commands {
         // File
         CommandGroup(after: .newItem) {
+            Button("Add Account…") { model.wantsToAddAccount = true }
             Button("Sync Now") { Task { await model.sync() } }
                 .keyboardShortcut("r")
         }
@@ -22,6 +23,13 @@ struct AppCommands: Commands {
             Divider()
             Button("Toggle Inspector") { model.showInspector.toggle() }
                 .keyboardShortcut("i", modifiers: [.command, .option])
+        }
+
+        // Undo for the last reversible action (ignore / trash).
+        CommandGroup(replacing: .undoRedo) {
+            Button("Undo") { Task { await model.runUndo() } }
+                .keyboardShortcut("z")
+                .disabled(!model.canUndo)
         }
 
         // Actions — the app's verbs

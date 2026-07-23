@@ -75,6 +75,8 @@ public protocol MailBackend: Sendable {
     ) async throws -> (messages: [EmailMessage], token: SyncToken)
 
     func trash(_ uids: [MessageUID]) async throws
+    /// Restore trashed messages by Message-ID; returns how many were recovered.
+    func untrash(messageIDs: [String]) async throws -> Int
     func sendMail(to: String, subject: String, body: String, from: String?) async throws
 
     /// Addresses this account can legitimately send as.

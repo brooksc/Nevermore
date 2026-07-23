@@ -17,6 +17,9 @@ public struct EmailMessage: Hashable, Sendable, Identifiable {
     public let unsubscribe: ListUnsubscribe?
     /// `Delivered-To`, falling back to `To`. Used for send-as alias detection.
     public let deliveredTo: String
+    /// RFC 5322 `Message-ID` (e.g. `<abc@host>`). The stable identifier used to
+    /// find a message again in Trash for undo, since IMAP UIDs differ per folder.
+    public let messageId: String
 
     public var id: MessageUID { uid }
     public var canUnsubscribe: Bool { unsubscribe != nil }
@@ -28,7 +31,8 @@ public struct EmailMessage: Hashable, Sendable, Identifiable {
         receivedAt: Date,
         isUnread: Bool,
         unsubscribe: ListUnsubscribe?,
-        deliveredTo: String = ""
+        deliveredTo: String = "",
+        messageId: String = ""
     ) {
         self.uid = uid
         self.sender = sender
@@ -37,6 +41,7 @@ public struct EmailMessage: Hashable, Sendable, Identifiable {
         self.isUnread = isUnread
         self.unsubscribe = unsubscribe
         self.deliveredTo = deliveredTo
+        self.messageId = messageId
     }
 }
 

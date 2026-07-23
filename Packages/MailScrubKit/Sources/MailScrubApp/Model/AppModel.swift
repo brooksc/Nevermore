@@ -54,6 +54,8 @@ final class AppModel {
     struct Toast: Equatable { var message: String; var undo: UndoAction? }
     struct UndoAction: Equatable { let id = UUID(); var label: String }
     private(set) var toast: Toast?
+    /// Whether the current toast offers an undo (drives ⌘Z / the Undo menu item).
+    var canUndo: Bool { toast?.undo != nil }
     private var pendingUndo: (@MainActor () async -> Void)?
 
     init() {
@@ -131,6 +133,23 @@ final class AppModel {
         try Keychain.store(appPassword: appPassword, for: email)
         registry.add(email)
         accounts = registry.accounts()
+        await open(account: email)
+    }
+
+    /// Set by the UI to request the add-account sheet (a second account, while
+    /// one is already open). RootView presents onboarding in response.
+    var wantsToAddAccount = false
+
+    /// Switch the active account, tearing down the current session and opening
+    /// the other one (which may prompt re-auth if its Keychain item is missing).
+    func switchAccount(_ email: String) async {
+        guard email != currentAccount, accounts.contains(email) else { return }
+        stopBackgroundSync()
+        store = nil
+        backend = nil
+        groups = []
+        selection = []
+        currentAccount = email
         await open(account: email)
     }
 
@@ -487,10 +506,16 @@ final class AppModel {
         Task { await trash(pending.ids) }
     }
 
+    /// Undo is offered only up to this size — untrash searches the Trash folder
+    /// once per message, so a huge batch would be slow. Larger trashes rely on
+    /// Gmail's own 30-day Trash retention.
+    private static let maxUndoableTrash = 100
+
     func trash(_ ids: Set<GroupID>) async {
         guard let backend, let store else { return }
         let targets = groups.filter { ids.contains($0.id) }
-        let uids = targets.flatMap { $0.messages.map(\.uid) }
+        let messages = targets.flatMap(\.messages)
+        let uids = messages.map(\.uid)
         do {
             try await backend.trash(uids)
             try store.delete(uids: uids)
@@ -498,14 +523,35 @@ final class AppModel {
             selection.subtract(ids)
             let n = uids.count
             Log.app.event("trashed \(n) messages from \(targets.count) sender(s)")
-            // No in-app undo (untrashing Gmail by IMAP UID is unreliable), but
-            // Gmail keeps trashed mail recoverable for 30 days.
-            showToast(
-                "Trashed \(n) message\(n == 1 ? "" : "s") — recoverable in Gmail Trash for 30 days",
-                undoLabel: nil, undo: nil)
+
+            let restorable = messages.filter { !$0.messageId.isEmpty }
+            if n <= Self.maxUndoableTrash, !restorable.isEmpty {
+                showToast("Trashed \(n) message\(n == 1 ? "" : "s")", undoLabel: "Undo") {
+                    [weak self] in await self?.untrash(restorable)
+                }
+            } else {
+                showToast(
+                    "Trashed \(n) message\(n == 1 ? "" : "s") — recoverable in Gmail Trash for 30 days",
+                    undoLabel: nil, undo: nil)
+            }
         } catch {
             Log.app.problem("trash failed: \(friendly(error))")
             showToast("Trash failed: \(friendly(error))", undoLabel: nil, undo: nil)
+        }
+    }
+
+    /// Restore trashed messages: move them out of Gmail's Trash and re-insert
+    /// them locally so they reappear immediately.
+    private func untrash(_ messages: [EmailMessage]) async {
+        guard let backend, let store else { return }
+        do {
+            let restored = try await backend.untrash(messageIDs: messages.map(\.messageId))
+            try store.upsert(messages)
+            await reloadFromStore()
+            Log.app.event("undo trash: restored \(restored)/\(messages.count)")
+        } catch {
+            Log.app.problem("undo trash failed: \(friendly(error))")
+            showToast("Couldn't restore: \(friendly(error))", undoLabel: nil, undo: nil)
         }
     }
 

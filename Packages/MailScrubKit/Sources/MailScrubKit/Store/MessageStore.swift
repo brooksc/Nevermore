@@ -18,9 +18,12 @@ public final class MessageStore: Sendable {
         try Self.migrator.migrate(pool)
     }
 
-    /// In-memory store, for tests.
+    /// Ephemeral store for tests. Backed by a unique temp file (not `:memory:`,
+    /// which GRDB's DatabasePool can't use because WAL needs a real file).
     public static func inMemory() throws -> MessageStore {
-        try MessageStore(path: ":memory:")
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mailscrub-test-\(UUID().uuidString).sqlite").path
+        return try MessageStore(path: path)
     }
 
     // MARK: - Schema
@@ -79,6 +82,13 @@ public final class MessageStore: Sendable {
                 t.add(column: "senderDomain", .text).notNull().defaults(to: "")
             }
         }
+
+        // Message-ID, so a trashed message can be found again in Trash for undo.
+        m.registerMigration("v3-message-id") { db in
+            try db.alter(table: "message") { t in
+                t.add(column: "messageId", .text).notNull().defaults(to: "")
+            }
+        }
         return m
     }
 
@@ -93,8 +103,9 @@ public final class MessageStore: Sendable {
                     sql: """
                         INSERT INTO message
                           (uid, senderAddress, senderHost, senderName, subject, receivedAt,
-                           isUnread, unsubscribeRaw, unsubscribePost, deliveredTo, syncedAt)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           isUnread, unsubscribeRaw, unsubscribePost, deliveredTo, syncedAt,
+                           messageId)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(uid) DO UPDATE SET
                           isUnread = excluded.isUnread,
                           syncedAt = excluded.syncedAt,
@@ -102,7 +113,8 @@ public final class MessageStore: Sendable {
                           -- version rather than leaving them stale forever.
                           unsubscribeRaw = excluded.unsubscribeRaw,
                           unsubscribePost = excluded.unsubscribePost,
-                          deliveredTo = excluded.deliveredTo
+                          deliveredTo = excluded.deliveredTo,
+                          messageId = excluded.messageId
                         """,
                     arguments: [
                         Int(m.uid.value), m.sender.address, m.sender.host, m.sender.displayName,
@@ -113,7 +125,7 @@ public final class MessageStore: Sendable {
                         // exactly what ListUnsubscribe looks for when decoding.
                         m.unsubscribe?.supportsOneClick == true
                             ? "List-Unsubscribe=One-Click" : nil,
-                        m.deliveredTo, now,
+                        m.deliveredTo, now, m.messageId,
                     ])
             }
         }
@@ -172,7 +184,8 @@ public final class MessageStore: Sendable {
             unsubscribe: ListUnsubscribe(
                 header: raw.map { "<\($0)>" }, postHeader: row["unsubscribePost"]
             ),
-            deliveredTo: row["deliveredTo"] ?? ""
+            deliveredTo: row["deliveredTo"] ?? "",
+            messageId: row["messageId"] ?? ""
         )
     }
 

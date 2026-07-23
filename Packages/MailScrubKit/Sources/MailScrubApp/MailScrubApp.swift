@@ -59,13 +59,21 @@ struct RootView: View {
         MainWindowView(model: model)
             .preferredColorScheme(colorScheme)
             .sheet(isPresented: $showOnboarding) {
-                OnboardingSheet(model: model, reauthAccount: model.reauthAccount) {
+                // In add-account mode (a second account) there's no reauth target.
+                OnboardingSheet(
+                    model: model,
+                    reauthAccount: model.wantsToAddAccount ? nil : model.reauthAccount
+                ) {
                     showOnboarding = false
+                    model.wantsToAddAccount = false
                 }
                 .interactiveDismissDisabled(model.accounts.isEmpty)
             }
             .onChange(of: model.needsOnboarding, initial: true) { _, needs in
-                showOnboarding = needs
+                if needs { showOnboarding = true }
+            }
+            .onChange(of: model.wantsToAddAccount) { _, wants in
+                if wants { showOnboarding = true }
             }
             .alert("MailScrub uses your Keychain", isPresented: $showKeychainInfo) {
                 Button("Continue") {

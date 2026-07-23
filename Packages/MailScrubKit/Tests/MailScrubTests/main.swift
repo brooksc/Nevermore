@@ -392,4 +392,107 @@ Harness.suite("UnsubscribeEngine.looksLikeConfirmation") {
     }
 }
 
+// MARK: - MessageStore (in-memory integration)
+
+func makeMessage(
+    _ uid: UInt32, from: String, unsub: String? = "<https://ex.com/u>",
+    messageId: String = "", deliveredTo: String = ""
+) -> EmailMessage {
+    EmailMessage(
+        uid: MessageUID(uid),
+        sender: EmailSender(header: from),
+        subject: "s\(uid)",
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_000 + Double(uid)),
+        isUnread: true,
+        unsubscribe: ListUnsubscribe(header: unsub),
+        deliveredTo: deliveredTo,
+        messageId: messageId)
+}
+
+Harness.suite("MessageStore") {
+    Harness.test("upserts and reads back messages, preserving messageId") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([
+                makeMessage(1, from: "A <a@x.com>", messageId: "<m1@x.com>", deliveredTo: "me@x.com"),
+                makeMessage(2, from: "B <b@y.com>"),
+            ])
+            eq(try store.count(), 2)
+            let all = try store.allMessages()
+            eq(all.count, 2)
+            let m1 = all.first { $0.uid == MessageUID(1) }
+            eq(m1?.messageId, "<m1@x.com>")
+            eq(m1?.deliveredTo, "me@x.com")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("does not filter ignored senders out of allMessages") {
+        // Regression: ignored senders must remain in the model so the Ignored
+        // collection can show them.
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([makeMessage(1, from: "A <a@x.com>")])
+            try store.ignore(GroupID(kind: .domain, key: "x.com"))
+            eq(try store.allMessages().count, 1)
+            expect(try store.ignoredGroupKeys().contains("domain:x.com"), "key stored")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("delete removes messages") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([makeMessage(1, from: "A <a@x.com>"), makeMessage(2, from: "B <b@y.com>")])
+            try store.delete(uids: [MessageUID(1)])
+            eq(try store.count(), 1)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("records and reads unsubscribe history with metadata") {
+        do {
+            let store = try MessageStore.inMemory()
+            let id = GroupID(kind: .domain, key: "acme.com")
+            try store.recordUnsubscribe(
+                id, senderName: "Acme", senderEmail: "n@acme.com", senderDomain: "acme.com",
+                url: "https://acme.com/prefs", outcome: .confirmed)
+            let history = try store.unsubscribeHistory()
+            let record = history["domain:acme.com"]
+            eq(record?.senderName, "Acme")
+            eq(record?.url, "https://acme.com/prefs")
+            eq(record?.outcome, .confirmed)
+            try store.forgetUnsubscribe(id)
+            expect(try store.unsubscribeHistory().isEmpty, "forgotten")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("persists grouping rules") {
+        do {
+            let store = try MessageStore.inMemory()
+            store.setGroupingRules(["github.com": .split, "shop.com": .merge])
+            let rules = store.groupingRules()
+            eq(rules["github.com"], .split)
+            eq(rules["shop.com"], .merge)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("persists sync token round-trip") {
+        do {
+            let store = try MessageStore.inMemory()
+            expect(try store.syncToken() == nil, "no token initially")
+            let token = SyncToken(uidValidity: 42, highestUID: 100, lastSyncedAt: Date())
+            try store.setSyncToken(token)
+            eq(try store.syncToken()?.uidValidity, 42)
+            eq(try store.syncToken()?.highestUID, 100)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("string-set persistence round-trips") {
+        do {
+            let store = try MessageStore.inMemory()
+            eq(store.stringSet(forKey: "k").count, 0)
+            store.setStringSet(["a", "b"], forKey: "k")
+            eq(store.stringSet(forKey: "k"), Set(["a", "b"]))
+        } catch { expect(false, "threw: \(error)") }
+    }
+}
+
 exit(Harness.finish())
