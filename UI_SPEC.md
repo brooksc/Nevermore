@@ -1,4 +1,4 @@
-# MailScrub for macOS — UI Specification
+# Nevermore for macOS — UI Specification
 
 A brief for designing the interface. Written against Apple's macOS Human
 Interface Guidelines and the Tahoe (macOS 26) design system.
@@ -11,7 +11,7 @@ removed; the original is its own repo).
 
 ## 1. Product in one paragraph
 
-Gmail accumulates hundreds of newsletters. MailScrub syncs the *headers* of
+Gmail accumulates hundreds of newsletters. Nevermore syncs the *headers* of
 every message carrying a `List-Unsubscribe` header into a local database,
 groups them by sender, and lets you unsubscribe from or delete whole senders in
 bulk. It never downloads message bodies and never sends data anywhere except
@@ -54,7 +54,7 @@ only if users ask.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ ●●●  MailScrub          [search field]        ⟳  ⊘  🗑  ⋯   [inspector] │  toolbar
+│ ●●●  Nevermore          [search field]        ⟳  ⊘  🗑  ⋯   [inspector] │  toolbar
 ├────────────────┬──────────────────────────────────┬──────────────────────┤
 │ INBOX          │ Sender          Latest Subject   │  ┌────┐              │
 │  All Senders   │ ─────────────────────────────────│  │ 🅐 │ Acme News    │
@@ -238,8 +238,8 @@ system they read as a single control.
 
 Every feature must be reachable here. Items enable/disable based on selection.
 
-**MailScrub**
-`About MailScrub` · `Check for Updates…` · `Settings… ⌘,` · Services · Hide/Quit
+**Nevermore**
+`About Nevermore` · `Check for Updates…` · `Settings… ⌘,` · Services · Hide/Quit
 
 **File**
 `New Window ⌘N` · `Add Account…` · `Sync Now ⌘R` · `Full Resync…` ·
@@ -266,7 +266,7 @@ Enter Full Screen
 
 **Window** — standard, with tabbing.
 
-**Help** — `MailScrub Help`, `Privacy and Data Handling`, `Report an Issue…`.
+**Help** — `Nevermore Help`, `Privacy and Data Handling`, `Report an Issue…`.
 
 ### Shortcut summary
 
@@ -285,7 +285,7 @@ Never override standard shortcuts. `⌘⌫` for trash matches Finder.
 A sheet, shown automatically on first launch. Three steps, one sheet, no wizard
 chrome — the whole thing should fit in one view without scrolling.
 
-1. **Explain** — one short paragraph: MailScrub reads message headers only,
+1. **Explain** — one short paragraph: Nevermore reads message headers only,
    stores them on this Mac, and needs a Gmail app password.
 2. **Get the password** — numbered steps with a `Link` to
    `myaccount.google.com/apppasswords`, noting 2-Step Verification is required.
@@ -321,7 +321,7 @@ stay done — this is not transactional and the UI shouldn't imply it is.
 
 ### 9.4 Unsubscribe results
 
-Replaces the progress sheet when finished. This screen is where MailScrub is
+Replaces the progress sheet when finished. This screen is where Nevermore is
 honest about a hard truth: **an HTTP 200 does not prove an unsubscribe worked.**
 
 Group results into three lists:

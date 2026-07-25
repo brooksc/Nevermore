@@ -1,4 +1,4 @@
-# MailScrub for macOS — Build Plan
+# Nevermore for macOS — Build Plan
 
 Native Swift rewrite of the Python TUI (originally `py/`, since removed — the
 original lives in its own repo). Target: parity plus the things a TUI can't do.
@@ -59,12 +59,12 @@ Swift package with a thin app target. Keeps the domain logic testable without
 launching a UI, mirroring what the Python version got right.
 
 ```
-MailScrub.mac/
-├── MailScrub.xcodeproj
+Nevermore.mac/
+├── Nevermore.xcodeproj
 ├── App/                          # @main, windows, menu bar, Sparkle
-│   └── MailScrubApp.swift
+│   └── NevermoreApp.swift
 ├── Packages/
-│   └── MailScrubKit/             # everything below is plain Swift, no UI
+│   └── NevermoreKit/             # everything below is plain Swift, no UI
 │       ├── Sources/
 │       │   ├── Domain/           # value types + pure logic, zero I/O
 │       │   │   ├── EmailMessage.swift
@@ -88,7 +88,7 @@ MailScrub.mac/
 └── Sources/Probe/main.swift      # live-mailbox harness; replaced the Python spike
 ```
 
-`MailScrubKit` must not import SwiftUI. Enforced by a build-phase grep in CI.
+`NevermoreKit` must not import SwiftUI. Enforced by a build-phase grep in CI.
 
 ---
 
@@ -238,7 +238,7 @@ asserting group counts stay stable across refactors.
 Each milestone ends in something runnable and verifiable.
 
 **M0 — Skeleton (0.5 d)**
-Xcode project, `MailScrubKit` package, CI running `swift test`.
+Xcode project, `NevermoreKit` package, CI running `swift test`.
 *Verify:* `swift test` green on an empty suite; CI badge.
 
 **M1 — Connect and store (3 d)**
@@ -311,8 +311,8 @@ Carried forward from the code review so they don't get faithfully reproduced:
 
 **M0–M3 done and verified against the live mailbox** (2026-07-22).
 
-`Packages/MailScrubKit` builds under Swift 6 strict concurrency. 47 tests pass.
-The `mailscrub-probe` CLI performs a full discovery, incremental sync, grouping,
+`Packages/NevermoreKit` builds under Swift 6 strict concurrency. 47 tests pass.
+The `nevermore-probe` CLI performs a full discovery, incremental sync, grouping,
 and alias inference end to end:
 
 | Measured | Result |
@@ -335,7 +335,7 @@ Three defects the build surfaced and fixed, each now covered by a test:
    string, so an address-keyed group was labelled `.domain`. It now returns a
    full `GroupID`.
 
-**Testing note:** tests run as an executable (`swift run mailscrub-tests`) with a
+**Testing note:** tests run as an executable (`swift run nevermore-tests`) with a
 small harness, not a `.testTarget`. SwiftPM builds test targets as `.xctest`
 bundles on macOS, which needs XCTest and `_TestingInterop` from a full Xcode
 install; neither is in Command Line Tools. Convert to swift-testing at M5, when
