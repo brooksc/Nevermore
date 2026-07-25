@@ -3,6 +3,11 @@
 A brief for designing the interface. Written against Apple's macOS Human
 Interface Guidelines and the Tahoe (macOS 26) design system.
 
+> **This is a design-time snapshot and has drifted from the shipped UI** — the
+> app now supports any IMAP provider (so "Gmail" here often means "your mail
+> provider"), and some details changed during implementation. For current state
+> see [README.md](README.md); the source is authoritative.
+
 Companion document: [PLAN.md](PLAN.md) for architecture. The Python TUI
 predecessor whose functionality this must match or beat lived in `py/` (since
 removed; the original is its own repo).

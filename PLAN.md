@@ -3,7 +3,13 @@
 Native Swift rewrite of the Python TUI (originally `py/`, since removed — the
 original lives in its own repo). Target: parity plus the things a TUI can't do.
 
-Status: planning. Nothing built yet. All numbers below come from the original
+> **This is a design-time snapshot, kept for the rationale behind the
+> decisions below. It has drifted from the shipped code** — the app was since
+> built, gained multi-provider support, and was renamed from MailScrub to
+> Nevermore. For current state see [README.md](README.md); the source is
+> authoritative.
+
+Status at time of writing: planning. All numbers below come from the original
 Python IMAP spike (`spike/imap_probe.py`, since removed — superseded by the
 Swift `Probe` target) run against a real 132,883-message mailbox on 2026-07-22.
 
@@ -24,7 +30,9 @@ Swift `Probe` target) run against a real 132,883-message mailbox on 2026-07-22.
 - No Gmail API backend in v1. The `MailBackend` protocol leaves room; adding it
   later means an iOS-type OAuth client (no secret is issued for that client
   type), `gmail.modify` scope, and a verification project. Out of scope now.
-- No multi-provider support. Gmail-only, like the original.
+- ~~No multi-provider support. Gmail-only, like the original.~~ *Superseded:
+  the app now supports any IMAP provider, with folders discovered via
+  SPECIAL-USE rather than hard-coded Gmail names.*
 - No message bodies. Headers only, same privacy posture as the Python app.
 
 ---
