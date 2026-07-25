@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import MailScrubKit
 import Observation
@@ -86,7 +87,7 @@ final class AppModel {
             syncState = .failed("Could not open local database: \(error.localizedDescription)")
             return
         }
-        backend = IMAPBackend(address: account, appPassword: password)
+        backend = makeBackend(for: account, password: password)
         currentAccount = account
         Log.app.event("opened account \(account)")
         await reloadFromStore()
@@ -123,12 +124,54 @@ final class AppModel {
 
     // MARK: - Onboarding
 
+    /// The provider id recorded for an account, if any (used by re-auth).
+    func storedProviderID(for account: String) -> String? {
+        registry.providerID(for: account)
+    }
+
+    /// The active account's mail provider (used for provider-aware UI copy and
+    /// "open in webmail" links). Falls back to Gmail when no account is open.
+    var currentProvider: MailProvider {
+        guard let currentAccount else { return .gmail }
+        return MailProvider.resolved(
+            forEmail: currentAccount, storedID: registry.providerID(for: currentAccount))
+    }
+
+    /// Open the given sender's messages in the provider's webmail, if it has one.
+    func openInWebmail(senderAddress address: String) {
+        guard let url = currentProvider.webSearchURL(fromSender: address) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Whether the current provider has a webmail search (drives the menu item).
+    var canOpenInWebmail: Bool {
+        currentProvider.webSearchURL(fromSender: "x@x") != nil
+    }
+
+    /// Open every selected sender in the provider's webmail.
+    func openSelectionInWebmail() {
+        for id in selection {
+            guard let address = group(for: id)?.latest?.sender.address else { continue }
+            openInWebmail(senderAddress: address)
+        }
+    }
+
+    /// Build the IMAP backend for an account, using its stored provider (or the
+    /// domain-detected one, falling back to Gmail).
+    private func makeBackend(for email: String, password: String, provider: MailProvider? = nil) -> IMAPBackend {
+        let resolved = provider
+            ?? MailProvider.resolved(forEmail: email, storedID: registry.providerID(for: email))
+        return IMAPBackend(
+            address: email, appPassword: password,
+            config: IMAPBackend.Config(provider: resolved))
+    }
+
     /// Validate credentials by authenticating, then persist and open. Retries a
-    /// couple of times on transient failures (Gmail throttling / flaky network)
+    /// couple of times on transient failures (server throttling / flaky network)
     /// so a bad moment doesn't look like a wrong password; a genuine auth failure
     /// is reported immediately.
-    func addAccount(email: String, appPassword: String) async throws {
-        let candidate = IMAPBackend(address: email, appPassword: appPassword)
+    func addAccount(email: String, appPassword: String, provider: MailProvider) async throws {
+        let candidate = makeBackend(for: email, password: appPassword, provider: provider)
         defer { Task { await candidate.disconnect() } }
 
         var lastError: Error?
@@ -149,6 +192,7 @@ final class AppModel {
 
         try Keychain.store(appPassword: appPassword, for: email)
         registry.add(email)
+        registry.setProviderID(provider.id, for: email)
         accounts = registry.accounts()
         await open(account: email)
     }
@@ -247,7 +291,7 @@ final class AppModel {
     func sync() async {
         guard let backend, let store else { return }
 
-        // A cached IMAP connection that has errored (Gmail throttling, a dropped
+        // A cached IMAP connection that has errored (server throttling, a dropped
         // socket, a mid-stream server error) stays poisoned and keeps failing.
         // Retry a couple of times, dropping the connection between attempts so
         // the next one reconnects fresh.
@@ -292,7 +336,7 @@ final class AppModel {
                     return
                 }
                 Log.sync.event("sync attempt \(attempt) failed (\(friendly(error))); reconnecting")
-                // Exponential backoff gives Gmail's rate limiter room to recover.
+                // Exponential backoff gives the server's rate limiter room to recover.
                 try? await Task.sleep(for: .seconds(Double(attempt) * 2))
             }
         }
@@ -575,7 +619,7 @@ final class AppModel {
 
     /// Entry point for trashing from the UI: confirms first if the batch exceeds
     /// the Settings threshold, otherwise trashes immediately. Trashing is
-    /// recoverable from Gmail's Trash for 30 days, so small batches don't prompt.
+    /// recoverable from the provider's Trash, so small batches don't prompt.
     func requestTrash(_ ids: Set<GroupID>) {
         let targets = groups.filter { ids.contains($0.id) }
         let count = targets.reduce(0) { $0 + $1.messages.count }
@@ -594,7 +638,7 @@ final class AppModel {
 
     /// Undo is offered only up to this size — untrash searches the Trash folder
     /// once per message, so a huge batch would be slow. Larger trashes rely on
-    /// Gmail's own 30-day Trash retention.
+    /// the provider's own Trash retention.
     private static let maxUndoableTrash = 100
 
     func trash(_ ids: Set<GroupID>) async {
@@ -617,7 +661,7 @@ final class AppModel {
                 }
             } else {
                 showToast(
-                    "Trashed \(n) message\(n == 1 ? "" : "s") — recoverable in Gmail Trash for 30 days",
+                    "Trashed \(n) message\(n == 1 ? "" : "s") — recoverable from your Trash folder",
                     undoLabel: nil, undo: nil)
             }
         } catch {
@@ -626,8 +670,8 @@ final class AppModel {
         }
     }
 
-    /// Restore trashed messages: move them out of Gmail's Trash and re-insert
-    /// them locally so they reappear immediately.
+    /// Restore trashed messages: move them out of the provider's Trash and
+    /// re-insert them locally so they reappear immediately.
     private func untrash(_ messages: [EmailMessage]) async {
         guard let backend, let store else { return }
         do {
@@ -761,10 +805,10 @@ final class AppModel {
         guard let group = self.group(for: id), let source = group.unsubscribeSource else {
             return nil
         }
-        // Prefer the published web link; fall back to a Gmail search so "manual"
-        // always has somewhere to go.
+        // Prefer the published web link; fall back to the provider's webmail
+        // search so "manual" always has somewhere to go.
         let url = source.unsubscribe?.webTargets.first
-            ?? URL(string: "https://mail.google.com/mail/u/0/#search/from:\(source.sender.address)")
+            ?? currentProvider.webSearchURL(fromSender: source.sender.address)
         guard let url else { return nil }
         return ManualUnsubscribe(
             id: id,

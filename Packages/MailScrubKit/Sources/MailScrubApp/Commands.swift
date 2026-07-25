@@ -54,6 +54,13 @@ struct AppCommands: Commands {
             Button("Move Messages to Trash…") { model.requestTrash(model.selection) }
                 .keyboardShortcut(.delete, modifiers: .command)
                 .disabled(model.selection.isEmpty)
+            if model.canOpenInWebmail {
+                Button("View in \(model.currentProvider.displayName)") {
+                    model.openSelectionInWebmail()
+                }
+                .keyboardShortcut("g")
+                .disabled(model.selection.isEmpty)
+            }
             Divider()
             Button("Forget Unsubscribe Record") { model.forget(model.selection) }
                 .disabled(model.selection.isEmpty)

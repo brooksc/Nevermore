@@ -33,7 +33,10 @@ public enum Keychain {
 
         var attributes = query
         attributes[kSecValueData as String] = data
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
+        // ...ThisDeviceOnly keeps the app password out of keychain migration and
+        // unencrypted backups, so a full mail credential can't be restored onto
+        // another machine from a Time Machine image or Migration Assistant.
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
 
         let status = SecItemAdd(attributes as CFDictionary, nil)
         guard status == errSecSuccess else { throw KeychainError.unexpectedStatus(status) }

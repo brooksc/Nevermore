@@ -26,7 +26,7 @@ struct KeyboardShortcutsView: View {
                 Shortcut(keys: "i  /  ⌘I", action: "Ignore"),
                 Shortcut(keys: "d  /  ⌘⌫", action: "Trash messages"),
                 Shortcut(keys: "⌘Z", action: "Undo the last ignore or trash"),
-                Shortcut(keys: "⌘G", action: "View in Gmail"),
+                Shortcut(keys: "⌘G", action: "View in webmail"),
             ]
         ),
         (

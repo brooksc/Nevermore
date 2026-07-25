@@ -1,11 +1,11 @@
 # MailScrub for macOS — Build Plan
 
-Native Swift rewrite of the Python TUI ([`py/`](py/)). Target: parity plus the
-things a TUI can't do.
+Native Swift rewrite of the Python TUI (originally `py/`, since removed — the
+original lives in its own repo). Target: parity plus the things a TUI can't do.
 
-Status: planning. Nothing built yet. All numbers below come from
-[`spike/imap_probe.py`](spike/imap_probe.py) run against a real 132,883-message
-mailbox on 2026-07-22.
+Status: planning. Nothing built yet. All numbers below come from the original
+Python IMAP spike (`spike/imap_probe.py`, since removed — superseded by the
+Swift `Probe` target) run against a real 132,883-message mailbox on 2026-07-22.
 
 ---
 
@@ -85,7 +85,7 @@ MailScrub.mac/
 │       │   └── Credentials/
 │       │       └── Keychain.swift
 │       └── Tests/
-└── spike/imap_probe.py           # kept; it's the regression test for IMAP assumptions
+└── Sources/Probe/main.swift      # live-mailbox harness; replaced the Python spike
 ```
 
 `MailScrubKit` must not import SwiftUI. Enforced by a build-phase grep in CI.

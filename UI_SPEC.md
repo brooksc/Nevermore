@@ -3,8 +3,9 @@
 A brief for designing the interface. Written against Apple's macOS Human
 Interface Guidelines and the Tahoe (macOS 26) design system.
 
-Companion documents: [PLAN.md](PLAN.md) for architecture, [py/](py/) for the
-Python TUI predecessor whose functionality this must match or beat.
+Companion document: [PLAN.md](PLAN.md) for architecture. The Python TUI
+predecessor whose functionality this must match or beat lived in `py/` (since
+removed; the original is its own repo).
 
 ---
 

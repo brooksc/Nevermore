@@ -15,8 +15,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 STACK:
                 \(exception.callStackSymbols.joined(separator: "\n"))
                 """
-            let path = NSString(string: "~/mailscrub-exception.log").expandingTildeInPath
-            try? text.write(toFile: path, atomically: true, encoding: .utf8)
+            // Application Support resolves inside the App Sandbox container, so
+            // this is writable in a MAS build (unlike a real ~/ path would be).
+            if let dir = try? FileManager.default.url(
+                for: .applicationSupportDirectory, in: .userDomainMask,
+                appropriateFor: nil, create: true
+            ).appendingPathComponent("MailScrub", isDirectory: true) {
+                try? FileManager.default.createDirectory(
+                    at: dir, withIntermediateDirectories: true)
+                try? text.write(
+                    to: dir.appendingPathComponent("last-exception.log"),
+                    atomically: true, encoding: .utf8)
+            }
             FileHandle.standardError.write(Data(text.utf8))
         }
         NSApp.setActivationPolicy(.regular)

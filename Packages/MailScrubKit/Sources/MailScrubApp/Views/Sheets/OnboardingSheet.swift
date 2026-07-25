@@ -1,7 +1,10 @@
 import SwiftUI
+import MailScrubKit
 
 /// Add-account sheet (design 1d): explain → get password → enter, with inline
-/// validation. One view, three states, no wizard chrome.
+/// validation. One view, three states, no wizard chrome. Provider-aware: the
+/// instructions and app-password link adapt to the detected mail provider, and
+/// unknown (custom) domains get a provider picker.
 struct OnboardingSheet: View {
     @Bindable var model: AppModel
     /// Non-nil when re-authenticating a saved account whose Keychain item became
@@ -11,12 +14,29 @@ struct OnboardingSheet: View {
 
     @State private var email = ""
     @State private var password = ""
+    @State private var manualProviderID = MailProvider.gmail.id
     @State private var phase: Phase = .entry
 
     enum Phase: Equatable {
         case entry
         case validating
         case failed(String)
+    }
+
+    /// The provider auto-detected from the typed domain, if any.
+    private var detectedProvider: MailProvider? {
+        email.contains("@") ? MailProvider.detect(forEmail: email) : nil
+    }
+
+    /// The provider we'll actually connect with: detected domain wins, else the
+    /// manually-picked one.
+    private var provider: MailProvider {
+        detectedProvider ?? MailProvider.byID(manualProviderID) ?? .gmail
+    }
+
+    /// Whether the user must pick a provider (an email with an unrecognized domain).
+    private var needsManualProvider: Bool {
+        email.contains("@") && detectedProvider == nil
     }
 
     var body: some View {
@@ -28,9 +48,9 @@ struct OnboardingSheet: View {
                     .foregroundStyle(Tokens.brandBlue)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(reauthAccount == nil
-                        ? "Add Your Gmail Account" : "Re-enter Your App Password")
+                        ? "Add Your Mail Account" : "Re-enter Your App Password")
                         .font(.title2.weight(.semibold))
-                    Text("MailScrub reads message headers only — never bodies — and stores them on this Mac. It signs in with a Gmail app password.")
+                    Text("MailScrub reads message headers only — never bodies — and stores them on this Mac. It signs in with an app-specific password over IMAP.")
                         .font(.callout).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -50,12 +70,15 @@ struct OnboardingSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                step(1, "Turn on 2-Step Verification for your Google account.")
+                step(1, "Turn on two-factor authentication for your \(provider.displayName) account.")
                 step(2) {
-                    HStack(spacing: 4) {
-                        Text("Create an app password at")
-                        Link("myaccount.google.com/apppasswords",
-                            destination: URL(string: "https://myaccount.google.com/apppasswords")!)
+                    if let url = provider.appPasswordURL {
+                        HStack(spacing: 4) {
+                            Text("Create an app password at")
+                            Link(url.host ?? url.absoluteString, destination: url)
+                        }
+                    } else {
+                        Text("Create an app-specific password in your \(provider.displayName) security settings.")
                     }
                 }
                 step(3, "Enter it below. Spaces are fine — we'll handle them.")
@@ -63,9 +86,17 @@ struct OnboardingSheet: View {
             .font(.callout)
 
             Form {
-                TextField("Email", text: $email, prompt: Text("you@gmail.com"))
+                TextField("Email", text: $email, prompt: Text("you@example.com"))
                     .textContentType(.username)
                     .disabled(reauthAccount != nil)  // fixed when re-authenticating
+                if needsManualProvider {
+                    Picker("Provider", selection: $manualProviderID) {
+                        ForEach(MailProvider.known) { p in
+                            Text(p.displayName).tag(p.id)
+                        }
+                    }
+                    .help("We didn't recognize this domain. Choose the service that hosts your mail (e.g. a custom domain on Google Workspace uses Gmail).")
+                }
                 SecureField("App password", text: $password,
                     prompt: Text("xxxx xxxx xxxx xxxx"))
             }
@@ -80,7 +111,7 @@ struct OnboardingSheet: View {
             if case .validating = phase {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
-                    Text("Verifying with Gmail…").foregroundStyle(.secondary)
+                    Text("Verifying with \(provider.displayName)…").foregroundStyle(.secondary)
                 }
                 .font(.callout)
             }
@@ -113,8 +144,17 @@ struct OnboardingSheet: View {
 
     private func submit() async {
         phase = .validating
+        // Re-auth keeps the account's existing provider; new accounts use the
+        // detected/picked one.
+        let chosen: MailProvider = {
+            if let account = reauthAccount {
+                return MailProvider.resolved(
+                    forEmail: account, storedID: model.storedProviderID(for: account))
+            }
+            return provider
+        }()
         do {
-            try await model.addAccount(email: email, appPassword: password)
+            try await model.addAccount(email: email, appPassword: password, provider: chosen)
             onDone()
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription

@@ -18,7 +18,7 @@ struct KeychainInfoSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Your password stays in the Keychain")
                         .font(.title3.weight(.semibold))
-                    Text("MailScrub saves your Gmail app password to the macOS Keychain so you don't have to re-enter it. macOS may ask you to allow access — that's expected. Choose \u{201C}Always Allow\u{201D} so you're not asked again.")
+                    Text("MailScrub saves your app password to the macOS Keychain so you don't have to re-enter it. macOS may ask you to allow access — that's expected. Choose \u{201C}Always Allow\u{201D} so you're not asked again.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

@@ -81,7 +81,12 @@ public struct ListUnsubscribe: Hashable, Sendable {
     private static func parseMailto(_ uri: String) -> MailtoTarget? {
         guard let comps = URLComponents(string: uri) else { return nil }
         let address = comps.path.trimmingCharacters(in: .whitespaces)
-        guard address.contains("@") else { return nil }
+        // The recipient is attacker-authored (it's the sender's List-Unsubscribe
+        // header) and drives an email sent from the user's own account. Require
+        // a single, syntactically well-formed address: this rejects control
+        // characters (CRLF header injection) and comma/whitespace-separated lists
+        // (smuggling extra recipients) before either reaches SMTP.
+        guard Self.isSingleWellFormedAddress(address) else { return nil }
         let items = comps.queryItems ?? []
         func value(_ name: String) -> String? {
             items.first { $0.name.lowercased() == name }?.value
@@ -91,5 +96,20 @@ public struct ListUnsubscribe: Hashable, Sendable {
             subject: value("subject") ?? "unsubscribe",
             body: value("body") ?? "Please unsubscribe me from this mailing list."
         )
+    }
+
+    /// A conservative check that `address` is one ordinary email address:
+    /// exactly one `@`, non-empty local and domain parts, a dot in the domain,
+    /// and no control characters, whitespace, commas, or angle brackets that
+    /// could split it into several recipients or inject a header.
+    public static func isSingleWellFormedAddress(_ address: String) -> Bool {
+        guard !address.isEmpty, address.count <= 254 else { return false }
+        let parts = address.split(separator: "@", omittingEmptySubsequences: false)
+        guard parts.count == 2, let local = parts.first, let domain = parts.last,
+            !local.isEmpty, !domain.isEmpty, domain.contains(".")
+        else { return false }
+        let forbidden = CharacterSet(charactersIn: " ,;<>\"\\").union(.controlCharacters)
+            .union(.whitespacesAndNewlines)
+        return address.rangeOfCharacter(from: forbidden) == nil
     }
 }

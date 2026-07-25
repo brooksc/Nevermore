@@ -1,7 +1,7 @@
 import SwiftUI
 import MailScrubKit
 
-/// Ignored senders (design 1k). A local-only list; nothing is touched in Gmail.
+/// Ignored senders (design 1k). A local-only list; nothing is touched on the server.
 struct IgnoredCollectionView: View {
     @Bindable var model: AppModel
 
@@ -10,10 +10,10 @@ struct IgnoredCollectionView: View {
             EmptyStateView(
                 systemImage: "eye.slash",
                 title: "No ignored senders",
-                message: "Senders you ignore are hidden here — never touched in Gmail.")
+                message: "Senders you ignore are hidden here — never touched on the server.")
         } else {
             VStack(spacing: 0) {
-                banner("Hidden from your lists on this Mac only — nothing is changed in Gmail. Right-click to unignore (⇧⌘I).")
+                banner("Hidden from your lists on this Mac only — nothing is changed on the server. Right-click to unignore (⇧⌘I).")
                 List {
                     ForEach(model.rows) { row in
                         HStack(spacing: 12) {

@@ -56,14 +56,16 @@ struct HistoryView: View {
                 .help("Open the sender's preferences page — where you can re-subscribe if this was a mistake:\n\(urlString)")
                 .controlSize(.small)
             }
-            Button {
-                openGmail(record.senderEmail)
-            } label: {
-                Label("Gmail", systemImage: "magnifyingglass")
+            if model.canOpenInWebmail {
+                Button {
+                    model.openInWebmail(senderAddress: record.senderEmail)
+                } label: {
+                    Label(model.currentProvider.displayName, systemImage: "magnifyingglass")
+                }
+                .help("Find this sender in \(model.currentProvider.displayName)")
+                .controlSize(.small)
+                .disabled(record.senderEmail.isEmpty)
             }
-            .help("Find this sender in Gmail")
-            .controlSize(.small)
-            .disabled(record.senderEmail.isEmpty)
 
             Button("Forget") { model.forgetRecord(record.groupKey) }
                 .help("Remove this record from history")
@@ -79,7 +81,11 @@ struct HistoryView: View {
                 }
             }
             if !record.senderEmail.isEmpty {
-                Button("View in Gmail") { openGmail(record.senderEmail) }
+                if model.canOpenInWebmail {
+                    Button("View in \(model.currentProvider.displayName)") {
+                        model.openInWebmail(senderAddress: record.senderEmail)
+                    }
+                }
                 Button("Copy Sender Address") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(record.senderEmail, forType: .string)
@@ -106,13 +112,6 @@ struct HistoryView: View {
         if !record.senderName.isEmpty { return record.senderName }
         if !record.senderEmail.isEmpty { return record.senderEmail }
         return GroupID(storageKey: record.groupKey)?.key ?? record.groupKey
-    }
-
-    private func openGmail(_ email: String) {
-        guard !email.isEmpty,
-            let url = URL(string: "https://mail.google.com/mail/u/0/#search/from:\(email)")
-        else { return }
-        NSWorkspace.shared.open(url)
     }
 
     private func relativeDate(_ date: Date) -> String {

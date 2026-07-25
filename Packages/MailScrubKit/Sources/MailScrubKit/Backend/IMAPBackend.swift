@@ -1,25 +1,45 @@
 import Foundation
 import SwiftMail
 
-/// Gmail over IMAP, authenticated with an app-specific password.
+/// Any provider over IMAP, authenticated with an app-specific password.
 ///
-/// Chosen over the Gmail API because an app password is a *user credential*
-/// rather than an OAuth grant: no Cloud project, no consent screen, no
-/// verification, no annual security assessment, no 100-user cap, and no 7-day
-/// refresh-token expiry. See PLAN.md §1.
+/// Plain IMAP + an app password was chosen over provider-specific APIs (e.g. the
+/// Gmail API) because an app password is a *user credential* rather than an OAuth
+/// grant: no Cloud project, no consent screen, no verification, no annual
+/// security assessment, no user cap, and no refresh-token expiry — and the same
+/// code works across Gmail, iCloud, Yahoo, Fastmail, and more. See PLAN.md §1.
 public actor IMAPBackend: MailBackend {
+    /// Connection endpoints. Folder names are discovered per-account at connect
+    /// (SPECIAL-USE), not hard-coded, so this works on any IMAP provider.
     public struct Config: Sendable {
-        public var imapHost = "imap.gmail.com"
-        public var imapPort = 993
-        public var smtpHost = "smtp.gmail.com"
-        public var smtpPort = 587
-        /// Gmail's All Mail excludes Trash and Spam, so those exclusions come free.
-        public var mailbox = "[Gmail]/All Mail"
-        public var sentMailbox = "[Gmail]/Sent Mail"
-        public var trashMailbox = "[Gmail]/Trash"
-        public var inboxMailbox = "INBOX"
+        public var imapHost: String
+        public var imapPort: Int
+        public var smtpHost: String
+        public var smtpPort: Int
+        /// Fallback to INBOX rather than an all-mail folder for the discovery
+        /// scope. Providers without a virtual all-mail folder (i.e. not Gmail)
+        /// have their newsletters in the inbox.
+        public let inboxMailbox = "INBOX"
 
-        public init() {}
+        public init(imapHost: String, imapPort: Int = 993, smtpHost: String, smtpPort: Int = 587) {
+            self.imapHost = imapHost
+            self.imapPort = imapPort
+            self.smtpHost = smtpHost
+            self.smtpPort = smtpPort
+        }
+
+        public init(provider: MailProvider) {
+            self.init(
+                imapHost: provider.imapHost, imapPort: provider.imapPort,
+                smtpHost: provider.smtpHost, smtpPort: provider.smtpPort)
+        }
+    }
+
+    /// Folders resolved at connect: the scope to search, plus Sent and Trash.
+    struct Folders {
+        var searchScope: String  // an "all mail" folder if the provider has one, else INBOX
+        var sent: String
+        var trash: String
     }
 
     /// How many UIDs to fetch per FETCH command.
@@ -33,13 +53,20 @@ public actor IMAPBackend: MailBackend {
     private let config: Config
 
     private var server: IMAPServer?
+    private var folders: Folders?
     private var cachedSendAs: [String]?
 
-    public init(address: String, appPassword: String, config: Config = Config()) {
+    public init(address: String, appPassword: String, config: Config) {
         self.primaryAddress = address
-        // Gmail displays app passwords in groups of four; users paste them verbatim.
+        // Providers show app passwords in groups of four; users paste verbatim.
         self.password = appPassword.replacingOccurrences(of: " ", with: "")
         self.config = config
+    }
+
+    /// Convenience: detect the provider from the address, falling back to Gmail.
+    public init(address: String, appPassword: String) {
+        let provider = MailProvider.detect(forEmail: address) ?? .gmail
+        self.init(address: address, appPassword: appPassword, config: Config(provider: provider))
     }
 
     // MARK: - Connection
@@ -66,6 +93,47 @@ public actor IMAPBackend: MailBackend {
         return s
     }
 
+    /// Resolve the search-scope / Sent / Trash folders for this account. Sent and
+    /// Trash come from the IMAP SPECIAL-USE extension (or name heuristics); the
+    /// search scope is an all-mail folder when the provider has one (Gmail), else
+    /// the inbox.
+    private func resolvedFolders(on server: IMAPServer) async throws -> Folders {
+        if let folders { return folders }
+
+        // SPECIAL-USE gives Sent/Trash reliably (falls back to name heuristics
+        // internally). It does NOT surface Gmail's All Mail — the library models
+        // no `\All` attribute — so All Mail is found by scanning every mailbox.
+        let special = (try? await server.listSpecialUseMailboxes()) ?? []
+        let allMailboxes = (try? await server.listMailboxes()) ?? special
+
+        func named(in list: [String], _ candidates: [String]) -> String? {
+            list.first { name in
+                candidates.contains { name.caseInsensitiveCompare($0) == .orderedSame }
+            }
+        }
+        let allNames = allMailboxes.map(\.name)
+
+        let sent =
+            special.first { $0.attributes.contains(.sent) }?.name
+            ?? named(in: allNames, ["Sent", "Sent Mail", "Sent Items", "Sent Messages", "[Gmail]/Sent Mail"])
+            ?? "Sent"
+        let trash =
+            special.first { $0.attributes.contains(.trash) }?.name
+            ?? named(in: allNames, ["Trash", "Deleted Messages", "Deleted Items", "Bin", "[Gmail]/Trash"])
+            ?? "Trash"
+        // Gmail's virtual All Mail (every message regardless of label, minus
+        // Trash/Spam) is the ideal discovery scope. Providers without one have
+        // their newsletters in the inbox, so fall back to INBOX.
+        let searchScope =
+            allNames.first { $0.lowercased().hasSuffix("all mail") } ?? config.inboxMailbox
+
+        let resolved = Folders(searchScope: searchScope, sent: sent, trash: trash)
+        Log.backend.event(
+            "resolved folders — scope: \(searchScope), sent: \(sent), trash: \(trash)")
+        folders = resolved
+        return resolved
+    }
+
     public func disconnect() async {
         try? await server?.disconnect()
         server = nil
@@ -86,10 +154,11 @@ public actor IMAPBackend: MailBackend {
         progress: @Sendable @escaping (SyncPhase) -> Void
     ) async throws -> (messages: [EmailMessage], token: SyncToken) {
         let server = try await connected()
-        let selection = try await select(config.mailbox, on: server)
+        let folders = try await resolvedFolders(on: server)
+        let selection = try await select(folders.searchScope, on: server)
 
         // Pure RFC 3501. An empty HEADER value matches any message that *has*
-        // the header, so this finds every newsletter regardless of which Gmail
+        // the header, so this finds every newsletter regardless of which mailbox
         // category it landed in — no X-GM-RAW, and so no dependency fork.
         //
         // Run it in date windows rather than one command: an unbounded search
@@ -123,10 +192,11 @@ public actor IMAPBackend: MailBackend {
         )
     }
 
-    /// One-year windows from Gmail's launch to tomorrow, newest first.
+    /// One-year windows from 2004 (roughly the dawn of modern webmail) to
+    /// tomorrow, newest first.
     ///
     /// Newest first so the senders a user actually cares about populate the
-    /// table before the archaeology finishes.
+    /// table before the archaeology finishes. Empty early windows are cheap.
     static func dateWindows(now: Date = Date()) -> [(start: Date, end: Date)] {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
@@ -182,7 +252,8 @@ public actor IMAPBackend: MailBackend {
         guard let token else { return try await discoverAll(progress: progress) }
 
         let server = try await connected()
-        let selection = try await select(config.mailbox, on: server)
+        let folders = try await resolvedFolders(on: server)
+        let selection = try await select(folders.searchScope, on: server)
 
         // UIDVALIDITY changing means the server's UID space was reset and every
         // stored UID is meaningless. Only a full rediscovery is correct.
@@ -236,9 +307,11 @@ public actor IMAPBackend: MailBackend {
         var result: [EmailMessage] = []
         result.reserveCapacity(total)
 
-        // `Delivered-To` is set by Gmail's delivery layer, so it survives
-        // forwarding in a way the sender-controlled `To` does not — it is what
-        // makes send-as alias detection work.
+        // `Delivered-To` is set by the receiving mail server (Gmail and many
+        // other MTAs), so it survives forwarding in a way the sender-controlled
+        // `To` does not — it is what makes send-as alias detection work. Absent
+        // on providers that don't set it, in which case the feature degrades to
+        // the `To` header.
         // Message-ID is fetched explicitly so trash-undo can find a message again
         // in the Trash folder (IMAP UIDs differ per folder).
         let headerFields =
@@ -305,13 +378,14 @@ public actor IMAPBackend: MailBackend {
     public func trash(_ uids: [MessageUID]) async throws {
         guard !uids.isEmpty else { return }
         let server = try await connected()
-        _ = try await select(config.mailbox, on: server)
-        // MOVE is advertised by Gmail post-login, so this is atomic — no
-        // COPY/STORE \Deleted/EXPUNGE dance.
+        let folders = try await resolvedFolders(on: server)
+        _ = try await select(folders.searchScope, on: server)
+        // MOVE is advertised by most IMAP servers post-login, so this is atomic
+        // — no COPY/STORE \Deleted/EXPUNGE dance.
         try await server.move(
-            messages: UIDSet(uids.map { UID($0.value) }), to: config.trashMailbox
+            messages: UIDSet(uids.map { UID($0.value) }), to: folders.trash
         )
-        Log.backend.event("trashed \(uids.count) messages to \(config.trashMailbox)")
+        Log.backend.event("trashed \(uids.count) messages to \(folders.trash)")
     }
 
     /// Restore messages from Trash by their RFC Message-IDs. Returns how many
@@ -322,7 +396,8 @@ public actor IMAPBackend: MailBackend {
         let ids = messageIDs.filter { !$0.isEmpty }
         guard !ids.isEmpty else { return 0 }
         let server = try await connected()
-        _ = try await select(config.trashMailbox, on: server)
+        let folders = try await resolvedFolders(on: server)
+        _ = try await select(folders.trash, on: server)
 
         var restored = 0
         for messageID in ids {
@@ -338,7 +413,12 @@ public actor IMAPBackend: MailBackend {
 
     public func sendMail(to: String, subject: String, body: String, from: String?) async throws {
         let sender = from ?? primaryAddress
-        let smtp = SMTPServer(host: config.smtpHost, port: config.smtpPort)
+        // Require STARTTLS rather than SwiftMail's port-inferred `.automatic`
+        // (which on 587 is startTLS-*if-available*): a network attacker who
+        // strips the STARTTLS capability from the server's EHLO must not be able
+        // to downgrade the session so the app password is sent in cleartext.
+        let smtp = SMTPServer(
+            host: config.smtpHost, port: config.smtpPort, transportSecurity: .startTLS)
         do {
             try await smtp.connect()
             try await smtp.login(username: primaryAddress, password: password)
@@ -358,16 +438,22 @@ public actor IMAPBackend: MailBackend {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss Z"
 
-        // Subject and body are encoded as base64 UTF-8 rather than emitted raw:
-        // unsubscribe mailto: URIs routinely carry non-ASCII.
+        // `from`, `to`, and `subject` originate from an attacker-controlled
+        // `mailto:` List-Unsubscribe URI, whose subject/address URLComponents
+        // percent-decodes — so `%0D%0A` becomes a real CRLF. Left raw, a CR/LF
+        // would terminate a header early and inject attacker-chosen headers (or
+        // a forged body) into mail sent from the user's own account. Strip all
+        // control characters from the address headers, and RFC 2047-encode the
+        // subject unconditionally so its bytes can never be read as structure.
+        // (The body is already base64-encoded below, so it cannot inject.)
+        let safeFrom = stripControlCharacters(from)
+        let safeTo = stripControlCharacters(to)
         let encodedSubject =
-            subject.allSatisfy(\.isASCII)
-            ? subject
-            : "=?UTF-8?B?\(Data(subject.utf8).base64EncodedString())?="
+            "=?UTF-8?B?\(Data(stripControlCharacters(subject).utf8).base64EncodedString())?="
 
         let headers = [
-            "From: \(from)",
-            "To: \(to)",
+            "From: \(safeFrom)",
+            "To: \(safeTo)",
             "Subject: \(encodedSubject)",
             "Date: \(formatter.string(from: Date()))",
             "MIME-Version: 1.0",
@@ -379,19 +465,27 @@ public actor IMAPBackend: MailBackend {
         return Data("\(headers)\r\n\r\n\(encodedBody)\r\n".utf8)
     }
 
+    /// Remove C0/C1 control characters (including CR and LF) and DEL from a
+    /// value destined for an email header, defeating header/body injection.
+    public static func stripControlCharacters(_ value: String) -> String {
+        String(String.UnicodeScalarView(
+            value.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7f && !($0.value >= 0x80 && $0.value <= 0x9f) }))
+    }
+
     // MARK: - Aliases
 
     /// Infer send-as addresses from Sent Mail.
     ///
-    /// The Gmail API exposes `users.settings.sendAs.list`; IMAP has no
-    /// equivalent, but the distinct `From` addresses on recently sent mail are a
-    /// good proxy. The probe recovered 5 real aliases this way.
+    /// Some providers expose alias APIs; IMAP has no equivalent, but the distinct
+    /// `From` addresses on recently sent mail are a good proxy. The probe
+    /// recovered 5 real aliases this way.
     public func sendAsAddresses() async throws -> [String] {
         if let cachedSendAs { return cachedSendAs }
 
         var found: Set<String> = [primaryAddress.lowercased()]
         if let server = try? await connected(),
-            let selection = try? await select(config.sentMailbox, on: server),
+            let folders = try? await resolvedFolders(on: server),
+            let selection = try? await select(folders.sent, on: server),
             selection.messageCount > 0
         {
             // Fetch the last 300 sent messages by *sequence number*. A `SEARCH

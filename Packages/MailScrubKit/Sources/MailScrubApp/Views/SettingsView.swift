@@ -1,3 +1,4 @@
+import OSLog
 import SwiftUI
 import MailScrubKit
 
@@ -43,7 +44,7 @@ struct SettingsView: View {
                 Stepper(
                     "Confirm when trashing more than \(trashThreshold) messages",
                     value: $trashThreshold, in: 50...5000, step: 50)
-                Text("Trashing is recoverable — messages go to Gmail's Trash and ⌘Z untrashes them.")
+                Text("Trashing is recoverable — messages go to your Trash folder and ⌘Z untrashes them.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -69,8 +70,9 @@ struct SettingsView: View {
                     }
                 }
             }
-            Link("Open Google App Passwords",
-                destination: URL(string: "https://myaccount.google.com/apppasswords")!)
+            if let url = model.currentProvider.appPasswordURL {
+                Link("Open \(model.currentProvider.displayName) App Passwords", destination: url)
+            }
         }
         .formStyle(.grouped)
     }
@@ -128,23 +130,28 @@ struct SettingsView: View {
     }
 
     /// Dump the last hour of MailScrub's unified log to a file and reveal it, so
-    /// the user can hand it over when something's wrong.
+    /// the user can hand it over when something's wrong. Uses OSLogStore rather
+    /// than spawning `/usr/bin/log`, which the App Sandbox forbids.
     private func exportDiagnostics() {
         let out = FileManager.default.temporaryDirectory
             .appendingPathComponent("MailScrub-diagnostics.log")
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/log")
-        task.arguments = [
-            "show", "--predicate", "subsystem == \"\(Log.subsystem)\"",
-            "--last", "1h", "--info", "--debug", "--style", "compact",
-        ]
-        let pipe = Pipe()
-        task.standardOutput = pipe
         do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            try data.write(to: out)
+            // .currentProcessIdentifier is the only scope a sandboxed app may
+            // read — exactly this app's own log entries.
+            let store = try OSLogStore(scope: .currentProcessIdentifier)
+            let since = store.position(date: Date().addingTimeInterval(-3600))
+            let entries = try store.getEntries(at: since)
+            var lines: [String] = []
+            let formatter = ISO8601DateFormatter()
+            for case let entry as OSLogEntryLog in entries
+            where entry.subsystem == Log.subsystem {
+                lines.append(
+                    "\(formatter.string(from: entry.date)) [\(entry.category)] \(entry.composedMessage)")
+            }
+            let text = lines.isEmpty
+                ? "No MailScrub log entries in the last hour."
+                : lines.joined(separator: "\n")
+            try text.write(to: out, atomically: true, encoding: .utf8)
             NSWorkspace.shared.activateFileViewerSelecting([out])
         } catch {
             Log.app.problem("export diagnostics failed: \(error.localizedDescription)")

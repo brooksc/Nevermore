@@ -93,7 +93,7 @@ enum UnsubscribeMethod {
         case .oneClick: "One-click unsubscribe available"
         case .webLink: "Unsubscribe by visiting a web page"
         case .email: "Unsubscribe by sending an email"
-        case .manual: "No unsubscribe link — opens Gmail search"
+        case .manual: "No unsubscribe link — opens a webmail search"
         }
     }
 
@@ -116,7 +116,7 @@ enum UnsubscribeMethod {
         case .email:
             "Sends an unsubscribe email to \(sender) on your behalf."
         case .manual:
-            "\(sender) published no unsubscribe link. Opens their mail in Gmail."
+            "\(sender) published no unsubscribe link. Opens their mail in your webmail."
         }
     }
 }

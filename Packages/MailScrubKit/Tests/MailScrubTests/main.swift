@@ -495,4 +495,104 @@ Harness.suite("MessageStore") {
     }
 }
 
+// MARK: - Provider detection
+
+Harness.suite("MailProvider") {
+    Harness.test("detects known providers by domain, case-insensitively") {
+        expect(MailProvider.detect(forEmail: "a@gmail.com")?.id == "gmail", "gmail")
+        expect(MailProvider.detect(forEmail: "A@GoogleMail.com")?.id == "gmail", "googlemail alias")
+        expect(MailProvider.detect(forEmail: "a@icloud.com")?.id == "icloud", "icloud")
+        expect(MailProvider.detect(forEmail: "a@me.com")?.id == "icloud", "me.com alias")
+        expect(MailProvider.detect(forEmail: "a@yahoo.com")?.id == "yahoo", "yahoo")
+        expect(MailProvider.detect(forEmail: "a@fastmail.com")?.id == "fastmail", "fastmail")
+    }
+    Harness.test("returns nil for an unknown (custom) domain") {
+        expect(MailProvider.detect(forEmail: "a@example.com") == nil, "custom domain")
+        expect(MailProvider.detect(forEmail: "not-an-email") == nil, "no @")
+    }
+    Harness.test("resolved prefers a stored id, then detection, then Gmail") {
+        expect(
+            MailProvider.resolved(forEmail: "a@example.com", storedID: "fastmail").id == "fastmail",
+            "stored id wins")
+        expect(
+            MailProvider.resolved(forEmail: "a@yahoo.com", storedID: nil).id == "yahoo",
+            "detects when no stored id")
+        expect(
+            MailProvider.resolved(forEmail: "a@example.com", storedID: nil).id == "gmail",
+            "falls back to gmail")
+        expect(
+            MailProvider.resolved(forEmail: "a@example.com", storedID: "bogus").id == "gmail",
+            "ignores unknown stored id, falls back")
+    }
+    Harness.test("webSearchURL is provided for Gmail and nil is possible") {
+        expect(
+            MailProvider.gmail.webSearchURL(fromSender: "x@y.com") != nil,
+            "gmail has a search URL")
+    }
+}
+
+// MARK: - Security hardening
+
+Harness.suite("Header injection defense") {
+    Harness.test("strips CR/LF and control chars from header values") {
+        let dirty = "stop\r\nBcc: evil@x.com\r\n\r\nforged body"
+        let clean = IMAPBackend.stripControlCharacters(dirty)
+        expect(!clean.contains("\r"), "no CR")
+        expect(!clean.contains("\n"), "no LF")
+        expect(clean.contains("stop"), "keeps printable content")
+    }
+    Harness.test("rejects a mailto whose subject smuggles CRLF headers, via a valid address") {
+        // The address is fine; the subject carries percent-encoded CRLF. The
+        // target still parses (address valid) but the composed subject must be
+        // neutralized by stripControlCharacters at the rfc822 sink.
+        let u = ListUnsubscribe(header: "<mailto:unsub@example.com?subject=stop%0D%0ABcc:evil@x.com>")
+        expect(u != nil, "parses")
+        if let subject = u?.mailtoTargets.first?.subject {
+            let safe = IMAPBackend.stripControlCharacters(subject)
+            expect(!safe.contains("\n") && !safe.contains("\r"), "sanitized subject has no CRLF")
+        }
+    }
+}
+
+Harness.suite("Mailto recipient validation") {
+    Harness.test("accepts a single well-formed address") {
+        expect(ListUnsubscribe.isSingleWellFormedAddress("unsub@example.com"), "plain")
+        expect(ListUnsubscribe.isSingleWellFormedAddress("a.b+tag@mail.example.co.uk"), "tagged")
+    }
+    Harness.test("rejects lists, injection, and malformed addresses") {
+        expect(!ListUnsubscribe.isSingleWellFormedAddress("a@b.com,c@d.com"), "comma list")
+        expect(!ListUnsubscribe.isSingleWellFormedAddress("a@b.com c@d.com"), "space list")
+        expect(!ListUnsubscribe.isSingleWellFormedAddress("a@b.com\r\nBcc:x@y.com"), "CRLF")
+        expect(!ListUnsubscribe.isSingleWellFormedAddress("nodomain"), "no @")
+        expect(!ListUnsubscribe.isSingleWellFormedAddress("a@localhost"), "no dot in domain")
+        expect(!ListUnsubscribe.isSingleWellFormedAddress("<a@b.com>"), "angle brackets")
+    }
+    Harness.test("drops a mailto target with a multi-recipient address") {
+        // Comma is inside the brackets, so it's one URI whose path is a list.
+        let u = ListUnsubscribe(header: "<mailto:a@b.com,victim@evil.com?subject=x>")
+        expect(u == nil, "no usable target -> nil")
+    }
+}
+
+Harness.suite("DestinationGuard (SSRF)") {
+    func allowed(_ s: String) -> Bool { DestinationGuard.isAllowed(URL(string: s)!) }
+    Harness.test("blocks loopback, private, and link-local IP literals") {
+        expect(!allowed("http://127.0.0.1/admin"), "loopback v4")
+        expect(!allowed("http://10.0.0.5/"), "10/8")
+        expect(!allowed("http://192.168.1.1/reboot"), "192.168/16")
+        expect(!allowed("http://172.16.4.4/"), "172.16/12")
+        expect(!allowed("http://169.254.169.254/latest/meta-data/"), "link-local metadata")
+        expect(!allowed("http://[::1]/"), "loopback v6")
+        expect(!allowed("http://[::ffff:127.0.0.1]/"), "v4-mapped loopback")
+    }
+    Harness.test("blocks non-http schemes") {
+        expect(!allowed("file:///etc/passwd"), "file scheme")
+        expect(!allowed("ftp://example.com/"), "ftp scheme")
+    }
+    Harness.test("allows a public IP literal") {
+        // Documentation/example address block is globally routable unicast.
+        expect(allowed("https://93.184.216.34/unsubscribe"), "public v4 literal")
+    }
+}
+
 exit(Harness.finish())

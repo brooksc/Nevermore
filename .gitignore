@@ -1,13 +1,16 @@
 # Swift / SwiftPM
 .build/
 .swiftpm/
+# Coverage output dropped in the working dir by instrumented test runs.
+*.profraw
+*.profdata
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
 DerivedData/
 # Package.resolved IS committed: this becomes an app, so pinning the exact
 # dependency graph is what makes a clean checkout build identically.
 
-# Python bytecode (from the reference spike script)
+# Python bytecode (belt-and-braces; the Python spike has been removed)
 __pycache__/
 *.pyc
 

@@ -1,10 +1,12 @@
 import Foundation
 
-/// Tracks which Gmail accounts have been added, and where their databases live.
+/// Tracks which mail accounts have been added, which provider each uses, and
+/// where their databases live.
 ///
 /// Deliberately tiny: the app password lives in the Keychain, the header cache
-/// lives in a per-account SQLite file, and this only remembers the list and
-/// which one is the default.
+/// lives in a per-account SQLite file, and this only remembers the account list
+/// and each account's provider id (so a custom domain's manually-chosen provider
+/// survives relaunch).
 public struct AccountRegistry: Sendable {
     public static let shared = AccountRegistry()
 
@@ -22,6 +24,7 @@ public struct AccountRegistry: Sendable {
     }
 
     private var registryFile: URL { directory.appendingPathComponent("accounts.json") }
+    private var providersFile: URL { directory.appendingPathComponent("providers.json") }
 
     public func databasePath(for account: String) -> String {
         directory.appendingPathComponent("\(account).sqlite").path
@@ -44,7 +47,30 @@ public struct AccountRegistry: Sendable {
     public func remove(_ account: String) {
         let list = accounts().filter { $0 != account }
         try? JSONEncoder().encode(list).write(to: registryFile)
+        var map = providerMap()
+        map[account] = nil
+        try? JSONEncoder().encode(map).write(to: providersFile)
         Keychain.delete(for: account)
         try? FileManager.default.removeItem(atPath: databasePath(for: account))
+    }
+
+    // MARK: - Provider association
+
+    private func providerMap() -> [String: String] {
+        guard let data = try? Data(contentsOf: providersFile),
+            let map = try? JSONDecoder().decode([String: String].self, from: data)
+        else { return [:] }
+        return map
+    }
+
+    /// The provider id stored for an account, if one was recorded.
+    public func providerID(for account: String) -> String? {
+        providerMap()[account]
+    }
+
+    public func setProviderID(_ id: String, for account: String) {
+        var map = providerMap()
+        map[account] = id
+        try? JSONEncoder().encode(map).write(to: providersFile)
     }
 }

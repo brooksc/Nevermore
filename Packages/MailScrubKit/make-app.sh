@@ -61,11 +61,23 @@ if [ -z "$SIGN_ID" ]; then
     | awk -F'"' '/Developer ID Application/{print $2; exit}')
 fi
 
+# App Sandbox is required for the Mac App Store but relocates the app's
+# Application Support directory into a per-app container — so a sandboxed build
+# won't see a database created by a non-sandboxed dev build (and vice versa).
+# Keep it opt-in for local development: set MAILSCRUB_SANDBOX=1 for MAS-style
+# builds. (Full MAS submission additionally needs Apple Distribution signing and
+# a provisioning profile — see MAS-RELEASE.md.)
+ENTITLEMENTS_ARGS=()
+if [ "${MAILSCRUB_SANDBOX:-0}" = "1" ]; then
+  ENTITLEMENTS_ARGS=(--entitlements "$(dirname "$0")/Resources/MailScrub.entitlements")
+  echo "sandbox: enabled (App Support lives in the app container)" >&2
+fi
+
 if [ -n "$SIGN_ID" ]; then
-  codesign --force --options runtime --sign "$SIGN_ID" "$APP"
+  codesign --force --options runtime "${ENTITLEMENTS_ARGS[@]}" --sign "$SIGN_ID" "$APP"
   echo "signed: $SIGN_ID" >&2
 else
-  codesign --force --sign - "$APP" >/dev/null 2>&1 || true
+  codesign --force "${ENTITLEMENTS_ARGS[@]}" --sign - "$APP" >/dev/null 2>&1 || true
   echo "WARNING: ad-hoc signed — no Developer ID cert found. The saved app" >&2
   echo "         password will not persist across rebuilds. Set" >&2
   echo "         MAILSCRUB_SIGN_IDENTITY to a signing identity to fix this." >&2

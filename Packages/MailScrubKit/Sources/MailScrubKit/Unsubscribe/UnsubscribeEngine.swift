@@ -12,7 +12,7 @@ public struct UnsubscribeEngine: Sendable {
         /// a non-committal status. May still have worked.
         case requested(detail: String)
         case failed(detail: String)
-        /// No usable target; the caller should fall back to opening Gmail.
+        /// No usable target; the caller should fall back to opening webmail.
         case needsManual
 
         public var isSuccess: Bool {
@@ -31,10 +31,19 @@ public struct UnsubscribeEngine: Sendable {
     private let session: URLSession
     private let sendMail: MailSender
 
-    public init(sendMail: @escaping MailSender, session: URLSession = .shared) {
+    public init(sendMail: @escaping MailSender, session: URLSession? = nil) {
         self.sendMail = sendMail
-        self.session = session
+        self.session = session ?? Self.guardedSession
     }
+
+    /// A session whose redirects are re-validated by `DestinationGuard`, so a
+    /// public URL can't 30x-bounce into an internal host. Ephemeral: no cookies
+    /// or cache persisted from these one-off unsubscribe requests.
+    private static let guardedSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpCookieStorage = nil
+        return URLSession(configuration: config, delegate: RedirectGuard(), delegateQueue: nil)
+    }()
 
     /// Unsubscribe from one message's target.
     /// `fromAddress` is the send-as alias for mailto:, when the mail was
@@ -69,6 +78,10 @@ public struct UnsubscribeEngine: Sendable {
     // MARK: - HTTP
 
     private func oneClickPost(_ url: URL) async -> Outcome {
+        guard DestinationGuard.isAllowed(url) else {
+            Log.unsubscribe.problem("blocked one-click POST to non-public host: \(url.host ?? "?")")
+            return .failed(detail: "unsubscribe URL resolves to a private or local address; blocked")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue(
@@ -114,6 +127,10 @@ public struct UnsubscribeEngine: Sendable {
     }
 
     private func get(_ url: URL) async -> Outcome {
+        guard DestinationGuard.isAllowed(url) else {
+            Log.unsubscribe.problem("blocked GET to non-public host: \(url.host ?? "?")")
+            return .failed(detail: "unsubscribe URL resolves to a private or local address; blocked")
+        }
         var request = URLRequest(url: url)
         request.setValue("MailScrub/1.0", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 30
@@ -129,5 +146,22 @@ public struct UnsubscribeEngine: Sendable {
         } catch {
             return .failed(detail: error.localizedDescription)
         }
+    }
+}
+
+/// Re-checks every HTTP redirect target against `DestinationGuard`, so a public
+/// unsubscribe URL cannot 30x-redirect the request into a loopback/LAN host.
+/// Returning nil stops the redirect and surfaces the 3xx as the final response.
+private final class RedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest
+    ) async -> URLRequest? {
+        guard let url = request.url, DestinationGuard.isAllowed(url) else {
+            Log.unsubscribe.problem(
+                "blocked unsubscribe redirect to non-public host: \(request.url?.host ?? "?")")
+            return nil
+        }
+        return request
     }
 }

@@ -98,17 +98,19 @@ struct SenderTableView: View {
                 Button("Keep as One Group") { model.keepAsOneGroup(id) }
             }
         }
-        Divider()
-        Button("View in Gmail") { openGmail(targets) }
+        if model.currentProvider.webSearchURL(fromSender: "x@x") != nil {
+            Divider()
+            Button("View in \(model.currentProvider.displayName)") { openInWebmail(targets) }
+        } else {
+            Divider()
+        }
         Button("Copy Sender Address") { copyAddress(targets) }
     }
 
-    private func openGmail(_ ids: Set<GroupID>) {
+    private func openInWebmail(_ ids: Set<GroupID>) {
         for id in ids {
             guard let email = model.group(for: id)?.latest?.sender.address else { continue }
-            if let url = URL(string: "https://mail.google.com/mail/u/0/#search/from:\(email)") {
-                NSWorkspace.shared.open(url)
-            }
+            model.openInWebmail(senderAddress: email)
         }
     }
 

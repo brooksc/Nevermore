@@ -42,7 +42,7 @@ struct MainWindowView: View {
             }
             Button("Cancel", role: .cancel) { model.pendingTrash = nil }
         } message: { pending in
-            Text("This trashes \(pending.messageCount) messages from \(pending.senderCount) sender\(pending.senderCount == 1 ? "" : "s"). They stay recoverable in Gmail Trash for 30 days.")
+            Text("This trashes \(pending.messageCount) messages from \(pending.senderCount) sender\(pending.senderCount == 1 ? "" : "s"). They stay recoverable in your Trash folder.")
         }
         .onReceive(NotificationCenter.default.publisher(for: .unsubscribeSelected)) { _ in
             beginUnsubscribe(model.selection)
