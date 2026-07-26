@@ -11,8 +11,9 @@ unsubscribe endpoint the sender published.
 The name is the point: senders that keep mailing after you unsubscribe get
 flagged and shut down for good.
 
-> **Status:** working, but pre-release. Not yet on the Mac App Store. Built and
-> used against a real ~132,000-message mailbox.
+> **Status:** working, pre-release, and not yet on the Mac App Store. Built and
+> used daily against a real ~132,000-message mailbox.
+> _Docs last reviewed: 26 July 2026._
 
 ![Nevermore's main window: a list of senders grouped by domain, with an inspector showing one sender's unsubscribe method](docs/screenshots/main-window.png)
 
@@ -192,6 +193,17 @@ history and ignore list, not mail.
 
 Found something? Open an issue — or email if it's sensitive.
 
-## License
+## Licence
 
-Not yet chosen.
+**Personal use, source-available.** You may read, audit, build, and run
+Nevermore for your own personal use, and modify it privately. You may not
+redistribute it, publish a fork, or use it commercially. See
+[LICENSE](LICENSE).
+
+The source is published because an app that reads your mail and holds a
+credential to it should be inspectable. That's a different thing from open
+source, and this licence says so plainly.
+
+## Privacy
+
+No servers, no accounts, no telemetry. See [PRIVACY.md](PRIVACY.md).

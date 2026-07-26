@@ -12,6 +12,17 @@ cd "$(dirname "$0")"
 BIN_DIR=$(swift build --product NevermoreApp -c "$CONFIG" --show-bin-path)
 swift build --product NevermoreApp -c "$CONFIG"
 
+# Version comes from the VERSION file, and the build number from the commit
+# count — monotonic, reproducible from any checkout, nothing to maintain by
+# hand. NEVERMORE_BUILD overrides it for a hotfix branched off an older tag,
+# where the count would otherwise go backwards. See RELEASE.md.
+MARKETING_VERSION=$(tr -d ' \t\n\r' < "$(dirname "$0")/VERSION")
+if [ -z "$MARKETING_VERSION" ]; then
+  echo "VERSION file is empty" >&2
+  exit 1
+fi
+BUILD_NUMBER=${NEVERMORE_BUILD:-$(git -C "$(dirname "$0")" rev-list --count HEAD 2>/dev/null || echo 1)}
+
 APP="$BIN_DIR/Nevermore.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -26,8 +37,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>Nevermore</string>
   <key>CFBundleDisplayName</key><string>Nevermore</string>
   <key>CFBundleIdentifier</key><string>com.brooksc.nevermore</string>
-  <key>CFBundleVersion</key><string>1</string>
-  <key>CFBundleShortVersionString</key><string>0.1</string>
+  <key>CFBundleVersion</key><string>__BUILD_NUMBER__</string>
+  <key>CFBundleShortVersionString</key><string>__MARKETING_VERSION__</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>Nevermore</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
@@ -46,6 +57,14 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 </plist>
 PLIST
+
+# Substituted after the heredoc so the plist body stays a quoted heredoc and
+# can't interpolate anything else.
+/usr/bin/sed -i '' \
+  -e "s/__MARKETING_VERSION__/$MARKETING_VERSION/" \
+  -e "s/__BUILD_NUMBER__/$BUILD_NUMBER/" \
+  "$APP/Contents/Info.plist"
+echo "version: $MARKETING_VERSION ($BUILD_NUMBER)" >&2
 
 # Sign with a stable identity so Keychain items survive rebuilds. An ad-hoc
 # signature (`-`) gets a fresh code identity every build, which invalidates the

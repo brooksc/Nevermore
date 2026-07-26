@@ -15,7 +15,35 @@ public final class MessageStore: Sendable {
             try db.execute(sql: "PRAGMA synchronous = NORMAL")
         }
         pool = try DatabasePool(path: path, configuration: config)
+        try Self.backUpIfMigrationPending(path: path, pool: pool)
         try Self.migrator.migrate(pool)
+    }
+
+    /// Copy the database aside before a migration that hasn't run here before.
+    ///
+    /// Migrations are forward-only and a shipped one is never edited, so the
+    /// realistic failure is a *new* migration going wrong on real data — at
+    /// which point the user's only copy has already been rewritten. The cache is
+    /// rebuildable, but re-reading a six-figure mailbox is a bad afternoon.
+    ///
+    /// Best-effort by design: a failed backup must not stop the app opening.
+    /// One backup per schema version, overwritten if it already exists.
+    private static func backUpIfMigrationPending(path: String, pool: DatabasePool) throws {
+        let applied = try pool.read { try migrator.appliedIdentifiers($0) }
+        let pending = migrator.migrations.filter { !applied.contains($0) }
+        // Nothing applied yet means a brand-new database — nothing to lose.
+        guard let next = pending.first, !applied.isEmpty else { return }
+
+        let backup = "\(path).pre-\(next).bak"
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path) else { return }
+        try? fm.removeItem(atPath: backup)
+        do {
+            try fm.copyItem(atPath: path, toPath: backup)
+            Log.store.event("backed up database before migration '\(next)'")
+        } catch {
+            Log.store.problem("pre-migration backup failed: \(error.localizedDescription)")
+        }
     }
 
     /// Ephemeral store for tests. Backed by a unique temp file (not `:memory:`,

@@ -3,11 +3,12 @@
 Native Swift rewrite of the Python TUI (originally `py/`, since removed — the
 original lives in its own repo). Target: parity plus the things a TUI can't do.
 
-> **This is a design-time snapshot, kept for the rationale behind the
-> decisions below. It has drifted from the shipped code** — the app was since
-> built, gained multi-provider support, and was renamed from MailScrub to
-> Nevermore. For current state see [README.md](README.md); the source is
-> authoritative.
+> **Kept for the rationale, not as a status report.** Sections 1–9 explain
+> *why* the app is shaped the way it is and remain accurate. Section 9a
+> (status) and section 10 (open questions) are updated as of **26 July 2026**.
+> The app was since built, gained multi-provider support, and was renamed from
+> MailScrub to Nevermore. Where this document and the code disagree about
+> current behaviour, see [README.md](README.md) — the source is authoritative.
 
 Status at time of writing: planning. All numbers below come from the original
 Python IMAP spike (`spike/imap_probe.py`, since removed — superseded by the
@@ -317,77 +318,81 @@ Carried forward from the code review so they don't get faithfully reproduced:
 
 ## 9a. Build status
 
-**M0–M3 done and verified against the live mailbox** (2026-07-22).
+**All milestones through the SwiftUI app are done** (updated 26 July 2026).
+`Packages/NevermoreKit` builds under Swift 6 strict concurrency; **97 tests
+pass**. The app is used daily against a live ~132,000-message mailbox.
 
-`Packages/NevermoreKit` builds under Swift 6 strict concurrency. 47 tests pass.
-The `nevermore-probe` CLI performs a full discovery, incremental sync, grouping,
-and alias inference end to end:
+Measured on that mailbox:
 
 | Measured | Result |
 |---|---|
-| Full discovery (23 date windows) | 14,594 UIDs located in ~85s |
-| Header fetch | 14,594 in ~150s → 12,281 stored after filtering own mail |
-| **Incremental sync** | **58 new messages in 5.6s** |
-| Grouping | 12,282 messages → 1,019 senders |
-| One-click support | 25% across all history |
+| Full discovery (23 date windows) | ~14,600 UIDs located in ~95s |
+| Header fetch | ~40s → ~12,300 stored after filtering own mail |
+| Incremental sync | 40–50 new messages in ~3s |
+| Grouping | ~12,300 messages → ~1,015 senders |
 | Send-as aliases inferred | 5, matching the Python probe exactly |
 
-Three defects the build surfaced and fixed, each now covered by a test:
+Shipped since this plan was written, and not described above:
 
-1. **One-click reported 0%.** The store wrote `"One-Click"` but the parser looks
-   for the canonical `List-Unsubscribe=One-Click` token. Round-trip test added.
-2. **Groups mislabelled.** `notifications@github.com` (2,286 messages) was named
-   "Liang Hu" — whoever commented most recently. Now uses the *dominant* display
-   name, falling back to the group key when no name holds a majority.
-3. **Group kind lost on shared platforms.** `Grouping.mergeKey` returned a bare
-   string, so an address-keyed group was labelled `.domain`. It now returns a
-   full `GroupID`.
+- **Demo mode** — a fabricated mailbox on a `MailBackend` implementation with
+  no network code, reachable before onboarding. Also what an App Store reviewer
+  uses to evaluate the app without an email account.
+- **Reappearance detection** with notifications, the Unsubscribed history log,
+  and the in-app browser escalation.
+- **Keyboard triage** beyond the plan: `⇧U` (unsubscribe and delete, no
+  confirm), `v` (open the newest message via Gmail's `rfc822msgid:`).
+- **Release tooling** — `VERSION`, commit-count build numbers, a pre-migration
+  database backup, and a version/tag guard in `notarize.sh`.
 
-**Testing note:** tests run as an executable (`swift run nevermore-tests`) with a
-small harness, not a `.testTarget`. SwiftPM builds test targets as `.xctest`
+**Testing note:** tests run as an executable (`swift run nevermore-tests`) with
+a small harness, not a `.testTarget`. SwiftPM builds test targets as `.xctest`
 bundles on macOS, which needs XCTest and `_TestingInterop` from a full Xcode
-install; neither is in Command Line Tools. Convert to swift-testing at M5, when
-Xcode becomes a hard requirement anyway.
+install; neither is in Command Line Tools. Worth converting to swift-testing
+alongside the Xcode app target that the Mac App Store requires — see
+[MAS-RELEASE.md](MAS-RELEASE.md).
 
-**Xcode is required for M5 onward** — the SwiftUI app target cannot be built
-with Command Line Tools alone.
+**Xcode is required** for the SwiftUI app; Command Line Tools alone cannot
+build it. `swift build` fails without `DEVELOPER_DIR` pointing at Xcode.
 
 ## 10. Open questions
 
-**Resolved by the M1 build:**
+**Resolved:**
 
-- ~~First-run 94s discovery~~ — **worse than expected, and now fixed.** A single
-  unbounded `SEARCH` doesn't merely take 94s, it exceeds SwiftMail's hard-coded
-  60s command timeout and fails. Discovery now runs in 23 one-year date windows,
-  newest first, with adaptive halving on timeout. Total ~85s, bounded commands,
-  real progress, and results usable before the run finishes. This also removes
-  the X-GM-RAW fork from the critical path entirely.
-- ~~Incremental sync strategy~~ — `SearchCriteria.uid(N)` encodes a *single* UID,
-  not an open range, so "newer than N" isn't expressible. Incremental sync
-  searches `.since(lastSync - 2 days)` instead; the overlap absorbs IMAP's
-  day-granularity `SINCE` and timezone ambiguity, and duplicate UIDs collapse on
-  the store's primary key. `SyncToken` gained `lastSyncedAt`.
+- ~~First-run discovery time~~ — a single unbounded `SEARCH` exceeds SwiftMail's
+  60s command timeout and fails outright. Discovery runs in 23 one-year date
+  windows, newest first, with adaptive halving. ~95s with real progress, and it
+  removed the X-GM-RAW fork from the critical path entirely.
+- ~~Incremental sync strategy~~ — `SearchCriteria.uid(N)` encodes a *single*
+  UID, not an open range, so "newer than N" isn't expressible. Incremental sync
+  searches `.since(lastSync - 2 days)`; the overlap absorbs IMAP's
+  day-granularity `SINCE`, and duplicate UIDs collapse on the primary key.
+- ~~Workspace accounts~~ — an auth failure now prompts re-authentication with
+  copy that names app-password policy as a likely cause.
+- ~~Alias detection source~~ — `Delivered-To` was kept, falling back to `To`.
+  Filter labels were not used; they only exist for users who happen to have set
+  them up.
 
 **Still open:**
 
-- **First-run 94s discovery** — acceptable with a progress bar, or is that the
-  trigger to do the X-GM-RAW fork in v1? Decide after M1 measures it on a cold
-  cache.
-- **Alias detection source** — this account already has `To/bcutter@gmail.com`
-  and `To/cutter@brooksc.com` filter-labels. Reading those is cheaper than
-  parsing `Delivered-To`, but only works for users who happen to have such
-  filters. Default to `Delivered-To`; treat labels as a hint at most.
-- **Workspace accounts** — admins can disable app passwords org-wide. Detect the
-  auth failure and show a clear message rather than a generic login error.
-- **Concurrent IMAP connections** — Gmail throttles (commonly cited as ~15,
-  unverified). Sync is single-connection, so this only matters if M6 adds a
-  parallel fetch path. Measure before parallelizing.
-- **`PayloadTooLargeError` root cause** — an incremental run failed with this
-  before two changes landed together: raising `responseBufferLimit` to 32 MB and
-  switching to date-based search. It hasn't recurred, but **I don't know which
-  fix was responsible.** If it returns, that ambiguity is the first thing to
-  resolve.
-- **2,313 located messages never stored** (14,594 found, 12,281 kept). Expected
-  causes are own sent mail and headers whose only target uses an unsupported
-  scheme, but the split has not been measured. Worth instrumenting before M5 so
-  the UI's counts can be explained to users.
+- **Messages located but not stored.** Discovery finds more UIDs than the store
+  keeps. Expected causes are the user's own sent mail and headers whose only
+  target uses an unsupported scheme, but the split has never been measured.
+  Worth instrumenting so the UI's counts can be explained.
+- **`PayloadTooLargeError` root cause.** An incremental run once failed with
+  this before two changes landed together — raising `responseBufferLimit` to
+  32 MB and switching to date-based search. It hasn't recurred, but **which fix
+  was responsible is unknown.** If it returns, resolve that ambiguity first.
+- **Body-only unsubscribes are invisible.** Discovery matches on the
+  `List-Unsubscribe` header, so a sender who only puts a link in the message
+  body is never seen — and "delete this sender's mail" therefore means "the
+  subset carrying the header". Closing the gap means either reading bodies
+  (which the app's whole premise forbids) or a sender-wide `SEARCH FROM` delete
+  that removes mail the app never displayed. Deliberately not done.
+- **DNS rebinding beats `DestinationGuard`.** It resolves the host, then
+  URLSession resolves independently, so a hostile resolver can answer public
+  then private. A real fix pins the validated IP and sets the `Host` header.
+- **Undo-trash always restores to INBOX.** IMAP has no "put it back where it
+  was", so a message that was archived returns to the inbox.
+- **Concurrent IMAP connections.** Gmail throttles (commonly cited as ~15,
+  unverified). Sync is single-connection, so this only matters if a parallel
+  fetch path is ever added. Measure before parallelizing.

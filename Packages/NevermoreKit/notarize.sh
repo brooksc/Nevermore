@@ -18,6 +18,20 @@ PROFILE=${NEVERMORE_NOTARY_PROFILE:-nevermore-notary}
 
 cd "$(dirname "$0")"
 
+# 0. Refuse to ship a build whose version disagrees with the tag being
+#    released. Shipping 0.1.0 under a v0.2.0 tag is the kind of mistake that is
+#    invisible until someone reports a bug against a version that never existed.
+VERSION=$(tr -d ' \t\n\r' < VERSION)
+TAG=$(git describe --exact-match --tags 2>/dev/null || true)
+if [ -n "$TAG" ] && [ "$TAG" != "v$VERSION" ]; then
+  echo "VERSION is $VERSION but HEAD is tagged $TAG — expected v$VERSION." >&2
+  echo "Fix VERSION or the tag before releasing." >&2
+  exit 1
+fi
+if [ -z "$TAG" ]; then
+  echo "warning: HEAD is not tagged; releasing $VERSION anyway" >&2
+fi
+
 # 1. Build the signed .app (release, Developer ID, hardened runtime).
 APP=$(CONFIG=release ./make-app.sh release | tail -1)
 echo "built: $APP"

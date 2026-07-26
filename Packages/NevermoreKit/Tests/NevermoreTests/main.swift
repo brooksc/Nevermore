@@ -926,4 +926,34 @@ Harness.suite("Selection cursor") {
     }
 }
 
+Harness.suite("Pre-migration backup") {
+    Harness.test("a fresh database is not backed up") {
+        do {
+            let path = FileManager.default.temporaryDirectory
+                .appendingPathComponent("nm-fresh-\(UUID().uuidString).sqlite").path
+            _ = try MessageStore(path: path)
+            expect(
+                !FileManager.default.fileExists(atPath: path + ".pre-v1.bak"),
+                "nothing to preserve on a brand-new store")
+            try? FileManager.default.removeItem(atPath: path)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("reopening an already-migrated database makes no new backup") {
+        // Every launch runs the migrator; only a *pending* migration should
+        // trigger a copy, or the app would duplicate the cache on every start.
+        do {
+            let path = FileManager.default.temporaryDirectory
+                .appendingPathComponent("nm-again-\(UUID().uuidString).sqlite").path
+            _ = try MessageStore(path: path)
+            _ = try MessageStore(path: path)
+            let siblings = try FileManager.default.contentsOfDirectory(
+                atPath: FileManager.default.temporaryDirectory.path
+            ).filter { $0.hasPrefix(URL(fileURLWithPath: path).lastPathComponent) && $0.hasSuffix(".bak") }
+            expect(siblings.isEmpty, "no backup written: \(siblings)")
+            try? FileManager.default.removeItem(atPath: path)
+        } catch { expect(false, "threw: \(error)") }
+    }
+}
+
 exit(Harness.finish())

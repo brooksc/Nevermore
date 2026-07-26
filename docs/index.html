@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nevermore — bulk-unsubscribe from newsletters, on your Mac</title>
+<meta name="description" content="A native macOS app that finds every newsletter in your mailbox and unsubscribes in a few keystrokes. Local-first: no server, no account, no telemetry. It reads message headers only, never bodies.">
+<meta property="og:title" content="Nevermore">
+<meta property="og:description" content="Bulk-unsubscribe from newsletters on your Mac. No server, no account, headers only.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="screenshots/main-window.png">
+<style>
+  :root {
+    --ink: #14161a;
+    --muted: #5b6270;
+    --line: #e3e6ec;
+    --brand: #0a7cff;
+    --plum: #6b3fa8;
+    --bg: #fff;
+    --panel: #f7f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e9ecf1; --muted: #9aa3b2; --line: #2a2f3a;
+      --bg: #101216; --panel: #171a20;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 17px/1.6 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 0 24px; }
+  h1, h2, h3 { line-height: 1.2; letter-spacing: -0.02em; }
+  h1 { font-size: clamp(2.4rem, 6vw, 3.6rem); margin: 0 0 .4em; }
+  h2 { font-size: clamp(1.5rem, 3.4vw, 2rem); margin: 2.6em 0 .6em; }
+  h3 { font-size: 1.05rem; margin: 0 0 .3em; }
+  p { margin: 0 0 1em; }
+  a { color: var(--brand); }
+  .lede { font-size: clamp(1.1rem, 2.2vw, 1.3rem); color: var(--muted); max-width: 34em; }
+  header { padding: 84px 0 40px; }
+  .badge {
+    display: inline-block; font-size: .8rem; font-weight: 600; letter-spacing: .04em;
+    text-transform: uppercase; color: var(--plum); border: 1px solid var(--plum);
+    border-radius: 999px; padding: 4px 12px; margin-bottom: 22px;
+  }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; margin: 28px 0 0; }
+  .btn {
+    display: inline-block; padding: 11px 20px; border-radius: 10px;
+    font-weight: 600; text-decoration: none; font-size: .98rem;
+  }
+  .btn-primary { background: var(--brand); color: #fff; }
+  .btn-ghost { border: 1px solid var(--line); color: var(--ink); }
+  .note { font-size: .9rem; color: var(--muted); margin-top: 14px; }
+  figure { margin: 40px 0; }
+  img { max-width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--line); display: block; }
+  figcaption { font-size: .88rem; color: var(--muted); margin-top: 10px; }
+  .grid { display: grid; gap: 26px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); margin: 28px 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  .card p { font-size: .95rem; color: var(--muted); margin: 0; }
+  kbd {
+    font: 600 .85em/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--panel); border: 1px solid var(--line);
+    border-bottom-width: 2px; border-radius: 5px; padding: 3px 6px;
+  }
+  .keys { list-style: none; padding: 0; }
+  .keys li { padding: 9px 0; border-bottom: 1px solid var(--line); display: flex; gap: 16px; align-items: baseline; }
+  .keys li span:first-child { flex: 0 0 5.5em; }
+  .keys li span:last-child { color: var(--muted); font-size: .95rem; }
+  footer { margin: 80px 0 60px; padding-top: 28px; border-top: 1px solid var(--line); font-size: .9rem; color: var(--muted); }
+  footer a { margin-right: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <span class="badge">Pre-release</span>
+  <h1>Unsubscribe from everything.</h1>
+  <p class="lede">
+    Nevermore finds every newsletter in your mailbox, groups them by sender, and
+    lets you unsubscribe from — and delete — whole senders in a few keystrokes.
+    It runs entirely on your Mac.
+  </p>
+  <div class="cta">
+    <a class="btn btn-primary" href="https://github.com/brooksc/nevermore">View the source</a>
+    <a class="btn btn-ghost" href="https://github.com/brooksc/nevermore/blob/main/README.md">Read the docs</a>
+  </div>
+  <p class="note">macOS 14 or later. Not yet on the Mac App Store.</p>
+</header>
+
+<figure>
+  <img src="screenshots/main-window.png" alt="Nevermore's main window: senders grouped by domain, with an inspector showing one sender's unsubscribe method.">
+  <figcaption>Screenshots use the built-in demo mailbox — the senders are invented, which is why the app shows its demo banner.</figcaption>
+</figure>
+
+<h2>Not another inbox service</h2>
+<p>
+  Most unsubscribe tools are web services. You hand them OAuth access to your
+  mailbox and they read it on their servers. Unroll.me famously sold the
+  results. Nevermore is the opposite shape.
+</p>
+
+<div class="grid">
+  <div class="card">
+    <h3>No server, no account</h3>
+    <p>Everything runs on your Mac. There is nothing to sign up for, no telemetry, and no way for the developer to see your mail — there is no server to send it to.</p>
+  </div>
+  <div class="card">
+    <h3>Headers, never bodies</h3>
+    <p>It reads <code>From</code>, <code>Subject</code>, <code>Date</code>, and the unsubscribe headers. It never downloads a message body, and reading doesn't mark your mail as read.</p>
+  </div>
+  <div class="card">
+    <h3>Honest about outcomes</h3>
+    <p>Unsubscribing can't be verified in general, so Nevermore says <em>requested</em> rather than claiming success — and tells you when a sender ignores you.</p>
+  </div>
+  <div class="card">
+    <h3>Nothing is destroyed</h3>
+    <p>Deleting moves mail to your provider's Trash, where you can restore it. The app never issues an IMAP <code>EXPUNGE</code>. Small batches undo with <kbd>⌘Z</kbd>.</p>
+  </div>
+</div>
+
+<h2>Built for the keyboard</h2>
+<p>
+  Nevermore is meant to be held down until the mailbox is clean. Every action
+  moves you to the next sender, so a thousand newsletters is a few minutes of
+  triage rather than an afternoon of clicking.
+</p>
+<ul class="keys">
+  <li><span><kbd>j</kbd> <kbd>k</kbd></span><span>Move through senders</span></li>
+  <li><span><kbd>v</kbd></span><span>Open the newest message in your browser — decide before you act</span></li>
+  <li><span><kbd>u</kbd></span><span>Unsubscribe</span></li>
+  <li><span><kbd>⇧U</kbd></span><span>Unsubscribe and delete, no confirmation</span></li>
+  <li><span><kbd>i</kbd></span><span>Ignore this sender for good</span></li>
+  <li><span><kbd>d</kbd></span><span>Trash their messages</span></li>
+  <li><span><kbd>?</kbd></span><span>Everything else</span></li>
+</ul>
+
+<h2>Try it before you trust it</h2>
+<p>
+  The first screen offers a demo: a full sample mailbox, no credentials, with
+  every button live. It runs on a backend containing no network code at all, so
+  nothing in demo mode can reach a server. Look around, then decide whether to
+  hand the app a password.
+</p>
+
+<figure>
+  <img src="screenshots/how-it-works.png" alt="The How Nevermore Works sheet, explaining the four steps and what each unsubscribe-method icon means.">
+  <figcaption>The app explains itself while the first sync runs — including an honest list of what it can't find.</figcaption>
+</figure>
+
+<h2>What it won't find</h2>
+<p>
+  Nevermore locates newsletters by the standard <code>List-Unsubscribe</code>
+  header. Nearly all legitimate bulk mail carries one — Gmail and Yahoo have
+  required it from bulk senders since 2024 — but a sender who buries their
+  unsubscribe link in the message body is invisible to it. Finding those would
+  mean reading your mail, which is exactly what this app doesn't do.
+</p>
+<p>
+  Flagged and starred messages are skipped on purpose, so your important mail is
+  never in scope.
+</p>
+
+<h2>How it works</h2>
+<p>
+  You sign in with an app-specific password over plain IMAP — no OAuth, no
+  Google Cloud project, no consent screen. The password goes straight into the
+  macOS Keychain, stored so it can't ride a backup to another machine. Nevermore
+  then syncs message headers into a local SQLite file, groups senders by
+  registrable domain, and sends unsubscribe requests directly to the endpoint
+  each sender published.
+</p>
+<p>
+  Because those endpoints are written by strangers, every URL is checked before
+  it's contacted: requests to private, loopback, and link-local addresses are
+  refused, and redirects are re-validated at every hop.
+</p>
+
+<footer>
+  <a href="https://github.com/brooksc/nevermore">GitHub</a>
+  <a href="https://github.com/brooksc/nevermore/blob/main/PRIVACY.md">Privacy</a>
+  <a href="https://github.com/brooksc/nevermore/blob/main/LICENSE">Licence</a>
+  <a href="https://github.com/brooksc/nevermore/issues">Support</a>
+  <p style="margin-top:18px">© 2026 Brooks Cutter. Source-available for inspection; personal use only.</p>
+</footer>
+
+</div>
+</body>
+</html>

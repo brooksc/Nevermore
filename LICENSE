@@ -1,0 +1,79 @@
+# Nevermore — Personal Use Licence
+
+**Copyright © 2026 Brooks Cutter. All rights reserved.**
+
+_Last updated: 26 July 2026_
+
+This source code is published so anyone can read it. Nevermore reads your
+mailbox and holds a credential to it, and asking for that trust while hiding
+the code would be unreasonable. Publishing it is **not** a grant of the rights
+an open-source licence would give you — this is source-available software, not
+open source.
+
+## What you may do
+
+1. **Read, inspect, and audit** this source code, in full, for any purpose.
+2. **Build and run** it on computers you personally own or control, for your
+   own personal, non-commercial use.
+3. **Modify it privately**, for your own use on your own machines, including to
+   fix a bug or to satisfy yourself about what it does.
+4. **Quote short excerpts** in reviews, articles, security reports, or
+   educational material, with attribution.
+
+## What you may not do
+
+1. **Redistribute** this software, in source or binary form, modified or not,
+   including on any app store, package manager, or download site.
+2. **Publish a fork** or otherwise make a modified version available to others.
+3. **Use it commercially** — inside a business, as part of a paid service, or
+   in anything you charge for.
+4. **Remove or obscure** these terms, the copyright notice, or the app's
+   identity in any copy you make.
+
+Rights not expressly granted above are reserved. In particular, no trademark
+licence is granted to the name "Nevermore" or its icon.
+
+## Contributions
+
+Contributions are welcome but, by submitting one, you assign copyright in it to
+the copyright holder, or licence it on terms that let the project relicense it
+freely. This keeps the project able to ship on app stores under a single owner.
+If that isn't acceptable to you, open an issue describing the change instead of
+sending a patch.
+
+## No warranty
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+Nevermore acts on your mailbox: it sends unsubscribe requests to third parties
+and moves messages to your mail provider's Trash. It is designed to be
+recoverable — it never issues an IMAP `EXPUNGE`, and deleted mail remains in
+your provider's Trash under that provider's retention policy — but **you are
+responsible for your own mail and your own backups.**
+
+## Limitation of liability
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING
+FROM, OUT OF, OR IN CONNECTION WITH THIS SOFTWARE OR ITS USE — INCLUDING
+WITHOUT LIMITATION ANY LOSS OF DATA, LOSS OF EMAIL, MISSED MESSAGES, UNINTENDED
+UNSUBSCRIPTION, OR CONSEQUENTIAL, INCIDENTAL, SPECIAL, OR INDIRECT DAMAGES OF
+ANY KIND.
+
+Some jurisdictions do not allow the exclusion of certain warranties or the
+limitation of certain damages, so parts of the above may not apply to you. In
+that case, liability is limited to the greatest extent permitted by law, and to
+no more than the amount you paid for the software.
+
+## App Store distribution
+
+Copies obtained through the Mac App Store are also governed by Apple's
+Licensed Application End User Licence Agreement. Where that agreement and this
+one conflict for such copies, Apple's governs.
+
+---
+
+If you want to do something this licence doesn't allow, ask. The answer is
+often yes.

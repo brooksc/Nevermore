@@ -1,17 +1,24 @@
 # Versioning and release process
 
+_Last updated: 26 July 2026._
+
 How Nevermore versions itself and how a new version gets into users' hands.
 
-**Primary channel:** Developer ID direct download (GitHub Releases), notarized
-and stapled, with Sparkle in-app auto-update. The Mac App Store is a **second,
-later track** — see [MAS-RELEASE.md](MAS-RELEASE.md) — and it has one hard
-conflict with this process, documented under [MAS divergence](#mas-divergence).
+**Primary channel: the Mac App Store** — see
+[MAS-RELEASE.md](MAS-RELEASE.md) for the submission steps. Developer ID direct
+download stays supported via `make-app.sh` and `notarize.sh`, for builds
+outside the store.
 
-**Status:** this document is the plan. Several pieces described here do not
-exist in the code yet; they are collected in
-[Implementation checklist](#implementation-checklist). Nothing has shipped and
-there are no tags yet, so we get to set this up before the first release
-rather than retrofit it.
+> **Sparkle is deliberately not in this project.** Apple rejects apps that
+> update themselves, so an App Store build must not contain an updater. Adding
+> Sparkle would mean maintaining two products with a build-time switch, plus an
+> EdDSA signing key whose loss permanently strands every installed copy. Since
+> the store handles updates, none of that is worth carrying. If direct
+> distribution ever becomes primary, revisit — and read the key-management
+> warning in this file's history first.
+
+**Status:** the versioning machinery described below is implemented. What
+remains is the Mac App Store submission itself.
 
 ---
 
@@ -24,7 +31,7 @@ rather than retrofit it.
 | `CFBundleShortVersionString` | `0.3.1` | **Marketing version.** What users see, what tags and release notes use. |
 | `CFBundleVersion` | `47` | **Build number.** Opaque, strictly increasing, never reused. |
 
-macOS, Sparkle, and the App Store all compare `CFBundleVersion` to decide what
+macOS and the App Store both compare `CFBundleVersion` to decide what
 is newer. It must increase on every build we publish, even a rebuild of the same
 marketing version. The marketing version is for humans.
 
@@ -53,8 +60,8 @@ reproducible from any checkout, no state to maintain.
 While in `0.x`, MINOR carries the weight MAJOR normally would; there is no
 stability promise before `1.0` and the README should keep saying so.
 
-Pre-release builds use `0.4.0-beta.1`. Sparkle serves these on a separate
-`beta` appcast channel, so they only reach users who opt in.
+Pre-release builds use `0.4.0-beta.1`. On the App Store these go out through
+TestFlight, which keeps them away from anyone who hasn't opted in.
 
 ### Single source of truth
 
@@ -93,29 +100,22 @@ Bumping a version is then: edit one file, commit, tag.
 | Artifact | Location | Notes |
 |---|---|---|
 | Marketing version | `Packages/NevermoreKit/VERSION` | Committed. The only place it's written by hand. |
-| Release notes | `CHANGELOG.md` (repo root) | [Keep a Changelog](https://keepachangelog.com) format. Sparkle's per-release description is generated from it. |
-| Git tag | `v0.3.1` | Annotated **and signed** (`git tag -s`). SSH signing is already configured; `tag.gpgsign` is not, so pass `-s` explicitly or set it. |
-| Distributable | `Nevermore-0.3.1.zip` | Notarized, stapled. Attached to the GitHub Release. |
-| Appcast | `appcast.xml` | Served over HTTPS (GitHub Pages off this repo). Sparkle polls it. |
-| Sparkle private key | **1Password only** | See below. Never in the repo, never in the release. |
+| Build number | derived | `git rev-list --count HEAD`, or `NEVERMORE_BUILD` to override. |
+| Release notes | `CHANGELOG.md` (repo root) | [Keep a Changelog](https://keepachangelog.com) format; also the source for App Store "What's New". |
+| Git tag | `v0.1.0` | Annotated and signed. `tag.gpgsign` is enabled in this repo. |
+| Store build | App Store Connect | Uploaded from Xcode; Apple signs and distributes. |
+| Direct build | `Nevermore-0.1.0.zip` | Notarized and stapled by `notarize.sh`, for distribution outside the store. |
 
-### The Sparkle signing key is the highest-risk artifact here
+### Signing identities
 
-Sparkle verifies each update with an EdDSA signature. The public half goes in
-the app's Info.plist (`SUPublicEDKey`) and is baked into every build we ship.
-The private half signs each release.
+Two, and they coexist:
 
-**If we lose the private key, every already-installed copy of Nevermore can
-never auto-update again** — the public key they carry can't be changed without
-an update, and the update can't be signed. Recovery means telling every user to
-manually download a fresh build.
-
-So: generate it once with Sparkle's `generate_keys`, immediately export and
-store it in 1Password, and confirm it's there before the first release ships. It
-also lives in the login keychain of whichever Mac does releases; that is a
-convenience copy, not the backup.
-
----
+- **Developer ID Application** — used by `make-app.sh` for local and direct
+  builds. Keep it stable: an ad-hoc signature changes identity every build,
+  which invalidates the Keychain ACL and makes the app unable to read its own
+  saved password.
+- **Apple Distribution** + a Mac App Store provisioning profile — used by the
+  Xcode app target for store uploads. See [MAS-RELEASE.md](MAS-RELEASE.md).
 
 ## 3. Branching
 
@@ -148,8 +148,8 @@ ahead, override it: `NEVERMORE_BUILD=<higher number> ./make-app.sh release`.
   in the user's database; changing the body means existing users never run the
   new version of it and new users get a different schema. Add `v4-…` instead.
 - **Downgrades are not supported.** An older build opening a newer database
-  will either fail to migrate or misread columns. Sparkle only moves users
-  forward, so this is acceptable — but it's why "just reinstall the old
+  will either fail to migrate or misread columns. The App Store only moves
+  users forward, so this is acceptable — but it's why "just reinstall the old
   version" is not a rollback plan (see §7).
 - **A release containing a new migration gets a pre-migration backup.** Before
   running migrations for the first time under a new build, copy the SQLite file
@@ -203,16 +203,20 @@ Not the build directory — the zip, on a machine that has never run it.
 
 ### Publish
 
-14. `git tag -s v0.3.1 -m "Nevermore 0.3.1" && git push --follow-tags`
-15. `gh release create v0.3.1 Nevermore-0.3.1.zip --notes-from-file <notes>`
-16. Regenerate and publish the appcast:
-    `generate_appcast ./releases/` — it signs each zip with the EdDSA key,
-    reads the version out of each bundle, and writes `appcast.xml`. Publish it
-    to the Pages site.
-17. Verify the loop end to end: install the **previous** version, let it check
-    for updates, confirm it offers the new one, installs it, and relaunches.
-    This is the only real test of the update pipeline, and it's the step most
-    likely to be skipped and most likely to be broken.
+**App Store:** Product ▸ Archive ▸ Distribute App ▸ App Store Connect, then
+submit for review. Paste the review notes from
+[MAS-RELEASE.md](MAS-RELEASE.md) — especially the pointer to demo mode, which
+is how a reviewer evaluates the app without an email account.
+
+**Direct build (optional):**
+
+```bash
+git tag -s v0.1.0 -m "Nevermore 0.1.0" && git push --follow-tags
+gh release create v0.1.0 Nevermore-0.1.0.zip --notes-from-file <notes>
+```
+
+`notarize.sh` refuses to build when `VERSION` and the tag disagree, so tag
+first.
 
 ### After
 
@@ -229,8 +233,8 @@ Not the build directory — the zip, on a machine that has never run it.
 - **Everything else** → batched. Ship when there's a coherent set of changes
   worth a user's restart, not on a calendar.
 
-Sparkle's default check interval (24h) is fine. Don't set it lower; this is not
-an app that benefits from nagging.
+The App Store handles update delivery and its own cadence; there is nothing to
+configure and nothing to nag with.
 
 ---
 
@@ -241,57 +245,50 @@ users can't safely downgrade to an older database schema.
 
 What we can actually do:
 
-1. **Pull the bad version from the appcast** immediately (remove its `<item>`,
-   republish). This stops it reaching anyone who hasn't updated yet — usually
-   the large majority within the first day.
-2. **Mark the GitHub Release as a pre-release** so it drops off the "latest"
+1. **Remove the build from sale** in App Store Connect, or halt a phased
+   release. This stops it reaching anyone who hasn't updated yet.
+2. **Mark any GitHub Release as a pre-release** so it drops off the "latest"
    link.
-3. **Ship a fixed PATCH forward.** This is the real remedy. Roll forward, never
-   back.
+3. **Ship a fixed PATCH forward.** This is the real remedy — App Review takes
+   days, so expedited review exists for exactly this, and asking for it is
+   reasonable when the bug loses mail. Roll forward, never back.
 
 Which is the argument for step 17 in the checklist: the cost of a bad release
 is high enough that the manual smoke test earns its time.
 
-## MAS divergence
+## Distribution channels
 
-**Apple rejects apps containing their own updater.** A Mac App Store build must
-not include Sparkle. If we pursue the MAS track, the app needs a build-time
-switch — Sparkle compiled in for the Developer ID product, compiled out for the
-MAS product — plus separate signing identities, a provisioning profile, and the
-thin Xcode target described in MAS-RELEASE.md.
+The App Store is primary. `make-app.sh` and `notarize.sh` remain the path for a
+Developer ID build — useful for testing the un-sandboxed app, and for anyone
+who wants a direct download. The differences between the two builds are
+tabulated at the end of [MAS-RELEASE.md](MAS-RELEASE.md); the one that bites
+during testing is that a sandboxed build keeps its data in a container and so
+always looks like a first run.
 
-Practically this means two release processes with a shared preflight, and a
-version that may sit in App Review for days while the direct build is already
-out. Worth doing when there's a reason to be in the store; not worth carrying
-the complexity before then. Until that decision, this document is the process.
+## What's done, and what's left
 
----
+Implemented:
 
-## Implementation checklist
+- [x] `Packages/NevermoreKit/VERSION`, read by `make-app.sh`, with the build
+      number from `git rev-list --count HEAD` and a `NEVERMORE_BUILD` override.
+- [x] `AppVersion` in `NevermoreKit`; no version string is hardcoded anywhere.
+- [x] `CHANGELOG.md`.
+- [x] Pre-migration database backup in `MessageStore`.
+- [x] `tag.gpgsign = true`.
+- [x] A guard in `notarize.sh` that refuses to build when `VERSION` and the tag
+      disagree.
 
-Described above but **not yet in the code**:
+Left, all of it in [MAS-RELEASE.md](MAS-RELEASE.md):
 
-- [ ] `Packages/NevermoreKit/VERSION` file.
-- [ ] `make-app.sh`: read `VERSION`, compute `CFBundleVersion` from
-      `git rev-list --count HEAD`, honor a `NEVERMORE_BUILD` override.
-- [ ] `AppVersion` accessor in `NevermoreKit`; replace the two hardcoded
-      `Nevermore/1.0` User-Agent strings.
-- [ ] `CHANGELOG.md`, seeded with an `Unreleased` section covering everything
-      built so far.
-- [ ] Sparkle: SPM dependency, `SUFeedURL` + `SUPublicEDKey` in the Info.plist
-      heredoc, updater wired into the app, "Check for Updates…" menu item.
-- [ ] EdDSA keypair generated and the private key backed up to 1Password.
-- [ ] GitHub Pages set up to serve `appcast.xml` over HTTPS.
-- [ ] Pre-migration database backup in `MessageStore`.
-- [ ] `tag.gpgsign = true`, or remember `-s` on every tag.
+- [ ] The thin Xcode app target — the only structural work.
+- [ ] App Store Connect record, signing assets, privacy nutrition label.
+- [ ] Publish `PRIVACY.md` at a stable URL (GitHub Pages, from `docs/`) and
+      point App Store Connect at it.
+- [ ] First archive, upload, and review submission.
 
 Open questions:
 
-- **Sparkle under the sandbox** needs its installer XPC services bundled and
-  extra entitlements. Irrelevant for the Developer ID build, but it means the
-  `NEVERMORE_SANDBOX=1` local build and the Sparkle build interact; worth
-  verifying they don't collide before it matters.
-- **Nothing verifies that `VERSION`, the tag, and the shipped bundle agree.** A
-  cheap guard in `notarize.sh` — refuse to build if `VERSION` doesn't match the
-  tag being released — would close the most likely process failure. Add it when
-  the above lands.
+- **Nothing verifies the built bundle's version against `CHANGELOG.md`.** The
+  tag guard covers `VERSION`; the changelog can still be forgotten.
+- **Convert the test harness to swift-testing** once the Xcode target makes
+  Xcode a hard requirement anyway.

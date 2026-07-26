@@ -3,10 +3,23 @@
 A brief for designing the interface. Written against Apple's macOS Human
 Interface Guidelines and the Tahoe (macOS 26) design system.
 
-> **This is a design-time snapshot and has drifted from the shipped UI** — the
-> app now supports any IMAP provider (so "Gmail" here often means "your mail
-> provider"), and some details changed during implementation. For current state
-> see [README.md](README.md); the source is authoritative.
+> **Design brief, reviewed against the shipped UI on 26 July 2026.** Most of it
+> was built as written, including the shortcut scheme below. Read "Gmail" as
+> "your mail provider" throughout — the app supports any IMAP host.
+>
+> **Shipped since this was written, and not described here:**
+>
+> - **Demo mode** — a fabricated sample mailbox reachable before onboarding,
+>   with a persistent purple banner while active.
+> - **First-run screen** — two-step sync progress with a percentage, carrying a
+>   "How Nevermore Works" explanation; also available from the Help menu.
+> - **Extra shortcuts** — `⇧U` (unsubscribe and delete, no confirmation) and
+>   `v` (open the newest message in the browser). Every action now advances the
+>   selection to the next sender.
+> - **Hidden debug tools** — double-click the version in Settings ▸ Advanced.
+>
+> For current behaviour see [README.md](README.md); the source is
+> authoritative.
 
 Companion document: [PLAN.md](PLAN.md) for architecture. The Python TUI
 predecessor whose functionality this must match or beat lived in `py/` (since
