@@ -28,3 +28,6 @@ token*.json
 
 # macOS
 .DS_Store
+
+# Sparkle signing: the public key is committed, the private key never is.
+sparkle-private-key.txt

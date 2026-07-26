@@ -35,6 +35,9 @@ struct AppCommands: Commands {
         // Help → Keyboard Shortcuts (⌘? works from anywhere; plain ? works while
         // the list is focused, handled by the table).
         CommandGroup(replacing: .help) {
+            // Present only in the Developer ID build; the App Store target
+            // omits Sparkle and this renders as nothing.
+            CheckForUpdatesButton()
             Button("How Nevermore Works") { model.showHowItWorks = true }
             Button("Keyboard Shortcuts") { model.showShortcuts = true }
                 .keyboardShortcut("?", modifiers: .command)

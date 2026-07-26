@@ -19,6 +19,13 @@ let package = Package(
             revision: "dbb1d0bb6bc7742249cf4800513c5562d54fa734"  // tag 1.8.0
         ),
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.9.0"),
+        // Sparkle powers in-app updates for the Developer ID / DMG build only.
+        // The Mac App Store target must not link it — Apple rejects apps that
+        // update themselves — which is why it hangs off NevermoreApp rather
+        // than NevermoreKit, and why every use of it is behind
+        // `#if canImport(Sparkle)`. An Xcode MAS target that omits this package
+        // compiles the updater out with no flags to remember.
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
     ],
     targets: [
         .target(
@@ -49,7 +56,10 @@ let package = Package(
         // a .app bundle by make-app.sh; needs full Xcode for the SDK.
         .executableTarget(
             name: "NevermoreApp",
-            dependencies: ["NevermoreKit"],
+            dependencies: [
+                "NevermoreKit",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]

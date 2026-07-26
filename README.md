@@ -102,6 +102,7 @@ cd Packages/NevermoreKit
 swift build                       # build everything
 swift run nevermore-tests         # run the test suite (95 tests)
 ./make-app.sh release             # produce a signed Nevermore.app
+./make-dmg.sh --notarize          # produce a notarized, stapled DMG
 ```
 
 `make-app.sh` wraps the SwiftPM executable into a proper `.app` bundle. It

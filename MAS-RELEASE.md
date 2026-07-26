@@ -10,11 +10,17 @@ distribution but **not** enough for the App Store: a SwiftPM executable can't
 carry a provisioning profile through validation. The store path needs a thin
 Xcode app target. That's the one real piece of work left, and it's step 5.
 
-> **No Sparkle.** Apple rejects apps that update themselves, so the App Store
-> build must not contain an updater — the store handles updates. This is why
-> [RELEASE.md](RELEASE.md) treats Sparkle as belonging only to a
-> Developer-ID-only future, and why it isn't in the project today. Choosing MAS
-> means choosing not to add it.
+> **No Sparkle in this target.** Apple rejects apps that update themselves. The
+> project *does* ship Sparkle in the DMG build, so the store target must leave
+> it out — which is why every use of it is behind `#if canImport(Sparkle)` and
+> why Sparkle is a dependency of the SwiftPM `NevermoreApp` target only. **Do
+> not add the Sparkle package to the Xcode app target**, and the updater
+> compiles out with nothing to remember. Verify before submitting:
+>
+> ```bash
+> otool -L "Nevermore.app/Contents/MacOS/Nevermore" | grep -i sparkle   # expect no output
+> ls "Nevermore.app/Contents/Frameworks"                                # expect no Sparkle.framework
+> ```
 
 ---
 
@@ -86,15 +92,28 @@ Create the app with bundle id `com.brooksc.nevermore`. You'll need:
 
 ### 7. Signing assets
 
-Automatic signing in Xcode will create these, or make them by hand in the
-Developer portal:
+Checked on this machine, 26 July 2026 — **the certificates are already
+installed**, presumably from an earlier project:
 
-- **Apple Distribution** certificate (the app)
-- **Mac Installer Distribution** certificate (the `.pkg`)
-- A **Mac App Store** provisioning profile for the bundle id
+| Asset | Status |
+|---|---|
+| Developer ID Application | ✅ present (used by `make-app.sh` / `make-dmg.sh`) |
+| Apple Distribution | ✅ present |
+| 3rd Party Mac Developer Installer | ✅ present |
+| Mac App Store provisioning profile for `com.brooksc.nevermore` | ❌ **missing** |
+| notarytool keychain credential | ❌ **missing** |
 
-These are separate from the Developer ID certificate `make-app.sh` uses. Both
-can coexist.
+Certificates are per-team, so the ones above carry over. A provisioning profile
+is per-bundle-id, so a profile from another app will not work — let Xcode
+create one when you enable automatic signing on the new target, or make it in
+the Developer portal.
+
+The notarytool credential is only needed for the DMG channel:
+
+```bash
+xcrun notarytool store-credentials nevermore-notary \
+  --apple-id "you@example.com" --team-id SU999VT2G2
+```
 
 ### 8. Privacy nutrition label
 
@@ -162,8 +181,9 @@ for tools that need a login. Mention it first if the review notes are trimmed.
 | Signed with | Developer ID Application | Apple Distribution + profile |
 | Sandbox | opt-in (`NEVERMORE_SANDBOX=1`) | always |
 | App Support | `~/Library/Application Support/` | container |
-| Updates | manual download (or Sparkle, if ever added) | App Store |
-| Notarization | `notarize.sh` | handled by Apple |
+| Updates | Sparkle | App Store |
+| Notarization | `make-dmg.sh --notarize` | handled by Apple |
+| Packaged as | `.dmg` | `.pkg`, uploaded by Xcode |
 
 The container relocation is worth remembering when testing: the two builds
 cannot see each other's accounts, so a sandboxed build always looks like a
