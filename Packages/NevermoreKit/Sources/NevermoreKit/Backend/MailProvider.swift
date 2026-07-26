@@ -93,7 +93,24 @@ public struct MailProvider: Sendable, Hashable, Identifiable {
     /// Returns nil for providers with no documented per-message link; the
     /// caller falls back to a sender search rather than guessing at a URL
     /// scheme that would just 404.
-    public func webMessageURL(messageId rawID: String) -> URL? {
+    /// Base Gmail URL that opens *the right account*.
+    ///
+    /// `/mail/u/<n>/` selects among signed-in Google accounts by index, so a
+    /// hardcoded `/u/0/` silently opens whichever Google account was signed
+    /// into first — the wrong mailbox for anyone with more than one.
+    ///
+    /// Measured, not assumed: `/mail/u/<email>/` returns Gmail's "Temporary
+    /// Error" page, but `/mail/?authuser=<email>` resolves and redirects to the
+    /// correct `/u/<n>/`, preserving the fragment. So use `authuser`.
+    static func gmailBase(_ account: String?) -> String {
+        guard let account, account.contains("@"),
+            let encoded = account.addingPercentEncoding(
+                withAllowedCharacters: .urlQueryAllowed)
+        else { return "https://mail.google.com/mail/u/0/" }
+        return "https://mail.google.com/mail/?authuser=\(encoded)"
+    }
+
+    public func webMessageURL(messageId rawID: String, account: String? = nil) -> URL? {
         let messageID = rawID.trimmingCharacters(in: CharacterSet(charactersIn: "<> "))
         guard !messageID.isEmpty else { return nil }
         // Message-IDs legitimately contain +, /, ?, and & — encode everything
@@ -106,18 +123,19 @@ public struct MailProvider: Sendable, Hashable, Identifiable {
 
         switch id {
         case "gmail":
-            return URL(string: "https://mail.google.com/mail/u/0/#search/rfc822msgid:\(encoded)")
+            return URL(
+                string: "\(Self.gmailBase(account))#search/rfc822msgid:\(encoded)")
         default:
             return nil
         }
     }
 
-    public func webSearchURL(fromSender address: String) -> URL? {
+    public func webSearchURL(fromSender address: String, account: String? = nil) -> URL? {
         let encoded = address.addingPercentEncoding(
             withAllowedCharacters: .urlQueryAllowed) ?? address
         switch id {
         case "gmail":
-            return URL(string: "https://mail.google.com/mail/u/0/#search/from:\(encoded)")
+            return URL(string: "\(Self.gmailBase(account))#search/from:\(encoded)")
         case "yahoo":
             return URL(string: "https://mail.yahoo.com/d/search/keyword=from%253A\(encoded)")
         case "fastmail":

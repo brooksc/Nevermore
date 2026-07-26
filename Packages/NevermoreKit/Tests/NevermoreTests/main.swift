@@ -771,6 +771,34 @@ Harness.suite("Per-message webmail links") {
             "https://mail.google.com/mail/u/0/#search/rfc822msgid:abc123%40mail.example.com")
     }
 
+    Harness.test("a known account routes via authuser, not /u/0/") {
+        // /u/0/ is "whichever Google account signed in first", which is the
+        // wrong mailbox for anyone with several. Verified in a real browser:
+        // /mail/u/<email>/ gives Gmail's "Temporary Error"; ?authuser= resolves.
+        let url = MailProvider.gmail.webMessageURL(
+            messageId: "<abc@ex.com>", account: "someone@gmail.com")
+        eq(
+            url?.absoluteString,
+            "https://mail.google.com/mail/?authuser=someone@gmail.com#search/rfc822msgid:abc%40ex.com"
+        )
+        let search = MailProvider.gmail.webSearchURL(
+            fromSender: "news@ex.com", account: "someone@gmail.com")
+        expect(
+            search?.absoluteString.contains("?authuser=someone@gmail.com#search/from:") == true,
+            "sender search also routes: \(search?.absoluteString ?? "nil")")
+    }
+
+    Harness.test("no account falls back to /u/0/") {
+        expect(
+            MailProvider.gmail.webMessageURL(messageId: "<a@b.com>", account: nil)?
+                .absoluteString.contains("/mail/u/0/") == true,
+            "unchanged when the account is unknown")
+        expect(
+            MailProvider.gmail.webMessageURL(messageId: "<a@b.com>", account: "not-an-email")?
+                .absoluteString.contains("/mail/u/0/") == true,
+            "a malformed account can't produce a broken authuser URL")
+    }
+
     Harness.test("characters that would break the URL are encoded") {
         // Real Message-IDs contain +, /, ?, & and = — left raw they'd be read
         // as URL syntax and land on the wrong search.

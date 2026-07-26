@@ -409,7 +409,8 @@ final class AppModel {
             showToast("Demo mode — opening webmail is disabled here.", undoLabel: nil, undo: nil)
             return
         }
-        guard let url = currentProvider.webSearchURL(fromSender: address) else { return }
+        guard let url = currentProvider.webSearchURL(fromSender: address, account: currentAccount)
+        else { return }
         NSWorkspace.shared.open(url)
     }
 
@@ -427,12 +428,17 @@ final class AppModel {
         guard let id = selection.first, let group = group(for: id), let message = group.latest
         else { return }
 
-        if let url = currentProvider.webMessageURL(messageId: message.messageId) {
+        if let url = currentProvider.webMessageURL(
+            messageId: message.messageId, account: currentAccount)
+        {
             Log.app.event("opening message in \(currentProvider.displayName)")
             NSWorkspace.shared.open(url)
             return
         }
-        guard let url = currentProvider.webSearchURL(fromSender: message.sender.address) else {
+        guard
+            let url = currentProvider.webSearchURL(
+                fromSender: message.sender.address, account: currentAccount)
+        else {
             showToast(
                 "\(currentProvider.displayName) has no web link Nevermore can open.",
                 undoLabel: nil, undo: nil)
@@ -1188,7 +1194,8 @@ final class AppModel {
         // Prefer the published web link; fall back to the provider's webmail
         // search so "manual" always has somewhere to go.
         let url = source.unsubscribe?.webTargets.first
-            ?? currentProvider.webSearchURL(fromSender: source.sender.address)
+            ?? currentProvider.webSearchURL(
+                fromSender: source.sender.address, account: currentAccount)
         guard let url else { return nil }
         return ManualUnsubscribe(
             id: id,
