@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nevermore — Frequently Asked Questions</title>
+<meta name="description" content="How Nevermore reads your mail, what it can't find, what happens to deleted messages, and why it says 'requested' instead of claiming success.">
+<style>
+  :root {
+    --ink: #14161a; --muted: #5b6270; --line: #e3e6ec;
+    --brand: #0a7cff; --bg: #fff; --panel: #f7f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #e9ecf1; --muted: #9aa3b2; --line: #2a2f3a; --bg: #101216; --panel: #171a20; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 17px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px; }
+  h1 { font-size: clamp(2rem, 5vw, 2.8rem); letter-spacing: -0.02em; margin: 0 0 .3em; }
+  h2 { font-size: 1.15rem; margin: 2.2em 0 .5em; letter-spacing: -0.01em; }
+  h2:first-of-type { margin-top: 1.4em; }
+  p { margin: 0 0 1em; }
+  a { color: var(--brand); }
+  header { padding: 70px 0 10px; }
+  .lede { color: var(--muted); font-size: 1.1rem; }
+  .back { display: inline-block; margin-bottom: 26px; font-size: .92rem; text-decoration: none; }
+  code {
+    font: .88em ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 5px; padding: 1px 5px;
+  }
+  .note {
+    background: var(--panel); border: 1px solid var(--line);
+    border-left: 3px solid var(--brand); border-radius: 8px;
+    padding: 14px 16px; margin: 1.2em 0; font-size: .95rem;
+  }
+  footer { margin: 80px 0 60px; padding-top: 26px; border-top: 1px solid var(--line); font-size: .9rem; color: var(--muted); }
+  footer a { margin-right: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <a class="back" href="./">← Nevermore</a>
+  <h1>Frequently asked questions</h1>
+  <p class="lede">Short answers, including the unflattering ones.</p>
+</header>
+
+<h2>Does Nevermore read my email?</h2>
+<p>
+  It reads message <em>headers</em> — sender, subject, date, and the unsubscribe
+  headers — and never downloads a message body. Headers are fetched with IMAP
+  <code>BODY.PEEK</code>, so reading them doesn't mark your mail as read either.
+  Everything stays on your Mac; there is no server to send it to.
+</p>
+
+<h2>Where does my password go?</h2>
+<p>
+  Into the macOS Keychain, stored so it can't ride a backup or Migration
+  Assistant transfer to another machine. It's never written to disk in the clear
+  and never logged. You give Nevermore an <em>app-specific password</em>, not
+  your real account password, and you can revoke it from your mail provider at
+  any time without changing anything else.
+</p>
+
+<h2>Why an app password instead of "Sign in with Google"?</h2>
+<p>
+  OAuth would mean registering a cloud project, putting a client secret in a
+  downloadable app, and asking you to grant a scope on a consent screen. An
+  app-specific password is narrower, revocable on its own, and requires no
+  third party in the middle. It also means Nevermore works the same way with
+  iCloud, Fastmail, Yahoo, and anything else that speaks IMAP.
+</p>
+
+<h2>Does deleting mail actually delete it?</h2>
+<p>
+  No — and that's deliberate. "Trash" moves messages to your provider's Trash
+  folder, where they sit under that provider's retention (30 days on Gmail) and
+  you can restore them yourself. Nevermore never issues an IMAP
+  <code>EXPUNGE</code>, so it has no way to destroy mail permanently. Small
+  batches also undo in-app with <code>⌘Z</code>.
+</p>
+
+<h2>Why didn't it find every message from a sender?</h2>
+<p>
+  Nevermore finds newsletters by the standard <code>List-Unsubscribe</code>
+  header. Nearly all legitimate bulk mail carries one — Gmail and Yahoo have
+  required it from bulk senders since 2024 — but a sender who only puts an
+  unsubscribe link in the body of the message is invisible to it.
+</p>
+<div class="note">
+  This matters when you delete: "trash this sender's messages" means the
+  messages Nevermore knows about, which may be fewer than a search in your
+  webmail shows. Finding the rest would mean reading your mail, which is exactly
+  what this app doesn't do.
+</div>
+<p>
+  Flagged and starred messages are also skipped on purpose, so your important
+  mail is never in scope.
+</p>
+
+<h2>Why does it say "requested" instead of "unsubscribed"?</h2>
+<p>
+  Because it can't know. Sending a one-click unsubscribe and getting HTTP 200
+  means the request was <em>accepted</em>, not that anyone acted on it —
+  endpoints routinely return success and keep mailing. Nevermore only says
+  "confirmed" when you saw a confirmation page yourself. Anything else would be
+  claiming a result it can't prove.
+</p>
+
+<h2>What if a sender keeps emailing me anyway?</h2>
+<p>
+  They show up in <strong>Reappeared</strong>, with a count of what's arrived
+  since you unsubscribed. From there you can finish the job by hand in the
+  built-in browser, or trash and ignore them for good. Catching that is the
+  reason the app is called Nevermore.
+</p>
+
+<h2>Which mail providers work?</h2>
+<p>
+  Anything that speaks IMAP. Gmail, iCloud, Yahoo, Fastmail, and AOL are
+  detected from your address; custom domains pick their provider. Folders are
+  discovered from the server rather than hard-coded, so unusual setups work too.
+</p>
+
+<h2>Why is the first sync slow?</h2>
+<p>
+  It reads the headers of your entire mail history once — a few minutes on a
+  large mailbox. After that it only looks at what's new, which takes a couple of
+  seconds. The app shows real progress while it works, and explains itself while
+  you wait.
+</p>
+
+<h2>Can I try it before giving it my password?</h2>
+<p>
+  Yes. The first screen offers <strong>Try the Demo</strong>: a full sample
+  mailbox with every button live and no credentials required. It runs on a
+  backend containing no network code at all, so nothing in demo mode can reach a
+  server.
+</p>
+
+<h2>Does it work on Intel Macs?</h2>
+<p>
+  The current build is Apple Silicon only. If you need an Intel build, say so on
+  the issue tracker — it's a build setting, not a rewrite.
+</p>
+
+<h2>Is it open source?</h2>
+<p>
+  The source is published so you can read exactly what an app holding your mail
+  credential does. That's not the same as open source: you may read, audit,
+  build, and run it for personal use, and modify it privately, but not
+  redistribute it, publish a fork, or use it commercially. See the
+  <a href="https://github.com/brooksc/Nevermore/blob/main/LICENSE">licence</a>.
+</p>
+
+<h2>What data do you collect?</h2>
+<p>
+  None. There is no server, no account, no analytics, no crash reporting, and no
+  update check that identifies you. The
+  <a href="https://github.com/brooksc/Nevermore/blob/main/PRIVACY.md">privacy policy</a>
+  is short because there's little to say.
+</p>
+
+<h2>Something went wrong. What do I do?</h2>
+<p>
+  Settings ▸ Advanced ▸ Export Diagnostics writes the app's own recent log
+  entries to a file you can read before deciding whether to share it. Then open
+  an issue on
+  <a href="https://github.com/brooksc/Nevermore/issues">GitHub</a>. Sender
+  addresses appear in those logs; message contents and your password never do.
+</p>
+
+<footer>
+  <a href="./">Home</a>
+  <a href="https://github.com/brooksc/Nevermore">GitHub</a>
+  <a href="https://github.com/brooksc/Nevermore/blob/main/PRIVACY.md">Privacy</a>
+  <a href="https://github.com/brooksc/Nevermore/issues">Support</a>
+</footer>
+
+</div>
+</body>
+</html>

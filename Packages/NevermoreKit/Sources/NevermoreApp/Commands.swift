@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Menu-bar commands (spec §8). Every primary verb has a shortcut, and items
@@ -41,6 +42,18 @@ struct AppCommands: Commands {
             Button("How Nevermore Works") { model.showHowItWorks = true }
             Button("Keyboard Shortcuts") { model.showShortcuts = true }
                 .keyboardShortcut("?", modifiers: .command)
+            Divider()
+            // The App Store requires a support URL anyway; an app that holds a
+            // mail credential should also make it easy to find out who wrote it
+            // and read the source.
+            Button("Frequently Asked Questions") { open("\(Self.website)faq.html") }
+            Button("Nevermore Website") { open(Self.website) }
+            Button("Privacy Policy") {
+                open("https://github.com/brooksc/Nevermore/blob/main/PRIVACY.md")
+            }
+            Button("Report an Issue…") {
+                open("https://github.com/brooksc/Nevermore/issues/new")
+            }
         }
 
         // Actions — the app's verbs
@@ -76,6 +89,15 @@ struct AppCommands: Commands {
             Button("Forget Unsubscribe Record") { model.forget(model.selection) }
                 .disabled(model.selection.isEmpty)
         }
+    }
+
+    /// Where the Help menu's links point. One place, so the marketing site and
+    /// the FAQ can't drift apart from the app that links to them.
+    static let website = "https://brooksc.github.io/Nevermore/"
+
+    private func open(_ urlString: String) {
+        guard let url = URL(string: urlString) else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private func unsubscribeSelected() {
