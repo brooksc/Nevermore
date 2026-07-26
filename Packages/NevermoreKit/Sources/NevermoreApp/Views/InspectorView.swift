@@ -6,6 +6,7 @@ import NevermoreKit
 struct InspectorView: View {
     @Bindable var model: AppModel
     var onUnsubscribe: (Set<GroupID>) -> Void
+    @State private var copiedEmail = false
 
     var body: some View {
         Group {
@@ -42,13 +43,24 @@ struct InspectorView: View {
                         Button {
                             NSPasteboard.general.clearContents()
                             NSPasteboard.general.setString(email, forType: .string)
+                            // Copying is otherwise completely silent — nothing
+                            // on screen changes, so it reads as a dead control.
+                            copiedEmail = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                copiedEmail = false
+                            }
                         } label: {
                             HStack(spacing: 4) {
-                                Text(email).font(.caption).foregroundStyle(.secondary)
-                                Image(systemName: "doc.on.doc").font(.caption2)
+                                Text(copiedEmail ? "Copied" : email)
+                                    .font(.caption)
+                                    .foregroundStyle(copiedEmail ? Color.green : .secondary)
+                                Image(systemName: copiedEmail ? "checkmark" : "doc.on.doc")
+                                    .font(.caption2)
+                                    .foregroundStyle(copiedEmail ? Color.green : .secondary)
                             }
                         }
                         .buttonStyle(.plain)
+                        .help("Copy \(email)")
                     }
                 }
 

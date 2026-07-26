@@ -632,7 +632,6 @@ final class AppModel {
                 sendAsAddresses = try await backend.sendAsAddresses()
                 await reloadFromStore()
                 await notifyNewReappearances()
-                await notifyNewSenders()
                 syncState = .idle
                 lastSyncedAt = Date()
                 Log.sync.event("sync complete: \(messages.count) new, \(groups.count) senders")
@@ -844,37 +843,6 @@ final class AppModel {
         try? await center.add(request)
     }
 
-    private static let knownSendersKey = "knownSenders"
-
-    /// Notify about senders that have newly appeared since the last sync, when
-    /// the setting is on. The first sync just seeds the known set — otherwise it
-    /// would "announce" the entire mailbox.
-    private func notifyNewSenders() async {
-        guard let store, AppSettings.notifyNewSenders else { return }
-        let current = Set(
-            groups
-                .filter { !ignoredKeys.contains($0.id.storageKey) && history[$0.id.storageKey] == nil }
-                .map(\.id.storageKey))
-        let known = store.stringSet(forKey: Self.knownSendersKey)
-        store.setStringSet(current, forKey: Self.knownSendersKey)
-        guard !known.isEmpty else { return }  // first run — seed only
-        let fresh = current.subtracting(known)
-        guard !fresh.isEmpty else { return }
-
-        let center = UNUserNotificationCenter.current()
-        guard let granted = try? await center.requestAuthorization(options: [.alert, .sound]),
-            granted
-        else { return }
-        let content = UNMutableNotificationContent()
-        content.title = "New senders in Nevermore"
-        content.body = fresh.count == 1
-            ? "1 new sender to review."
-            : "\(fresh.count) new senders to review."
-        content.sound = .default
-        try? await center.add(
-            UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
-    }
-
     /// How many messages arrived *after* the recorded unsubscribe — the number
     /// the Reappeared list is actually claiming.
     func messagesSinceUnsubscribe(_ id: GroupID) -> Int {
@@ -952,6 +920,8 @@ final class AppModel {
         let ids: Set<GroupID>
         let messageCount: Int
         let senderCount: Int
+        /// Where to put the cursor afterwards, captured before the rows go.
+        let advanceTo: GroupID?
     }
     var pendingTrash: PendingTrash?
 
@@ -962,7 +932,9 @@ final class AppModel {
         let targets = groups.filter { ids.contains($0.id) }
         let count = targets.reduce(0) { $0 + $1.messages.count }
         if count > AppSettings.trashConfirmThreshold {
-            pendingTrash = PendingTrash(ids: ids, messageCount: count, senderCount: targets.count)
+            pendingTrash = PendingTrash(
+                ids: ids, messageCount: count, senderCount: targets.count,
+                advanceTo: rowAfterSelection())
         } else {
             Task { await trash(ids) }
         }
@@ -971,7 +943,12 @@ final class AppModel {
     func confirmPendingTrash() {
         guard let pending = pendingTrash else { return }
         pendingTrash = nil
-        Task { await trash(pending.ids) }
+        // Advance like the below-threshold path does. The same button behaved
+        // two different ways depending on how much mail the sender had sent.
+        Task {
+            await trash(pending.ids)
+            advance(to: pending.advanceTo)
+        }
     }
 
     /// Undo is offered only up to this size — untrash searches the Trash folder
@@ -1037,10 +1014,32 @@ final class AppModel {
         }
     }
 
+    /// Drop unsubscribe records, with an undo.
+    ///
+    /// Forgetting silently moved a sender back into the working list with no
+    /// confirmation and no way back — the record is the app's only memory that
+    /// the unsubscribe ever happened, and recreating it means unsubscribing
+    /// again for real. So capture the records first and offer to restore them.
     func forget(_ ids: Set<GroupID>) {
         guard let store else { return }
+        let removed = ids.compactMap { history[$0.storageKey] }
         try? ids.forEach { try store.forgetUnsubscribe($0) }
         history = (try? store.unsubscribeHistory()) ?? history
+        guard !removed.isEmpty else { return }
+        let n = removed.count
+        showToast(
+            "Forgot \(n) unsubscribe record\(n == 1 ? "" : "s")", undoLabel: "Undo"
+        ) { [weak self] in
+            guard let self, let store = self.store else { return }
+            for record in removed {
+                guard let id = GroupID(storageKey: record.groupKey) else { continue }
+                try? store.recordUnsubscribe(
+                    id, senderName: record.senderName, senderEmail: record.senderEmail,
+                    senderDomain: record.senderDomain, url: record.url,
+                    outcome: record.outcome, attemptedAt: record.attemptedAt)
+            }
+            self.history = (try? store.unsubscribeHistory()) ?? self.history
+        }
     }
 
     // MARK: - Unsubscribe

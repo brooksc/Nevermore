@@ -47,7 +47,13 @@ struct HistoryView: View {
             }
             Spacer()
 
-            if let urlString = record.url, let url = URL(string: urlString) {
+            // The URL comes from a sender-authored List-Unsubscribe header, so
+            // it gets the same check as every other use of it. Handing an
+            // unvetted attacker-chosen link to the default browser was the one
+            // remaining unguarded path.
+            if let urlString = record.url, let url = URL(string: urlString),
+                DestinationGuard.isAllowed(url)
+            {
                 Button {
                     NSWorkspace.shared.open(url)
                 } label: {

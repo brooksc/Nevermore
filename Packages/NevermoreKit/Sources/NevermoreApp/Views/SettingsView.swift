@@ -14,7 +14,6 @@ struct SettingsView: View {
     // Sync
     @AppStorage("syncOnLaunch") private var syncOnLaunch = true
     @AppStorage("backgroundInterval") private var backgroundInterval = "hourly"
-    @AppStorage("notifyNewSenders") private var notifyNewSenders = true
     // Advanced
     @AppStorage("verboseLogging") private var verboseLogging = false
     @State private var showResetConfirm = false
@@ -91,7 +90,6 @@ struct SettingsView: View {
                     Text("Every hour").tag("hourly")
                     Text("Daily").tag("daily")
                 }
-                Toggle("Notify when new senders appear", isOn: $notifyNewSenders)
             }
             Section {
                 Button("Full Resync…") { showResyncConfirm = true }

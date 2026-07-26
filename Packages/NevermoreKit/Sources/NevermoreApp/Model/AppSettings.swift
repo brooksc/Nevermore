@@ -31,7 +31,4 @@ enum AppSettings {
         default: nil  // "off"
         }
     }
-    static var notifyNewSenders: Bool {
-        UserDefaults.standard.object(forKey: "notifyNewSenders") as? Bool ?? true
-    }
 }

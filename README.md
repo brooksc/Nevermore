@@ -51,8 +51,10 @@ Nevermore is the opposite shape:
   usable.
 - **Reappearance detection.** If a sender mails you again after a recorded
   unsubscribe, it surfaces in a dedicated collection with a notification.
-- **Keyboard triage.** `j`/`k` to move, `u` unsubscribe, `i` ignore, `d` trash,
-  `?` for the full list. Ignore and trash advance to the next sender.
+- **Keyboard triage.** `j`/`k` to move, `u` unsubscribe, `⇧U` unsubscribe and
+  delete without a confirmation, `v` open the newest message in your browser,
+  `i` ignore, `d` trash, `?` for the full list. Every action advances to the
+  next sender, so a mailbox can be cleared without touching the mouse.
 - **Trash with undo.** Messages move to your provider's Trash and `⌘Z` puts
   them back.
 - **Alias-aware.** Send-as addresses are inferred from your Sent folder, so
@@ -97,7 +99,7 @@ of what the app *won't* find.
 ```bash
 cd Packages/NevermoreKit
 swift build                       # build everything
-swift run nevermore-tests         # run the test suite (70 tests)
+swift run nevermore-tests         # run the test suite (95 tests)
 ./make-app.sh release             # produce a signed Nevermore.app
 ```
 
@@ -140,6 +142,7 @@ Packages/NevermoreKit/
 │   │   ├── Backend/           # MailBackend protocol, IMAP implementation
 │   │   ├── Unsubscribe/       # RFC 2369/8058 engine, SSRF destination guard
 │   │   ├── Store/             # GRDB/SQLite header cache
+│   │   ├── Demo/              # fabricated mailbox + a backend with no network
 │   │   └── Credentials/       # Keychain, account registry
 │   ├── NevermoreApp/          # SwiftUI app: views, sheets, AppModel
 │   └── Probe/                 # CLI harness for live-mailbox testing
@@ -148,6 +151,9 @@ Packages/NevermoreKit/
 
 `NevermoreKit` must not import SwiftUI — the domain logic stays testable
 without launching a UI.
+
+Release process and versioning: [RELEASE.md](RELEASE.md). Mac App Store
+specifics: [MAS-RELEASE.md](MAS-RELEASE.md).
 
 Design documents: [PLAN.md](PLAN.md) for architecture decisions and
 [UI_SPEC.md](UI_SPEC.md) for the interface brief. Both are design-time
@@ -171,6 +177,18 @@ built accordingly:
   the session and leak your password in cleartext.
 - **Device-bound credential.** The app password is stored
   `WhenUnlockedThisDeviceOnly`, so it can't ride a backup to another machine.
+- **Every sender-supplied URL is guarded** — the silent request, the redirect
+  chain, the in-app browser, and the "Manage" link in your unsubscribe history.
+
+## Your mail
+
+Nevermore **never permanently deletes anything**. "Trash" moves messages to your
+provider's Trash folder, where they sit under that provider's own retention
+(30 days on Gmail) and can be restored by you at any time. The app never issues
+an IMAP `EXPUNGE`. Small batches also offer an in-app undo with ⌘Z.
+
+The local database is a cache of headers. Deleting it loses your unsubscribe
+history and ignore list, not mail.
 
 Found something? Open an issue — or email if it's sensitive.
 

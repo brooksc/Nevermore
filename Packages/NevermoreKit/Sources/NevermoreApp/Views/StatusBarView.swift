@@ -65,8 +65,16 @@ struct StatusBarView: View {
                 Text("Reading \(done.formatted()) of \(total.formatted())").monospacedDigit()
             }
         case .failed(let message):
-            Label(message, systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.orange).lineLimit(1)
+            // Was a bare truncated label: a real failure ("Operation timed
+            // out") got clipped, explained nothing, and offered no way back.
+            HStack(spacing: 6) {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                    .help(message)
+                Button("Retry") { model.startSync() }
+                    .buttonStyle(.link)
+            }
         }
     }
 

@@ -255,7 +255,11 @@ public final class MessageStore: Sendable {
         senderEmail: String,
         senderDomain: String,
         url: String?,
-        outcome: Outcome
+        outcome: Outcome,
+        // Overridable so restoring a forgotten record keeps its original time.
+        // Stamping "now" would move the record past the sender's existing mail
+        // and quietly clear their reappeared status.
+        attemptedAt: Date = Date()
     ) throws {
         try pool.write { db in
             try db.execute(
@@ -270,7 +274,7 @@ public final class MessageStore: Sendable {
                     """,
                 arguments: [
                     id.storageKey, senderName, senderEmail, senderDomain, url,
-                    Date().timeIntervalSince1970, outcome.rawValue,
+                    attemptedAt.timeIntervalSince1970, outcome.rawValue,
                 ])
         }
     }
