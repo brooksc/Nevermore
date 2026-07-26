@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import NevermoreKit
 
@@ -88,6 +89,7 @@ struct OnboardingSheet: View {
             Form {
                 TextField("Email", text: $email, prompt: Text("you@example.com"))
                     .textContentType(.username)
+                    .lineLimit(1)
                     .disabled(reauthAccount != nil)  // fixed when re-authenticating
                 if needsManualProvider {
                     Picker("Provider", selection: $manualProviderID) {
@@ -97,9 +99,18 @@ struct OnboardingSheet: View {
                     }
                     .help("We didn't recognize this domain. Choose the service that hosts your mail (e.g. a custom domain on Google Workspace uses Gmail).")
                 }
+                // lineLimit(1) matters more than it looks: with `fixedSize`
+                // below, the field takes its *ideal* height, and a SecureField
+                // reports a wrapped multi-line ideal once the content is wider
+                // than the field — which is why a long app password inflated it.
                 SecureField("App password", text: $password,
                     prompt: Text("xxxx xxxx xxxx xxxx"))
+                    .lineLimit(1)
             }
+            // Without this the Form takes every point of height the sheet will
+            // give it and hands it to the last field, so the password box
+            // renders as a ~400pt empty rectangle.
+            .fixedSize(horizontal: false, vertical: true)
             .disabled(phase == .validating)
 
             Label(
@@ -107,6 +118,29 @@ struct OnboardingSheet: View {
                 systemImage: "lock.fill"
             )
             .font(.caption).foregroundStyle(.secondary)
+
+            // Offered before the password field is filled in, on purpose: the
+            // point of the demo is to see what the app does *before* deciding
+            // whether to hand it a credential.
+            if reauthAccount == nil {
+                Divider()
+                HStack(spacing: 8) {
+                    Image(systemName: "theatermasks.fill")
+                        .foregroundStyle(Tokens.demoAccent)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Not ready to sign in?").font(.callout.weight(.medium))
+                        Text("Explore a sample mailbox first. No account needed.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Try the Demo") {
+                        Task {
+                            await model.enterDemoMode()
+                            onDone()  // nothing else dismisses this sheet
+                        }
+                    }
+                }
+            }
 
             if case .validating = phase {
                 HStack(spacing: 6) {
@@ -122,7 +156,13 @@ struct OnboardingSheet: View {
             }
 
             HStack {
-                if !model.accounts.isEmpty {
+                // With no account there's nothing behind this sheet to go back
+                // to, and dismissal is disabled — so without this the only way
+                // out of a first run is Force Quit.
+                if model.accounts.isEmpty {
+                    Button("Quit") { NSApplication.shared.terminate(nil) }
+                        .keyboardShortcut(.cancelAction)
+                } else {
                     Button("Cancel", role: .cancel) { onDone() }
                 }
                 Spacer()

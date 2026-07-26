@@ -595,4 +595,335 @@ Harness.suite("DestinationGuard (SSRF)") {
     }
 }
 
+Harness.suite("Demo mailbox") {
+    let messages = DemoData.messages()
+
+    Harness.test("every message parses into a usable sender") {
+        expect(!messages.isEmpty, "demo data is not empty")
+        let bad = messages.filter { $0.sender.address.isEmpty || $0.sender.host.isEmpty }
+        expect(bad.isEmpty, "all From headers parsed: \(bad.count) failures")
+        let unnamed = messages.filter { $0.sender.displayName.isEmpty }
+        expect(unnamed.isEmpty, "every sender has a display name")
+    }
+
+    Harness.test("covers all four unsubscribe methods, for screenshots") {
+        // The demo exists partly to show the method icons. If a refactor drops
+        // one of these, the screenshots silently stop demonstrating it.
+        let oneClick = messages.contains { $0.unsubscribe?.supportsOneClick == true }
+        let web = messages.contains {
+            guard let u = $0.unsubscribe else { return false }
+            return !u.webTargets.isEmpty && !u.supportsOneClick
+        }
+        let mailto = messages.contains {
+            guard let u = $0.unsubscribe else { return false }
+            return u.webTargets.isEmpty && !u.mailtoTargets.isEmpty
+        }
+        let manual = messages.contains { $0.unsubscribe == nil }
+        expect(oneClick, "has a one-click sender")
+        expect(web, "has a web-link-only sender")
+        expect(mailto, "has a mailto-only sender")
+        expect(manual, "has a sender with no unsubscribe at all")
+    }
+
+    Harness.test("groups into a plausible table") {
+        let groups = Grouping().group(messages)
+        expect(groups.count >= 15, "enough rows to fill a window: \(groups.count)")
+        expect(groups.allSatisfy { !$0.messages.isEmpty }, "no empty groups")
+    }
+
+    Harness.test("messages are ordered newest first and dated in the past") {
+        let now = Date()
+        expect(messages.allSatisfy { $0.receivedAt <= now }, "nothing from the future")
+        let dates = messages.map(\.receivedAt)
+        expect(dates == dates.sorted(by: >), "sorted newest first")
+    }
+
+    Harness.test("message ids use a reserved domain") {
+        // Demo Message-IDs must never collide with, or resolve to, real hosts.
+        let leaked = messages.filter { !$0.messageId.hasSuffix("@example.invalid>") }
+        expect(leaked.isEmpty, "all demo Message-IDs use .invalid: \(leaked.count) leaked")
+    }
+}
+
+Harness.suite("Debug reset") {
+    Harness.test("resetAllLocalData clears databases, registry, and providers") {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("nevermore-reset-\(UUID().uuidString)")
+        let registry = AccountRegistry(directory: dir)
+        let account = "tester@example.com"
+
+        registry.add(account)
+        registry.setProviderID("gmail", for: account)
+        // Scoped so the store's SQLite connection is closed before the reset.
+        do { _ = try? MessageStore(path: registry.databasePath(for: account)) }
+        do { _ = try? MessageStore(path: registry.demoDatabasePath) }
+
+        let fm = FileManager.default
+        expect(registry.accounts() == [account], "account registered")
+        expect(fm.fileExists(atPath: registry.databasePath(for: account)), "account db exists")
+        expect(fm.fileExists(atPath: registry.demoDatabasePath), "demo db exists")
+
+        registry.resetAllLocalData()
+
+        expect(registry.accounts().isEmpty, "account list cleared")
+        expect(registry.providerID(for: account) == nil, "provider mapping cleared")
+        expect(
+            !fm.fileExists(atPath: registry.databasePath(for: account)), "account db deleted")
+        expect(!fm.fileExists(atPath: registry.demoDatabasePath), "demo db deleted")
+        // -wal/-shm siblings would otherwise resurrect a "reset" database.
+        for suffix in ["-wal", "-shm"] {
+            expect(
+                !fm.fileExists(atPath: registry.databasePath(for: account) + suffix),
+                "account db \(suffix) deleted")
+        }
+
+        try? fm.removeItem(at: dir)
+    }
+
+    Harness.test("reset leaves an unrelated directory's data alone") {
+        // The reset walks its own directory only — a second account registry
+        // (or a real user's data, if this ever ran with the wrong path) is
+        // untouched.
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+        let dirA = base.appendingPathComponent("nevermore-a-\(UUID().uuidString)")
+        let dirB = base.appendingPathComponent("nevermore-b-\(UUID().uuidString)")
+        let a = AccountRegistry(directory: dirA)
+        let b = AccountRegistry(directory: dirB)
+        a.add("a@example.com")
+        b.add("b@example.com")
+
+        a.resetAllLocalData()
+
+        expect(a.accounts().isEmpty, "A cleared")
+        expect(b.accounts() == ["b@example.com"], "B untouched")
+
+        try? FileManager.default.removeItem(at: dirA)
+        try? FileManager.default.removeItem(at: dirB)
+    }
+}
+
+Harness.suite("Unsubscribe header survives the database") {
+    // A mailto: token in ?subject= is what makes many unsubscribes work; the
+    // store used to keep only the address.
+    let header = "<https://ex.com/u?id=1>, <mailto:unsub@ex.com?subject=stop-abc123>"
+
+    Harness.test("all targets and the mailto query round-trip") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([
+                EmailMessage(
+                    uid: MessageUID(1), sender: EmailSender(header: "A <a@ex.com>"),
+                    subject: "s", receivedAt: Date(), isUnread: true,
+                    unsubscribe: ListUnsubscribe(
+                        header: header, postHeader: "List-Unsubscribe=One-Click"))
+            ])
+            guard let back = try store.allMessages().first?.unsubscribe else {
+                return expect(false, "message read back")
+            }
+            expect(back.webTargets.count == 1, "web target kept")
+            expect(back.mailtoTargets.count == 1, "mailto target kept — was dropped entirely")
+            expect(
+                back.mailtoTargets.first?.subject == "stop-abc123",
+                "mailto subject token kept: \(back.mailtoTargets.first?.subject ?? "nil")")
+            expect(back.supportsOneClick, "one-click flag kept")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("legacy rows holding a bare URI still decode") {
+        // Rows written by the previous format have no angle brackets.
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([makeMessage(2, from: "B <b@ex.com>", unsub: "<https://ex.com/legacy>")])
+            let back = try store.allMessages().first?.unsubscribe
+            expect(
+                back?.webTargets.first?.absoluteString == "https://ex.com/legacy",
+                "legacy URI decodes")
+        } catch { expect(false, "threw: \(error)") }
+    }
+}
+
+Harness.suite("Sender label determinism") {
+    Harness.test("two equally-common display names pick the same one every time") {
+        func label() -> String {
+            SenderGroup(
+                id: GroupID(kind: .domain, key: "ex.com"),
+                messages: [
+                    EmailMessage(
+                        uid: MessageUID(1), sender: EmailSender(header: "Zeta <z@ex.com>"),
+                        subject: "", receivedAt: Date(), isUnread: false, unsubscribe: nil),
+                    EmailMessage(
+                        uid: MessageUID(2), sender: EmailSender(header: "Alpha <a@ex.com>"),
+                        subject: "", receivedAt: Date(), isUnread: false, unsubscribe: nil),
+                ]
+            ).displayName
+        }
+        let first = label()
+        expect(first == "Alpha", "ties resolve to the lexicographically first name, got \(first)")
+        expect((0..<50).allSatisfy { _ in label() == first }, "stable across repeats")
+    }
+}
+
+Harness.suite("Per-message webmail links") {
+    Harness.test("Gmail links via rfc822msgid, brackets stripped") {
+        let url = MailProvider.gmail.webMessageURL(messageId: "<abc123@mail.example.com>")
+        eq(
+            url?.absoluteString,
+            "https://mail.google.com/mail/u/0/#search/rfc822msgid:abc123%40mail.example.com")
+    }
+
+    Harness.test("characters that would break the URL are encoded") {
+        // Real Message-IDs contain +, /, ?, & and = — left raw they'd be read
+        // as URL syntax and land on the wrong search.
+        let url = MailProvider.gmail.webMessageURL(messageId: "<a+b/c?d&e=f@ex.com>")
+        let s = url?.absoluteString ?? ""
+        expect(s.contains("%2B"), "+ encoded")
+        expect(s.contains("%2F"), "/ encoded")
+        expect(s.contains("%3F"), "? encoded")
+        expect(s.contains("%26"), "& encoded")
+        expect(s.contains("%3D"), "= encoded")
+        expect(!s.dropFirst("https://mail.google.com/mail/u/0/#search/rfc822msgid:".count)
+            .contains("@"), "@ encoded")
+    }
+
+    Harness.test("no link without a message id, or for other providers") {
+        expect(MailProvider.gmail.webMessageURL(messageId: "") == nil, "empty id")
+        expect(MailProvider.gmail.webMessageURL(messageId: "<>") == nil, "brackets only")
+        for other in MailProvider.known where other.id != "gmail" {
+            expect(
+                other.webMessageURL(messageId: "<a@b.com>") == nil,
+                "\(other.id) has no documented per-message link")
+        }
+    }
+}
+
+Harness.suite("Trash batching") {
+    /// Stands in for the IMAP server: records each MOVE's size and can be told
+    /// to fail once a cumulative limit is passed, the way a real timeout does.
+    final class FakeMover: @unchecked Sendable {
+        var batches: [Int] = []
+        var failAfterMoved: Int?
+        func move(_ count: Int, movedSoFar: Int) throws {
+            if let limit = failAfterMoved, movedSoFar + count > limit {
+                struct Timeout: Error {}
+                throw Timeout()
+            }
+            batches.append(count)
+        }
+    }
+
+    /// Mirrors IMAPBackend.trash's loop so the batching rule is testable
+    /// without a live server.
+    func runTrash(uids: [MessageUID], chunk: Int, mover: FakeMover) throws -> [MessageUID] {
+        var moved: [MessageUID] = []
+        var offset = 0
+        while offset < uids.count {
+            let end = min(offset + chunk, uids.count)
+            let batch = Array(uids[offset..<end])
+            do {
+                try mover.move(batch.count, movedSoFar: moved.count)
+                moved.append(contentsOf: batch)
+            } catch {
+                if moved.isEmpty { throw error }
+                return moved
+            }
+            offset = end
+        }
+        return moved
+    }
+
+    let many = (1...1127).map { MessageUID(UInt32($0)) }
+
+    Harness.test("a 1,127-message trash is split into bounded batches") {
+        // The bug: one MOVE with every UID timed out and moved nothing.
+        let mover = FakeMover()
+        let moved = try? runTrash(uids: many, chunk: 200, mover: mover)
+        eq(moved?.count, 1127)
+        eq(mover.batches.count, 6)
+        expect(mover.batches.allSatisfy { $0 <= 200 }, "no batch exceeds the limit")
+        eq(mover.batches.reduce(0, +), 1127)
+    }
+
+    Harness.test("a mid-run failure reports what actually moved") {
+        let mover = FakeMover()
+        mover.failAfterMoved = 500
+        let moved = try? runTrash(uids: many, chunk: 200, mover: mover)
+        // Two full batches land; the third would cross the limit and stops it.
+        eq(moved?.count, 400)
+        expect((moved?.count ?? 0) < many.count, "partial, not all")
+    }
+
+    Harness.test("failing on the very first batch throws instead of claiming success") {
+        let mover = FakeMover()
+        mover.failAfterMoved = 0
+        var threw = false
+        do { _ = try runTrash(uids: many, chunk: 200, mover: mover) } catch { threw = true }
+        expect(threw, "nothing moved -> error, not an empty success")
+    }
+}
+
+Harness.suite("Selection cursor") {
+    func ids(_ names: [String]) -> [GroupID] { names.map { GroupID(kind: .domain, key: $0) } }
+    func set(_ names: [String]) -> Set<GroupID> { Set(ids(names)) }
+    let list = ids(["a", "b", "c", "d", "e"])
+
+    Harness.test("single selection lands on the row below") {
+        eq(SelectionCursor.rowAfterRemoving(set(["b"]), from: list)?.key, "c")
+    }
+
+    Harness.test("a contiguous block lands below the whole block") {
+        // The bug: `selection.first` on a Set could pick "b", land on "c",
+        // and select a row that was itself about to disappear.
+        eq(SelectionCursor.rowAfterRemoving(set(["b", "c", "d"]), from: list)?.key, "e")
+    }
+
+    Harness.test("a scattered selection skips every selected row") {
+        eq(SelectionCursor.rowAfterRemoving(set(["a", "c", "e"]), from: list)?.key, "d")
+        eq(SelectionCursor.rowAfterRemoving(set(["b", "d", "e"]), from: list)?.key, "c")
+    }
+
+    Harness.test("selecting through the end falls back above the selection") {
+        eq(SelectionCursor.rowAfterRemoving(set(["d", "e"]), from: list)?.key, "c")
+        eq(SelectionCursor.rowAfterRemoving(set(["e"]), from: list)?.key, "d")
+    }
+
+    Harness.test("selecting everything leaves nowhere to go") {
+        expect(
+            SelectionCursor.rowAfterRemoving(set(["a", "b", "c", "d", "e"]), from: list) == nil,
+            "nil, not a ghost row")
+        expect(SelectionCursor.rowAfterRemoving([], from: list) == nil, "empty selection")
+        expect(SelectionCursor.rowAfterRemoving(set(["a"]), from: []) == nil, "empty list")
+    }
+
+    Harness.test("the answer doesn't depend on Set iteration order") {
+        // The original defect was invisible precisely because it only showed up
+        // for some hash orderings. Rebuild the set repeatedly and demand one
+        // answer — Set ordering varies per process and per insertion sequence.
+        let answers = Set(
+            (0..<200).map { seed -> String in
+                var s = Set<GroupID>()
+                let members = ids(["b", "c", "d"])
+                for m in (seed % 2 == 0 ? members : members.reversed()) { s.insert(m) }
+                return SelectionCursor.rowAfterRemoving(s, from: list)?.key ?? "nil"
+            })
+        eq(answers, ["e"])
+    }
+
+    Harness.test("j and k anchor on the edge you're travelling from") {
+        // Down from the bottom of the block, up from the top — not from an
+        // arbitrary row inside it.
+        eq(SelectionCursor.move(from: set(["b", "c"]), by: 1, in: list)?.key, "d")
+        eq(SelectionCursor.move(from: set(["b", "c"]), by: -1, in: list)?.key, "a")
+    }
+
+    Harness.test("moving past either end stays put") {
+        eq(SelectionCursor.move(from: set(["e"]), by: 1, in: list)?.key, "e")
+        eq(SelectionCursor.move(from: set(["a"]), by: -1, in: list)?.key, "a")
+    }
+
+    Harness.test("no selection enters the list from the travelling end") {
+        eq(SelectionCursor.move(from: [], by: 1, in: list)?.key, "a")
+        eq(SelectionCursor.move(from: [], by: -1, in: list)?.key, "e")
+    }
+}
+
 exit(Harness.finish())

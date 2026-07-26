@@ -5,7 +5,12 @@ import NevermoreKit
 struct SenderTableView: View {
     @Bindable var model: AppModel
     var onUnsubscribe: (Set<GroupID>) -> Void
+    var onUnsubscribeAndDelete: (Set<GroupID>) -> Void
     var onManual: (GroupID) -> Void
+    /// Owned by the window so focus can be handed back after a sheet closes —
+    /// otherwise dismissing one leaves nothing focused and the single-key
+    /// shortcuts stop responding until the user clicks a row.
+    @FocusState.Binding var isFocused: Bool
     var onDoubleClick: (GroupID) -> Void
 
     var body: some View {
@@ -49,12 +54,16 @@ struct SenderTableView: View {
             }
             .width(110)
 
-            TableColumn("") { row in
+            // Named, not blank: an unlabelled glyph column reads as decoration,
+            // so nobody thinks to hover it for the tooltip that's already there.
+            // Help ▸ How Nevermore Works carries the full legend.
+            TableColumn("Unsubscribe") { row in
                 MethodIcon(method: row.method)
                     .frame(maxWidth: .infinity)
             }
-            .width(44)
+            .width(88)
         }
+        .focused($isFocused)
         .contextMenu(forSelectionType: GroupID.self) { ids in
             rowMenu(ids)
         } primaryAction: { ids in
@@ -64,11 +73,26 @@ struct SenderTableView: View {
         // selection; ? opens the shortcut list. (⌘-shortcuts also work via menus.)
         .onKeyPress("j") { model.moveSelection(by: 1); return .handled }
         .onKeyPress("k") { model.moveSelection(by: -1); return .handled }
-        .onKeyPress("u") {
-            if !model.selection.isEmpty { onUnsubscribe(model.selection) }
+        // u unsubscribes; ⇧U unsubscribes *and* trashes with no confirmation —
+        // the full-speed triage stroke. Recoverable via the provider's Trash
+        // and ⌘Z, which is what makes skipping the confirm defensible.
+        //
+        // One handler taking both cases: the plain `onKeyPress(KeyEquivalent)`
+        // overload doesn't match a shifted key at all, so ⇧U silently did
+        // nothing. This form gets the modifiers. Both cases are listed because
+        // the reported key is "U" or "u" depending on the shift state.
+        .onKeyPress(keys: ["u", "U"]) { press in
+            guard !model.selection.isEmpty else { return .handled }
+            if press.modifiers.contains(.shift) {
+                onUnsubscribeAndDelete(model.selection)
+            } else {
+                onUnsubscribe(model.selection)
+            }
             return .handled
         }
         // Ignore/trash advance to the next row so triage keeps flowing.
+        // v opens the newest message in the browser — read it, then decide.
+        .onKeyPress("v") { model.viewLatestMessage(); return .handled }
         .onKeyPress("i") { model.ignoreAndAdvance(); return .handled }
         .onKeyPress("d") { model.trashAndAdvance(); return .handled }
         .onKeyPress(.init("?")) { model.showShortcuts = true; return .handled }
@@ -81,7 +105,11 @@ struct SenderTableView: View {
     @ViewBuilder
     private func rowMenu(_ ids: Set<GroupID>) -> some View {
         let targets = ids.isEmpty ? model.selection : ids
+        Button("View Latest Message") { model.viewLatestMessage() }
+            .disabled(targets.count != 1)
+        Divider()
         Button("Unsubscribe") { onUnsubscribe(targets) }
+        Button("Unsubscribe and Delete Messages") { onUnsubscribeAndDelete(targets) }
         if targets.count == 1, let id = targets.first {
             Button("Unsubscribe in Browser…") { onManual(id) }
         }

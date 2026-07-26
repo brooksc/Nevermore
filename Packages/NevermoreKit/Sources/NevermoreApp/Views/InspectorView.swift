@@ -150,10 +150,13 @@ struct InspectorView: View {
             .buttonStyle(.borderedProminent)
             .disabled(!group.canUnsubscribe)
 
+            // …AndAdvance, matching i and d. Plain `ignore`/`requestTrash` empty
+            // the selection, so clicking a button here left the inspector
+            // showing "No sender selected" while the keyboard moved you on.
             HStack(spacing: 8) {
-                Button("Ignore") { model.ignore([group.id]) }
+                Button("Ignore") { model.ignoreAndAdvance() }
                     .frame(maxWidth: .infinity)
-                Button("Trash Messages") { model.requestTrash([group.id]) }
+                Button("Trash Messages") { model.trashAndAdvance() }
                     .frame(maxWidth: .infinity)
             }
         }
@@ -178,9 +181,9 @@ struct InspectorView: View {
             }
             .buttonStyle(.borderedProminent)
             HStack(spacing: 8) {
-                Button("Ignore") { model.ignore(model.selection) }
+                Button("Ignore") { model.ignoreAndAdvance() }
                     .frame(maxWidth: .infinity)
-                Button("Trash Messages") { model.requestTrash(model.selection) }
+                Button("Trash Messages") { model.trashAndAdvance() }
                     .frame(maxWidth: .infinity)
             }
         }

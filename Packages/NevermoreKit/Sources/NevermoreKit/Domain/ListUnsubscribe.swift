@@ -19,6 +19,13 @@ public struct ListUnsubscribe: Hashable, Sendable {
     public let mailtoTargets: [MailtoTarget]
     /// True when `List-Unsubscribe-Post: List-Unsubscribe=One-Click` was present.
     public let supportsOneClick: Bool
+    /// The header exactly as the sender wrote it.
+    ///
+    /// Kept so the store can persist the whole thing and re-parse it later.
+    /// Storing only the parsed parts loses the alternate targets *and* the
+    /// mailto query string — and senders routinely put a per-recipient token in
+    /// `?subject=`, without which the unsubscribe silently does nothing.
+    public let raw: String
 
     public var isEmpty: Bool { webTargets.isEmpty && mailtoTargets.isEmpty }
 
@@ -45,6 +52,7 @@ public struct ListUnsubscribe: Hashable, Sendable {
 
         self.webTargets = web
         self.mailtoTargets = mailto
+        self.raw = header
         // RFC 8058 requires the exact token; anything else is not one-click.
         self.supportsOneClick = (postHeader ?? "")
             .lowercased()

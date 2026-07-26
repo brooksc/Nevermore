@@ -7,7 +7,11 @@ import NevermoreKit
 struct MainWindowView: View {
     @Bindable var model: AppModel
     @State private var unsubTargets: [AppModel.UnsubTarget]?
+    @State private var immediateDelete = false
     @State private var manualTarget: AppModel.ManualUnsubscribe?
+    /// Keyboard focus for the sender list, so it can be restored after any
+    /// sheet closes and single-key triage keeps working without a click.
+    @FocusState private var listFocused: Bool
 
     var body: some View {
         NavigationSplitView {
@@ -21,14 +25,20 @@ struct MainWindowView: View {
         .navigationTitle(model.collection.title)
         .searchable(text: $model.searchText, prompt: "Search")
         .toolbar { toolbar }
-        .sheet(item: unsubBinding) { targets in
-            UnsubscribeFlow(model: model, targets: targets.value, onManualFallback: beginManual)
+        .sheet(item: unsubBinding, onDismiss: refocusList) { targets in
+            UnsubscribeFlow(
+                model: model, targets: targets.value,
+                immediateDelete: targets.immediateDelete,
+                onManualFallback: beginManual)
         }
-        .sheet(item: $manualTarget) { target in
+        .sheet(item: $manualTarget, onDismiss: refocusList) { target in
             WebUnsubscribeSheet(model: model, target: target)
         }
-        .sheet(isPresented: $model.showShortcuts) {
+        .sheet(isPresented: $model.showShortcuts, onDismiss: refocusList) {
             KeyboardShortcutsView()
+        }
+        .sheet(isPresented: $model.showHowItWorks, onDismiss: refocusList) {
+            HowItWorksSheet { model.showHowItWorks = false }
         }
         .confirmationDialog(
             "Move messages to Trash?",
@@ -47,6 +57,9 @@ struct MainWindowView: View {
         .onReceive(NotificationCenter.default.publisher(for: .unsubscribeSelected)) { _ in
             beginUnsubscribe(model.selection)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .unsubscribeAndDeleteSelected)) { _ in
+            beginUnsubscribeAndDelete(model.selection)
+        }
         // Clicking a row (selecting it) opens the inspector by default.
         .onChange(of: model.selection) { _, selection in
             if !selection.isEmpty { model.showInspector = true }
@@ -58,6 +71,10 @@ struct MainWindowView: View {
     @ViewBuilder
     private var content: some View {
         VStack(spacing: 0) {
+            if model.isDemoMode {
+                DemoBanner(model: model)
+                Divider()
+            }
             if !model.hasLoadedOnce {
                 // Nothing has loaded yet (e.g. behind the Keychain dialog or
                 // during first connect) — don't claim any status.
@@ -66,6 +83,12 @@ struct MainWindowView: View {
                     Text("Loading your mailbox…").foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.isSyncing && model.groups.isEmpty {
+                // First sync on a new account: the list is empty because
+                // nothing has been read yet, not because there's nothing to
+                // find. Without this the window claims "You're all caught up"
+                // for the several minutes the first sync takes.
+                firstSyncState
             } else {
                 collectionContent
             }
@@ -92,7 +115,9 @@ struct MainWindowView: View {
                     SenderTableView(
                         model: model,
                         onUnsubscribe: beginUnsubscribe,
+                        onUnsubscribeAndDelete: beginUnsubscribeAndDelete,
                         onManual: beginManual,
+                        isFocused: $listFocused,
                         onDoubleClick: { id in
                             model.selection = [id]
                             model.showInspector = true
@@ -100,6 +125,56 @@ struct MainWindowView: View {
                 }
             }
         }
+    }
+
+    /// Full-window progress for the very first sync, which scans the whole
+    /// mailbox and can run for minutes. Doubles as the first-run explanation —
+    /// the user is looking at this screen anyway, so it's the one moment they'll
+    /// actually read how the app works.
+    private var firstSyncState: some View {
+        VStack(spacing: 24) {
+            VStack(spacing: 10) {
+                Text("Setting up your mailbox").font(.title3.weight(.semibold))
+
+                if let step = model.syncState.step {
+                    Text("Step \(step.number) of 2 · \(step.name)")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
+                if let fraction = model.syncState.fractionComplete {
+                    HStack(spacing: 10) {
+                        ProgressView(value: fraction).frame(width: 220)
+                        Text(fraction.formatted(.percent.precision(.fractionLength(0))))
+                            .font(.caption).monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .frame(width: 34, alignment: .leading)
+                    }
+                } else {
+                    ProgressView().controlSize(.small)
+                }
+
+                if let detail = model.syncState.detail {
+                    Text(detail).font(.callout).foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+
+                // A definite width, and no `fixedSize`. Under `maxWidth` alone
+                // the text gets no concrete width proposal, wraps to almost one
+                // character per line, and reports a ~9000pt ideal height — which
+                // NavigationSplitView adopts for *both* columns, pushing the
+                // sidebar thousands of points off-screen.
+                Text("Only the first sync reads your whole mail history. Later syncs just look at what's new.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(width: 380)
+            }
+
+            Divider().frame(width: 300)
+
+            HowItWorksView(compact: true)
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
@@ -121,7 +196,7 @@ struct MainWindowView: View {
                 systemImage: "tray",
                 title: "No newsletters found",
                 message: "Nothing in this mailbox carries an unsubscribe header yet.",
-                actionTitle: "Sync Now", action: { Task { await model.sync() } })
+                actionTitle: "Sync Now", action: { model.startSync() })
         }
     }
 
@@ -131,10 +206,10 @@ struct MainWindowView: View {
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .primaryAction) {
             Button {
-                Task { await model.sync() }
+                model.startSync()
             } label: { Image(systemName: "arrow.clockwise") }
             .help("Sync now")
-            .disabled(isSyncing)
+            .disabled(model.isSyncing)
         }
         ToolbarItem(placement: .primaryAction) {
             Button {
@@ -165,17 +240,31 @@ struct MainWindowView: View {
         }
     }
 
-    private var isSyncing: Bool {
-        if case .idle = model.syncState { return false }
-        if case .failed = model.syncState { return false }
-        return true
-    }
-
     // MARK: - Unsubscribe flow presentation
+
+    /// Hand keyboard focus back to the list after a sheet closes.
+    ///
+    /// A beat late on purpose: setting focus in the same turn the sheet is torn
+    /// down gets swallowed, because the window is still resigning the sheet's
+    /// first responder.
+    private func refocusList() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { listFocused = true }
+    }
 
     private func beginUnsubscribe(_ ids: Set<GroupID>) {
         let plan = model.plan(for: ids)
         guard !plan.isEmpty else { return }
+        immediateDelete = false
+        unsubTargets = plan
+    }
+
+    /// Unsubscribe and trash the messages in one keystroke, no confirmation.
+    /// Recoverable: the messages go to the provider's Trash, and ⌘Z restores
+    /// them for batches under the undo limit.
+    private func beginUnsubscribeAndDelete(_ ids: Set<GroupID>) {
+        let plan = model.plan(for: ids)
+        guard !plan.isEmpty else { return }
+        immediateDelete = true
         unsubTargets = plan
     }
 
@@ -187,13 +276,23 @@ struct MainWindowView: View {
     /// Wrap the target array so `.sheet(item:)` can present it.
     private var unsubBinding: Binding<IdentifiedTargets?> {
         Binding(
-            get: { unsubTargets.map(IdentifiedTargets.init) },
+            get: {
+                unsubTargets.map { IdentifiedTargets($0, immediateDelete: immediateDelete) }
+            },
             set: { unsubTargets = $0?.value })
     }
 
     struct IdentifiedTargets: Identifiable {
         let value: [AppModel.UnsubTarget]
-        var id: String { value.map { $0.id.storageKey }.joined() }
-        init(_ value: [AppModel.UnsubTarget]) { self.value = value }
+        let immediateDelete: Bool
+        /// Include the mode in the identity: presenting the same senders once
+        /// with a confirm and once without must count as two different sheets.
+        var id: String {
+            value.map { $0.id.storageKey }.joined() + (immediateDelete ? "|delete" : "")
+        }
+        init(_ value: [AppModel.UnsubTarget], immediateDelete: Bool = false) {
+            self.value = value
+            self.immediateDelete = immediateDelete
+        }
     }
 }

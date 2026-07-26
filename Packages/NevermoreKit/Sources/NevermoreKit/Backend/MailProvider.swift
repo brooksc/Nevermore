@@ -83,6 +83,35 @@ public struct MailProvider: Sendable, Hashable, Identifiable {
     /// as the manual-unsubscribe fallback when a newsletter has no header link).
     /// Returns a deep search link where the provider supports one, else the
     /// webmail home, else nil.
+    /// Deep link to one specific message in the provider's web UI.
+    ///
+    /// Gmail's own URLs (`#inbox/FMfcgz…`) use an internal thread id that IMAP
+    /// never exposes, so those can't be reconstructed. `rfc822msgid:` is
+    /// Gmail's documented search operator for the RFC 5322 `Message-ID`, which
+    /// *is* fetched and stored — searching it resolves to the single message.
+    ///
+    /// Returns nil for providers with no documented per-message link; the
+    /// caller falls back to a sender search rather than guessing at a URL
+    /// scheme that would just 404.
+    public func webMessageURL(messageId rawID: String) -> URL? {
+        let messageID = rawID.trimmingCharacters(in: CharacterSet(charactersIn: "<> "))
+        guard !messageID.isEmpty else { return nil }
+        // Message-IDs legitimately contain +, /, ?, and & — encode everything
+        // outside the RFC 3986 unreserved set so none of it is read as syntax.
+        let unreserved = CharacterSet(
+            charactersIn:
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        guard let encoded = messageID.addingPercentEncoding(withAllowedCharacters: unreserved)
+        else { return nil }
+
+        switch id {
+        case "gmail":
+            return URL(string: "https://mail.google.com/mail/u/0/#search/rfc822msgid:\(encoded)")
+        default:
+            return nil
+        }
+    }
+
     public func webSearchURL(fromSender address: String) -> URL? {
         let encoded = address.addingPercentEncoding(
             withAllowedCharacters: .urlQueryAllowed) ?? address

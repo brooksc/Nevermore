@@ -82,7 +82,11 @@ struct ReappearedCollectionView: View {
                             }
                             Spacer()
                             VStack(alignment: .trailing, spacing: 6) {
-                                Text("\(row.count) new since unsubscribing")
+                                // row.count is the sender's whole history, which
+                                // is not what "since unsubscribing" means — it
+                                // read as though a sender had sent hundreds of
+                                // messages since you unsubscribed last week.
+                                Text("\(model.messagesSinceUnsubscribe(row.id)) new since unsubscribing")
                                     .font(.caption).foregroundStyle(.secondary)
                                 HStack(spacing: 8) {
                                     // Escalate to the browser — retrying the same
@@ -90,10 +94,7 @@ struct ReappearedCollectionView: View {
                                     Button("Unsubscribe in Browser") { onManual(row.id) }
                                         .buttonStyle(.borderedProminent)
                                     Button("Trash and Ignore") {
-                                        Task {
-                                            await model.trash([row.id])
-                                            model.ignore([row.id])
-                                        }
+                                        Task { await model.trashAndIgnore(row.id) }
                                     }
                                     Button("Forget Record") { model.forget([row.id]) }
                                 }

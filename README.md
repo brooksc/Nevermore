@@ -14,6 +14,11 @@ flagged and shut down for good.
 > **Status:** working, but pre-release. Not yet on the Mac App Store. Built and
 > used against a real ~132,000-message mailbox.
 
+![Nevermore's main window: a list of senders grouped by domain, with an inspector showing one sender's unsubscribe method](docs/screenshots/main-window.png)
+
+<sup>All screenshots use Nevermore's built-in demo mailbox — the senders are
+invented, which is why the app is showing its demo banner.</sup>
+
 ## Why another one of these
 
 Most unsubscribe tools are web services that ask for OAuth access to your
@@ -53,6 +58,33 @@ Nevermore is the opposite shape:
 - **Alias-aware.** Send-as addresses are inferred from your Sent folder, so
   `mailto:` unsubscribes go out from the address the mail was delivered to.
 - **Multi-account**, with per-account databases.
+- **Demo mode.** A built-in sample mailbox you can explore before handing over a
+  password, and switch back to any time from Settings. It runs on a backend with
+  no network code in it, so nothing in demo mode can reach a server.
+
+## Screenshots
+
+### First run
+
+The first sync reads your whole mail history, so it explains itself while you
+wait — and says which of the two steps it's on rather than leaving you guessing.
+
+![The first-run screen: a progress bar reading "Step 1 of 2, Finding newsletters" above a four-step explanation of how the app works](docs/screenshots/first-run.png)
+
+### Unsubscribing
+
+Nevermore tells you what pressing the button will actually do — which senders
+get a one-click request, which open a page, which get an email — before it does
+it.
+
+![A confirmation dialog reading "Unsubscribe from 1 sender?" listing the method that will be used](docs/screenshots/unsubscribe-confirm.png)
+
+### What the icons mean
+
+Available any time from **Help ▸ How Nevermore Works**, including an honest list
+of what the app *won't* find.
+
+![The How Nevermore Works sheet, explaining the four steps and the meaning of each unsubscribe-method icon](docs/screenshots/how-it-works.png)
 
 ## Requirements
 
@@ -85,6 +117,10 @@ Note the sandbox relocates Application Support into the app container, so a
 sandboxed build starts with no accounts. See [MAS-RELEASE.md](MAS-RELEASE.md).
 
 ## Setup
+
+Not ready to hand over a password? The first screen offers **Try the Demo** — a
+sample mailbox with no account required. Settings ▸ Advanced switches back and
+forth later.
 
 1. Turn on two-factor authentication for your mail account.
 2. Create an app-specific password (Nevermore links you to the right page for

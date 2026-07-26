@@ -375,17 +375,46 @@ public actor IMAPBackend: MailBackend {
 
     // MARK: - Mutations
 
-    public func trash(_ uids: [MessageUID]) async throws {
-        guard !uids.isEmpty else { return }
+    /// Batch size for MOVE. One command per batch keeps each round-trip well
+    /// inside the library's command timeout: a single MOVE covering a big
+    /// sender (1,127 messages was the case that exposed this) times out and
+    /// moves nothing at all.
+    private static let moveChunkSize = 200
+
+    /// Move messages to Trash, in batches. Returns the UIDs actually moved.
+    ///
+    /// Partial success is real and worth reporting rather than hiding: if batch
+    /// four of six times out, the first three *are* in Trash, and the caller
+    /// needs to know which so the local cache doesn't drift from the server.
+    /// Throws only when nothing moved at all.
+    public func trash(_ uids: [MessageUID]) async throws -> [MessageUID] {
+        guard !uids.isEmpty else { return [] }
         let server = try await connected()
         let folders = try await resolvedFolders(on: server)
         _ = try await select(folders.searchScope, on: server)
-        // MOVE is advertised by most IMAP servers post-login, so this is atomic
-        // — no COPY/STORE \Deleted/EXPUNGE dance.
-        try await server.move(
-            messages: UIDSet(uids.map { UID($0.value) }), to: folders.trash
-        )
-        Log.backend.event("trashed \(uids.count) messages to \(folders.trash)")
+
+        var moved: [MessageUID] = []
+        var offset = 0
+        while offset < uids.count {
+            try Task.checkCancellation()
+            let end = min(offset + Self.moveChunkSize, uids.count)
+            let chunk = Array(uids[offset..<end])
+            do {
+                // MOVE is advertised by most IMAP servers post-login, so this is
+                // atomic per batch — no COPY/STORE \Deleted/EXPUNGE dance.
+                try await server.move(
+                    messages: UIDSet(chunk.map { UID($0.value) }), to: folders.trash)
+                moved.append(contentsOf: chunk)
+            } catch {
+                Log.backend.problem(
+                    "trash stopped after \(moved.count)/\(uids.count): \(error.localizedDescription)")
+                if moved.isEmpty { throw error }
+                return moved
+            }
+            offset = end
+        }
+        Log.backend.event("trashed \(moved.count) messages to \(folders.trash)")
+        return moved
     }
 
     /// Restore messages from Trash by their RFC Message-IDs. Returns how many
@@ -421,13 +450,16 @@ public actor IMAPBackend: MailBackend {
             host: config.smtpHost, port: config.smtpPort, transportSecurity: .startTLS)
         do {
             try await smtp.connect()
+            // Close the session even when sending throws: the previous code
+            // only disconnected on the success path, leaking an authenticated
+            // SMTP connection for every failed unsubscribe.
+            defer { Task { try? await smtp.disconnect() } }
             try await smtp.login(username: primaryAddress, password: password)
             try await smtp.sendRawMessage(
                 Self.rfc822(from: sender, to: to, subject: subject, body: body),
                 from: EmailAddress(address: sender),
                 to: [EmailAddress(address: to)]
             )
-            try await smtp.disconnect()
         } catch {
             throw MailBackendError.sendFailed(error.localizedDescription)
         }

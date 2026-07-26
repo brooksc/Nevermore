@@ -5,8 +5,10 @@ import Foundation
 /// spec both insist the UI must not claim success it cannot prove.
 public struct UnsubscribeEngine: Sendable {
     public enum Outcome: Sendable, Equatable {
-        /// The endpoint positively acknowledged (2xx on a one-click POST, or a
-        /// mailto: successfully sent). The closest thing to proof available.
+        /// A human saw the sender's own confirmation page. Never produced by
+        /// this engine — an HTTP status can't prove an unsubscribe took effect,
+        /// so the automated paths all report `requested`. Only the browser flow
+        /// (`AppModel.recordManual`) can promote an outcome to confirmed.
         case confirmed(detail: String)
         /// Accepted but unverifiable — a plain GET link, or a POST that returned
         /// a non-committal status. May still have worked.
@@ -55,12 +57,22 @@ public struct UnsubscribeEngine: Sendable {
         // Prefer HTTP: it's silent and needs no From address.
         if let url = unsubscribe.webTargets.first {
             let host = url.host ?? "?"
+            let outcome: Outcome
             if unsubscribe.supportsOneClick {
                 Log.unsubscribe.detail("one-click POST -> \(host)")
-                return await oneClickPost(url)
+                outcome = await oneClickPost(url)
+            } else {
+                Log.unsubscribe.detail("GET -> \(host)")
+                outcome = await get(url)
             }
-            Log.unsubscribe.detail("GET -> \(host)")
-            return await get(url)
+            // Only fall through to mailto: when the web attempt actually failed.
+            // RFC 2369 lists targets in the sender's order of preference, so a
+            // dead link shouldn't end the attempt when they also published an
+            // address — which is the chain the README documents.
+            guard case .failed = outcome, !unsubscribe.mailtoTargets.isEmpty else {
+                return outcome
+            }
+            Log.unsubscribe.detail("web target failed; falling back to mailto")
         }
         if let mail = unsubscribe.mailtoTargets.first {
             Log.unsubscribe.detail("mailto -> \(mail.address)\(fromAddress.map { " (from \($0))" } ?? "")")
@@ -77,6 +89,16 @@ public struct UnsubscribeEngine: Sendable {
 
     // MARK: - HTTP
 
+    /// A 3xx surviving to the final response means `RedirectGuard` refused to
+    /// follow it — the only way a redirect reaches us unfollowed. Without this
+    /// it fell under `code < 400` and an SSRF attempt was recorded as a
+    /// successful unsubscribe, moving the sender out of the working list.
+    private static func blockedRedirect(_ code: Int) -> Outcome? {
+        guard (300..<400).contains(code) else { return nil }
+        return .failed(
+            detail: "redirected to a private or local address; blocked (HTTP \(code))")
+    }
+
     private func oneClickPost(_ url: URL) async -> Outcome {
         guard DestinationGuard.isAllowed(url) else {
             Log.unsubscribe.problem("blocked one-click POST to non-public host: \(url.host ?? "?")")
@@ -86,7 +108,7 @@ public struct UnsubscribeEngine: Sendable {
         request.httpMethod = "POST"
         request.setValue(
             "application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue("Nevermore/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue(AppVersion.userAgent, forHTTPHeaderField: "User-Agent")
         request.httpBody = Data("List-Unsubscribe=One-Click".utf8)
         request.timeoutInterval = 30
 
@@ -98,6 +120,7 @@ public struct UnsubscribeEngine: Sendable {
             // endpoints routinely 200 without acting. "Confirmed" is reserved
             // for a human verifying the sender's page (the browser flow). The
             // real safety net is reappearance detection, which fires regardless.
+            if let blocked = Self.blockedRedirect(code) { return blocked }
             if code < 400 {
                 return .requested(detail: "one-click accepted (HTTP \(code)), unverifiable")
             }
@@ -132,11 +155,12 @@ public struct UnsubscribeEngine: Sendable {
             return .failed(detail: "unsubscribe URL resolves to a private or local address; blocked")
         }
         var request = URLRequest(url: url)
-        request.setValue("Nevermore/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue(AppVersion.userAgent, forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 30
         do {
             let (_, response) = try await session.data(for: request)
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if let blocked = Self.blockedRedirect(code) { return blocked }
             if code < 400 {
                 // A GET only proves the page loaded, never that it unsubscribed —
                 // hence "requested", not "confirmed".

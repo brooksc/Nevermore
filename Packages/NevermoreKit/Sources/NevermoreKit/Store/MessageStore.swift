@@ -119,8 +119,11 @@ public final class MessageStore: Sendable {
                     arguments: [
                         Int(m.uid.value), m.sender.address, m.sender.host, m.sender.displayName,
                         m.subject, m.receivedAt.timeIntervalSince1970, m.isUnread,
-                        m.unsubscribe?.webTargets.first?.absoluteString
-                            ?? m.unsubscribe?.mailtoTargets.first.map { "mailto:\($0.address)" },
+                        // The whole header, not just the first target. Storing
+                        // one URL discarded every fallback target, and for
+                        // mailto: it discarded the query string — where senders
+                        // put the token that makes the unsubscribe work.
+                        m.unsubscribe?.raw,
                         // Store the canonical RFC 8058 token, because that is
                         // exactly what ListUnsubscribe looks for when decoding.
                         m.unsubscribe?.supportsOneClick == true
@@ -181,8 +184,13 @@ public final class MessageStore: Sendable {
             subject: row["subject"] ?? "",
             receivedAt: Date(timeIntervalSince1970: row["receivedAt"] ?? 0),
             isUnread: row["isUnread"] ?? false,
+            // Rows written before the full header was stored hold a bare URI
+            // with no angle brackets, which the parser needs. Detect and wrap
+            // those; anything already bracketed is a whole header, pass it
+            // through. Re-syncing rewrites old rows into the new form.
             unsubscribe: ListUnsubscribe(
-                header: raw.map { "<\($0)>" }, postHeader: row["unsubscribePost"]
+                header: raw.map { $0.contains("<") ? $0 : "<\($0)>" },
+                postHeader: row["unsubscribePost"]
             ),
             deliveredTo: row["deliveredTo"] ?? "",
             messageId: row["messageId"] ?? ""
@@ -304,6 +312,16 @@ public final class MessageStore: Sendable {
         }
         guard let data = raw?.data(using: .utf8) else { return nil }
         return try? JSONDecoder().decode(SyncToken.self, from: data)
+    }
+
+    /// Forget where the last sync stopped, forcing the next one to rediscover
+    /// the whole mailbox. The only way to notice messages deleted on the
+    /// server: incremental sync searches forward from the token and upserts,
+    /// so it can add rows but never removes them.
+    public func clearSyncToken() throws {
+        try pool.write { db in
+            try db.execute(sql: "DELETE FROM syncState WHERE key = 'syncToken'")
+        }
     }
 
     public func setSyncToken(_ token: SyncToken) throws {

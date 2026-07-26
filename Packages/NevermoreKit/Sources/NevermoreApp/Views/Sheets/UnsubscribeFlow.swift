@@ -5,6 +5,13 @@ import NevermoreKit
 struct UnsubscribeFlow: View {
     @Bindable var model: AppModel
     let targets: [AppModel.UnsubTarget]
+    /// Skip the confirm step and go straight to unsubscribe-and-delete.
+    ///
+    /// Set by the ⇧U / ⌘⇧U path, whose whole point is not stopping to click
+    /// anything. Distinct from the "Ask before unsubscribing" setting: that's a
+    /// standing preference, this is one deliberate keystroke that already said
+    /// what it wanted.
+    var immediateDelete = false
     /// Escalate a sender to the in-app browser after the automated attempt failed.
     var onManualFallback: (GroupID) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -30,7 +37,10 @@ struct UnsubscribeFlow: View {
         .onAppear {
             // Honor "Ask before unsubscribing": when off, skip the confirm and
             // go straight to the action, deleting if that's the default.
-            if !AppSettings.askBeforeUnsubscribe, stage == .confirm {
+            guard stage == .confirm else { return }
+            if immediateDelete {
+                start(delete: true)
+            } else if !AppSettings.askBeforeUnsubscribe {
                 start(delete: AppSettings.deleteIsDefault)
             }
         }
@@ -87,14 +97,20 @@ struct UnsubscribeFlow: View {
                 Spacer()
                 // The prominent default follows the "Make Delete the default"
                 // setting.
+                // Both actions carry a key equivalent so the dialog never
+                // requires the mouse: Return takes the prominent default, ⇧U
+                // always means unsubscribe-and-delete, matching the list.
                 if AppSettings.deleteIsDefault {
                     Button("Unsubscribe") { start(delete: false) }
                     Button("Unsubscribe and Delete Messages") { start(delete: true) }
                         .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
                 } else {
                     Button("Unsubscribe and Delete Messages") { start(delete: true) }
+                        .keyboardShortcut("u", modifiers: [.command, .shift])
                     Button("Unsubscribe") { start(delete: false) }
                         .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
                 }
             }
         }
@@ -105,7 +121,8 @@ struct UnsubscribeFlow: View {
         let web = targets.filter { $0.method == .webLink }.count
         let email = targets.filter { $0.method == .email }.count
         var parts: [String] = []
-        if oneClick > 0 { parts.append("\(oneClick) use one-click") }
+        // "1 use one-click" reads as a typo; agree the verb with the count.
+        if oneClick > 0 { parts.append("\(oneClick) use\(oneClick == 1 ? "s" : "") one-click") }
         if web > 0 { parts.append("\(web) will open a web page") }
         if email > 0 { parts.append("\(email) send\(email == 1 ? "s" : "") an email") }
         return parts.joined(separator: ". ") + (parts.isEmpty ? "" : ".")
@@ -153,8 +170,15 @@ struct UnsubscribeFlow: View {
 
     private var resultsView: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Unsubscribed from \(results.count) sender\(results.count == 1 ? "" : "s")")
-                .font(.title3.weight(.semibold))
+            // Count what actually worked. `results.count` includes failures and
+            // senders that were never attempted, so a run where everything
+            // failed still announced "Unsubscribed from 5 senders".
+            Text(
+                (confirmed + requested).isEmpty
+                    ? "No senders were unsubscribed"
+                    : "Unsubscribed from \((confirmed + requested).count) sender\((confirmed + requested).count == 1 ? "" : "s")"
+            )
+            .font(.title3.weight(.semibold))
             Text("A confirmation from the sender is the only real proof — here's what each one said.")
                 .font(.caption).foregroundStyle(.secondary)
 
@@ -163,6 +187,9 @@ struct UnsubscribeFlow: View {
                     bucket("CONFIRMED", "checkmark.circle.fill", .green, confirmed)
                     bucket("REQUESTED", "clock.badge.questionmark", .orange, requested)
                     bucket("FAILED", "xmark.octagon.fill", .red, failed)
+                    // Cancelling left these with no outcome, so they appeared in
+                    // no bucket at all — silently missing from the report.
+                    bucket("NOT ATTEMPTED", "minus.circle", .secondary, notAttempted)
                 }
             }
             .frame(maxHeight: 280)
@@ -170,9 +197,15 @@ struct UnsubscribeFlow: View {
             HStack {
                 let succeeded = confirmed + requested
                 if alsoDelete {
-                    // Deletion already ran as part of "Unsubscribe and Delete".
-                    Label("Their messages were moved to Trash.", systemImage: "trash")
-                        .font(.caption).foregroundStyle(.secondary)
+                    // Only the senders that actually unsubscribed got deleted,
+                    // so don't imply every listed sender's mail is gone.
+                    Label(
+                        succeeded.isEmpty
+                            ? "Nothing was deleted — no unsubscribe succeeded."
+                            : "Messages from \(succeeded.count) sender\(succeeded.count == 1 ? "" : "s") were moved to Trash.",
+                        systemImage: "trash"
+                    )
+                    .font(.caption).foregroundStyle(.secondary)
                 } else if !succeeded.isEmpty {
                     // Plain unsubscribe — offer to clear the backlog now.
                     Button("Delete Messages from \(succeeded.count) Unsubscribed Sender\(succeeded.count == 1 ? "" : "s")") {
@@ -184,6 +217,11 @@ struct UnsubscribeFlow: View {
                 Button("Done") { dismiss() }.buttonStyle(.borderedProminent)
             }
         }
+    }
+
+    /// Targets the run never reached — only possible after Cancel.
+    private var notAttempted: [AppModel.UnsubTarget] {
+        results.filter { $0.outcome == nil }
     }
 
     private var confirmed: [AppModel.UnsubTarget] {
@@ -256,6 +294,14 @@ struct UnsubscribeFlow: View {
                 await model.deleteMessages(for: ids)
             }
             stage = .results
+            // The ⇧U path asked for one keystroke, so don't make it end in a
+            // results screen the user has to Escape out of. Close automatically
+            // — but only when there's nothing to act on. Anything that failed or
+            // needs the browser stays up, because that's the case where the
+            // results screen is the whole point.
+            if immediateDelete, outcomes.allSatisfy({ $0.outcome?.isSuccess == true }) {
+                dismiss()
+            }
         }
     }
 

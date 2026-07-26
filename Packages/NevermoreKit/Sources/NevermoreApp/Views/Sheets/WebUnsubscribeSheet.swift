@@ -130,7 +130,7 @@ private struct WebView: NSViewRepresentable {
         config.websiteDataStore = .nonPersistent()  // isolate from the real browser
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh) Nevermore/1.0"
+        webView.customUserAgent = "Mozilla/5.0 (Macintosh) \(AppVersion.userAgent)"
         webView.load(URLRequest(url: url))
         return webView
     }
@@ -143,6 +143,31 @@ private struct WebView: NSViewRepresentable {
 
         init(_ onLikelyConfirmation: @escaping () -> Void) {
             self.onLikelyConfirmation = onLikelyConfirmation
+        }
+
+        /// Hold the browser to the same rule as the HTTP engine.
+        ///
+        /// This sheet opens a URL taken from a `List-Unsubscribe` header — the
+        /// same attacker-authored input `DestinationGuard` exists to contain —
+        /// but it previously navigated anywhere the page asked, including
+        /// `http://192.168.x.x` admin panels and non-http schemes. Guarding only
+        /// the silent request path left the visible one wide open.
+        func webView(
+            _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction
+        ) async -> WKNavigationActionPolicy {
+            guard let url = navigationAction.request.url else { return .cancel }
+            guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https"
+            else {
+                Log.unsubscribe.detail("browser blocked non-http navigation: \(url.scheme ?? "?")")
+                return .cancel
+            }
+            // getaddrinfo blocks; keep it off the main actor.
+            let allowed = await Task.detached { DestinationGuard.isAllowed(url) }.value
+            if !allowed {
+                Log.unsubscribe.problem(
+                    "browser blocked navigation to non-public host: \(url.host ?? "?")")
+            }
+            return allowed ? .allow : .cancel
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {

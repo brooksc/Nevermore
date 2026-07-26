@@ -95,10 +95,15 @@ struct RootView: View {
                 }
                 .interactiveDismissDisabled()
             }
-            // Gate Keychain access behind the explanation unless the user opted
-            // out of seeing it.
+            // Gate Keychain access behind the explanation — but only when macOS
+            // is actually going to ask. On a first run there's no saved item to
+            // read (onboarding writes one, which never prompts), and on a normal
+            // relaunch this build is already on the item's ACL. Showing it
+            // regardless meant a first-run user got an explanation of a dialog
+            // they'd never see — and got it *after* onboarding, since both
+            // sheets competed for the same presentation slot.
             .task {
-                if keychainInfoShown {
+                if keychainInfoShown || !model.expectsKeychainPrompt {
                     await model.start()
                 } else {
                     showKeychainInfo = true

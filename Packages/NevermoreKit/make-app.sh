@@ -74,10 +74,10 @@ if [ "${NEVERMORE_SANDBOX:-0}" = "1" ]; then
 fi
 
 if [ -n "$SIGN_ID" ]; then
-  codesign --force --options runtime "${ENTITLEMENTS_ARGS[@]}" --sign "$SIGN_ID" "$APP"
+  codesign --force --options runtime ${ENTITLEMENTS_ARGS[@]+"${ENTITLEMENTS_ARGS[@]}"} --sign "$SIGN_ID" "$APP"
   echo "signed: $SIGN_ID" >&2
 else
-  codesign --force "${ENTITLEMENTS_ARGS[@]}" --sign - "$APP" >/dev/null 2>&1 || true
+  codesign --force ${ENTITLEMENTS_ARGS[@]+"${ENTITLEMENTS_ARGS[@]}"} --sign - "$APP" >/dev/null 2>&1 || true
   echo "WARNING: ad-hoc signed — no Developer ID cert found. The saved app" >&2
   echo "         password will not persist across rebuilds. Set" >&2
   echo "         NEVERMORE_SIGN_IDENTITY to a signing identity to fix this." >&2

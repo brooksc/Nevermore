@@ -74,7 +74,9 @@ public protocol MailBackend: Sendable {
         progress: @Sendable @escaping (SyncPhase) -> Void
     ) async throws -> (messages: [EmailMessage], token: SyncToken)
 
-    func trash(_ uids: [MessageUID]) async throws
+    /// Move messages to Trash. Returns the UIDs actually moved, which may be a
+    /// prefix of the request if the server gave up partway.
+    func trash(_ uids: [MessageUID]) async throws -> [MessageUID]
     /// Restore trashed messages by Message-ID; returns how many were recovered.
     func untrash(messageIDs: [String]) async throws -> Int
     /// Throws if the credentials don't authenticate.
@@ -84,4 +86,8 @@ public protocol MailBackend: Sendable {
     /// Addresses this account can legitimately send as.
     func sendAsAddresses() async throws -> [String]
     var primaryAddress: String { get }
+
+    /// Drop the connection. Called between sync retries, because a cached
+    /// connection that has errored stays poisoned.
+    func disconnect() async
 }

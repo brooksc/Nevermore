@@ -15,6 +15,10 @@ enum Tokens {
 
     /// The unread-percentage bar fill (`#88b4ee`).
     static let unreadBar = Color(red: 0x88 / 255, green: 0xB4 / 255, blue: 0xEE / 255)
+    /// Demo-mode banner. Purple rather than the brand blue or a warning orange:
+    /// it must not read as an error, and it must not blend into the app's own
+    /// chrome — the whole job of this colour is "you are somewhere else".
+    static let demoAccent = Color(red: 0x6B / 255, green: 0x3F / 255, blue: 0xA8 / 255)
 
     enum Metric {
         static let sidebarWidth: CGFloat = 208
@@ -107,8 +111,11 @@ enum UnsubscribeMethod {
     }
 
     /// What pressing Unsubscribe will actually do — the app being honest.
-    func inspectorDetail(sender: String) -> String {
-        switch self {
+    func inspectorDetail(sender rawSender: String) -> String {
+        // Display names legitimately end in a period ("Cadence Running Co."),
+        // which collides with the sentence's own full stop.
+        let sender = rawSender.hasSuffix(".") ? String(rawSender.dropLast()) : rawSender
+        return switch self {
         case .oneClick:
             "Sends a one-click request directly to \(sender). No page will open."
         case .webLink:

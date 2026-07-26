@@ -21,12 +21,30 @@ final class AppModel {
     private(set) var reauthAccount: String?
 
     /// Show the add/re-auth sheet when there's no account yet, or a saved one
-    /// couldn't be unlocked.
-    var needsOnboarding: Bool { currentAccount == nil || reauthAccount != nil }
+    /// couldn't be unlocked. Demo mode suppresses it — the whole point is to
+    /// look around before handing over a password.
+    var needsOnboarding: Bool {
+        !isDemoMode && (currentAccount == nil || reauthAccount != nil)
+    }
 
     private let registry = AccountRegistry.shared
     private var store: MessageStore?
-    private var backend: IMAPBackend?
+    /// Held as the protocol, not `IMAPBackend`, so demo mode can substitute a
+    /// backend that has no network code in it at all.
+    private var backend: (any MailBackend)?
+
+    // MARK: - Demo mode
+
+    private static let demoModeKey = "demoMode"
+
+    /// Whether the app is showing the fabricated demo mailbox instead of real
+    /// mail. Persisted, so a relaunch doesn't silently drop someone back into
+    /// their own data mid-presentation — the banner is what gets them out.
+    private(set) var isDemoMode: Bool = UserDefaults.standard.bool(forKey: AppModel.demoModeKey)
+
+    /// True when the user has a real account to go back to. When false, leaving
+    /// the demo means onboarding.
+    var hasRealAccount: Bool { !accounts.isEmpty }
 
     // MARK: - Data
 
@@ -44,9 +62,59 @@ final class AppModel {
 
     enum SyncState: Equatable {
         case idle
+        /// Connecting and resolving folders — before the first search returns.
+        /// A distinct case so the UI can say something during the seconds
+        /// between "sync started" and the first progress report.
+        case connecting
         case discovering(window: Int, of: Int, found: Int)
         case fetching(done: Int, of: Int)
         case failed(String)
+
+        /// True while a sync is actually running (not idle, not failed).
+        var isActive: Bool {
+            switch self {
+            case .idle, .failed: false
+            case .connecting, .discovering, .fetching: true
+            }
+        }
+
+        /// One-line description of what the sync is doing right now. Phrased in
+        /// terms of the user's mail, not the implementation — "date window" is
+        /// our chunking strategy and means nothing to them.
+        var detail: String? {
+            switch self {
+            case .idle, .failed: nil
+            case .connecting:
+                "Connecting…"
+            case .discovering(_, _, let found):
+                "Searching your mail history — \(found.formatted()) newsletters found"
+            case .fetching(let done, let total):
+                "Reading details — \(done.formatted()) of \(total.formatted())"
+            }
+        }
+
+        /// How far along the current step is, 0...1, for a determinate bar.
+        /// Both steps know their own total, so neither needs a spinner.
+        var fractionComplete: Double? {
+            switch self {
+            case .idle, .failed, .connecting: nil
+            case .discovering(let window, let total, _):
+                Double(window) / Double(max(total, 1))
+            case .fetching(let done, let total):
+                Double(done) / Double(max(total, 1))
+            }
+        }
+
+        /// Which of the two sync steps this is, for "Step 1 of 2" framing. The
+        /// steps have very different durations, so a single combined bar would
+        /// stall visibly at the handover; two honest bars beat one dishonest one.
+        var step: (number: Int, name: String)? {
+            switch self {
+            case .idle, .failed, .connecting: nil
+            case .discovering: (1, "Finding newsletters")
+            case .fetching: (2, "Reading sender details")
+            }
+        }
     }
     private(set) var syncState: SyncState = .idle
     private(set) var lastSyncedAt: Date?
@@ -67,8 +135,63 @@ final class AppModel {
     // MARK: - Session lifecycle
 
     func start() async {
+        if isDemoMode {
+            await openDemo()
+            return
+        }
         guard let account = currentAccount else { return }
         await open(account: account)
+    }
+
+    /// Switch into the fabricated demo mailbox.
+    ///
+    /// The database is rebuilt from scratch every time so the demo looks
+    /// identical on every run — which is what makes it usable for screenshots,
+    /// and stops one person's poking around from being the next person's
+    /// starting state.
+    func enterDemoMode() async {
+        stopBackgroundSync()
+        cancelSync()
+        registry.resetDemoDatabase()
+        isDemoMode = true
+        UserDefaults.standard.set(true, forKey: Self.demoModeKey)
+        Log.app.event("entering demo mode")
+        await openDemo()
+    }
+
+    private func openDemo() async {
+        reauthAccount = nil
+        groups = []
+        selection = []
+        do {
+            store = try MessageStore(path: registry.demoDatabasePath)
+        } catch {
+            Log.app.problem("could not open demo database: \(error.localizedDescription)")
+            syncState = .failed("Could not open the demo database: \(error.localizedDescription)")
+            return
+        }
+        backend = DemoBackend()
+        await reloadFromStore()
+        startSync()
+        // No background sync in demo mode: there is nothing to poll, and a tick
+        // firing mid-presentation would only reset the progress display.
+    }
+
+    /// Leave demo mode and go back to real mail (or to onboarding if there
+    /// isn't an account yet).
+    func exitDemoMode() async {
+        stopBackgroundSync()
+        cancelSync()
+        isDemoMode = false
+        UserDefaults.standard.set(false, forKey: Self.demoModeKey)
+        store = nil
+        backend = nil
+        groups = []
+        selection = []
+        syncState = .idle
+        lastSyncedAt = nil
+        Log.app.event("leaving demo mode")
+        if let account = currentAccount { await open(account: account) }
     }
 
     private func open(account: String) async {
@@ -91,8 +214,140 @@ final class AppModel {
         currentAccount = account
         Log.app.event("opened account \(account)")
         await reloadFromStore()
-        if AppSettings.syncOnLaunch { await sync() }
+        // Deliberately not awaited: the first sync on a large mailbox takes
+        // minutes, and `open` is called from the onboarding sheet's submit
+        // handler. Awaiting it here kept the modal sheet up — showing only
+        // "Verifying…" — for the whole sync. Kick it off and let the window
+        // appear; the status bar reports progress.
+        if AppSettings.syncOnLaunch { startSync() }
         startBackgroundSync()
+    }
+
+    // MARK: - Sync scheduling
+
+    private var syncTask: Task<Void, Never>?
+
+    /// Whether a sync is currently running (drives the UI's first-sync state and
+    /// the toolbar's disabled Sync button).
+    var isSyncing: Bool { syncState.isActive }
+
+    /// Start a sync in the background and return immediately. Callers that must
+    /// not block — onboarding, launch, the toolbar button — use this instead of
+    /// `sync()`. A second call while one is running is a no-op, so a background
+    /// tick can't overlap a long first sync on the same IMAP connection.
+    func startSync() {
+        guard syncTask == nil else { return }
+        syncGeneration += 1
+        let generation = syncGeneration
+        syncTask = Task { [weak self] in
+            await self?.sync()
+            // Only clear the handle if it's still ours. A cancelled sync
+            // finishing late must not clear the handle of the sync that
+            // replaced it, which would let a background tick start a second
+            // concurrent one.
+            guard let self, self.syncGeneration == generation else { return }
+            self.syncTask = nil
+        }
+    }
+
+    /// Bumped on every start and cancel so a stale task can recognize that it
+    /// no longer owns `syncTask`.
+    private var syncGeneration = 0
+
+    /// Throw away the local header cache and re-read the mailbox from scratch.
+    ///
+    /// This is the only way to reconcile with the server after messages are
+    /// deleted (or trashed) outside Nevermore, or after a partial trash: an
+    /// incremental sync searches forward from the sync token and upserts, so it
+    /// adds rows but never retires them.
+    ///
+    /// Deliberately keeps unsubscribe history, ignored senders, and grouping
+    /// corrections — those are your decisions, not cached server state, and
+    /// they'd be expensive to recreate. Only the message cache is rebuilt.
+    func fullResync() {
+        guard let store, !isDemoMode else { return }
+        cancelSync()
+        Log.sync.event("full resync: clearing local message cache and sync token")
+        try? store.deleteAllMessages()
+        try? store.clearSyncToken()
+        groups = []
+        selection = []
+        lastSyncedAt = nil
+        // Back to "nothing loaded" so the window shows first-sync progress
+        // rather than an empty list that looks like a finished, empty mailbox.
+        hasLoadedOnce = false
+        startSync()
+    }
+
+    private func cancelSync() {
+        syncTask?.cancel()
+        syncTask = nil
+        syncGeneration += 1
+    }
+
+    // MARK: - Debug tools
+
+    /// Whether the hidden debug section in Settings is revealed. Session-only on
+    /// purpose — it should not persist into a build a user is actually using.
+    var debugToolsUnlocked = false
+
+    /// Everything `resetAllState` clears, for the confirmation dialog. Listing
+    /// it is the difference between a destructive button and an informed one.
+    static let resetDescription = """
+        Deletes every account's local header cache, the demo mailbox, the account \
+        list, and the first-run flags — returning Nevermore to the state it was \
+        in before it was ever launched.
+
+        Your saved app password stays in the Keychain so you can sign in again \
+        without fetching a new one. Nothing on the mail server is touched.
+        """
+
+    /// Return the app to a never-launched state, in process.
+    ///
+    /// Deliberately not "reset and quit": the onboarding sheet is driven by
+    /// `needsOnboarding`, so clearing the account here flips it false → true and
+    /// the sheet presents immediately. That makes the onboarding path testable
+    /// in a loop without a relaunch between runs.
+    func resetAllState() async {
+        Log.app.event("debug: resetting all app state")
+        stopBackgroundSync()
+        cancelSync()
+
+        store = nil
+        backend = nil
+        registry.resetAllLocalData()
+
+        groups = []
+        selection = []
+        ignoredKeys = []
+        history = [:]
+        groupingRules = [:]
+        sendAsAddresses = []
+        accounts = []
+        currentAccount = nil
+        reauthAccount = nil
+        collection = .allSenders
+        searchText = ""
+        showInspector = false
+        toast = nil
+        pendingUndo = nil
+        syncState = .idle
+        lastSyncedAt = nil
+        // Back to "nothing has loaded", so the window doesn't briefly claim a
+        // status for a mailbox that no longer exists.
+        hasLoadedOnce = false
+
+        isDemoMode = false
+        for key in ["demoMode", "keychainInfoShown"] {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    /// Also forget the Keychain password, for testing the full cold start
+    /// including the app-password step.
+    func deleteSavedPasswords() {
+        for account in registry.accounts() + accounts { Keychain.delete(for: account) }
+        Log.app.event("debug: deleted saved Keychain password(s)")
     }
 
     // MARK: - Background sync
@@ -112,7 +367,7 @@ final class AppModel {
                 try? await Task.sleep(for: .seconds(seconds))
                 if Task.isCancelled { break }
                 Log.sync.detail("background sync tick")
-                await self?.sync()
+                self?.startSync()  // no-op if a sync is already running
             }
         }
     }
@@ -123,6 +378,15 @@ final class AppModel {
     }
 
     // MARK: - Onboarding
+
+    /// Whether opening the saved account will make macOS show its Keychain
+    /// "allow access" dialog — the only case where the explainer sheet is worth
+    /// showing. False when there's no saved account (onboarding *writes* the
+    /// item, which never prompts) and false when this build already has access.
+    var expectsKeychainPrompt: Bool {
+        guard let currentAccount else { return false }
+        return Keychain.readWouldPrompt(for: currentAccount)
+    }
 
     /// The provider id recorded for an account, if any (used by re-auth).
     func storedProviderID(for account: String) -> String? {
@@ -139,7 +403,48 @@ final class AppModel {
 
     /// Open the given sender's messages in the provider's webmail, if it has one.
     func openInWebmail(senderAddress address: String) {
+        // Demo senders don't exist in anyone's mailbox; opening a webmail search
+        // for one would just dump the user into their real inbox mid-demo.
+        guard !isDemoMode else {
+            showToast("Demo mode — opening webmail is disabled here.", undoLabel: nil, undo: nil)
+            return
+        }
         guard let url = currentProvider.webSearchURL(fromSender: address) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Open the selected sender's most recent message in the default browser,
+    /// so the user can read it before deciding to unsubscribe.
+    ///
+    /// Gmail can be linked straight to the message. Everything else falls back
+    /// to a search for the sender — stated in a toast rather than silently
+    /// landing somewhere other than asked for.
+    func viewLatestMessage() {
+        guard !isDemoMode else {
+            showToast("Demo mode — there's no real message to open.", undoLabel: nil, undo: nil)
+            return
+        }
+        guard let id = selection.first, let group = group(for: id), let message = group.latest
+        else { return }
+
+        if let url = currentProvider.webMessageURL(messageId: message.messageId) {
+            Log.app.event("opening message in \(currentProvider.displayName)")
+            NSWorkspace.shared.open(url)
+            return
+        }
+        guard let url = currentProvider.webSearchURL(fromSender: message.sender.address) else {
+            showToast(
+                "\(currentProvider.displayName) has no web link Nevermore can open.",
+                undoLabel: nil, undo: nil)
+            return
+        }
+        // Distinguish "your provider can't do this" from "this message predates
+        // Message-ID storage" — the second one fixes itself on the next sync.
+        let why =
+            message.messageId.isEmpty
+            ? "this message was synced before Nevermore stored message IDs"
+            : "\(currentProvider.displayName) can't link to a single message"
+        showToast("Opened a search for the sender — \(why).", undoLabel: nil, undo: nil)
         NSWorkspace.shared.open(url)
     }
 
@@ -190,6 +495,12 @@ final class AppModel {
         }
         if let lastError { throw lastError }
 
+        // Adding a real account always leaves the demo — otherwise the banner
+        // would still be up over the user's actual mail.
+        if isDemoMode {
+            isDemoMode = false
+            UserDefaults.standard.set(false, forKey: Self.demoModeKey)
+        }
         try Keychain.store(appPassword: appPassword, for: email)
         registry.add(email)
         registry.setProviderID(provider.id, for: email)
@@ -206,6 +517,10 @@ final class AppModel {
     func switchAccount(_ email: String) async {
         guard email != currentAccount, accounts.contains(email) else { return }
         stopBackgroundSync()
+        // A sync is no longer awaited by its caller, so one may still be in
+        // flight for the account we're leaving — it would write its results
+        // into the new account's store.
+        cancelSync()
         store = nil
         backend = nil
         groups = []
@@ -219,6 +534,7 @@ final class AppModel {
         accounts = registry.accounts()
         if currentAccount == email {
             stopBackgroundSync()
+            cancelSync()
             currentAccount = accounts.first
             store = nil
             backend = nil
@@ -288,7 +604,10 @@ final class AppModel {
         }
     }
 
-    func sync() async {
+    /// Private so every caller goes through `startSync()` and its
+    /// already-running guard — two concurrent syncs share one IMAP connection
+    /// and poison each other.
+    private func sync() async {
         guard let backend, let store else { return }
 
         // A cached IMAP connection that has errored (server throttling, a dropped
@@ -299,6 +618,10 @@ final class AppModel {
         for attempt in 1...maxAttempts {
             do {
                 Log.sync.event("sync start (attempt \(attempt)/\(maxAttempts))")
+                // Connect and folder resolution run before the first progress
+                // callback — several seconds on a cold connection. Say so
+                // rather than leaving the UI looking idle.
+                syncState = .connecting
                 let token = try store.syncToken()
                 let (messages, newToken) = try await backend.changes(since: token) {
                     [weak self] phase in
@@ -372,34 +695,30 @@ final class AppModel {
     /// Whether the keyboard-shortcuts help overlay is showing (⌘? / Help menu).
     var showShortcuts = false
 
+    /// Whether the how-it-works sheet is showing (Help menu).
+    var showHowItWorks = false
+
     /// Move the single selection up (-1) or down (+1) through the visible list.
     func moveSelection(by delta: Int) {
-        let list = sortedRows
-        guard !list.isEmpty else { return }
-        let current = selection.first.flatMap { id in list.firstIndex { $0.id == id } }
-        let next: Int
-        if let current {
-            next = max(0, min(list.count - 1, current + delta))
-        } else {
-            next = delta > 0 ? 0 : list.count - 1  // no selection → jump to an edge
-        }
-        selection = [list[next].id]
+        guard
+            let next = SelectionCursor.move(
+                from: selection, by: delta, in: sortedRows.map(\.id))
+        else { return }
+        selection = [next]
         showInspector = true
     }
 
     /// The row to select after the current one is removed — the next one down,
     /// or the previous if it was last. Keeps keyboard triage flowing.
     private func rowAfterSelection() -> GroupID? {
-        guard let current = selection.first else { return nil }
-        let list = sortedRows
-        guard let idx = list.firstIndex(where: { $0.id == current }) else { return nil }
-        if idx + 1 < list.count { return list[idx + 1].id }
-        if idx > 0 { return list[idx - 1].id }
-        return nil
+        SelectionCursor.rowAfterRemoving(selection, from: sortedRows.map(\.id))
     }
 
     private func advance(to id: GroupID?) {
-        if let id {
+        // Only land on a row that still exists. Selecting a departed row leaves
+        // the table with an invisible selection and the inspector on nothing —
+        // which is what a multi-row action used to do every time.
+        if let id, group(for: id) != nil {
             selection = [id]
             showInspector = true
         } else {
@@ -438,6 +757,15 @@ final class AppModel {
     var unsubscribedRecords: [MessageStore.UnsubscribeRecord] {
         history.values
             .filter { !isReappearedRecord($0) }
+            // The search field stays visible on this collection, so it has to
+            // work here too — it was silently doing nothing.
+            .filter { record in
+                guard !searchText.isEmpty else { return true }
+                let q = searchText.lowercased()
+                return record.senderName.lowercased().contains(q)
+                    || record.senderEmail.lowercased().contains(q)
+                    || record.senderDomain.lowercased().contains(q)
+            }
             .sorted { $0.attemptedAt > $1.attemptedAt }
     }
 
@@ -547,6 +875,13 @@ final class AppModel {
             UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
 
+    /// How many messages arrived *after* the recorded unsubscribe — the number
+    /// the Reappeared list is actually claiming.
+    func messagesSinceUnsubscribe(_ id: GroupID) -> Int {
+        guard let record = history[id.storageKey], let group = group(for: id) else { return 0 }
+        return group.messages.filter { $0.receivedAt > record.attemptedAt }.count
+    }
+
     /// A sender that mailed again after a recorded unsubscribe attempt.
     private func isReappeared(_ g: SenderGroup) -> Bool {
         guard let record = history[g.id.storageKey] else { return false }
@@ -584,13 +919,16 @@ final class AppModel {
 
     // MARK: - Actions: ignore / trash / forget
 
-    func ignore(_ ids: Set<GroupID>) {
+    /// `silently` suppresses the toast so a caller combining several actions can
+    /// present one message with one undo instead of a burst that clobbers itself.
+    func ignore(_ ids: Set<GroupID>, silently: Bool = false) {
         guard let store else { return }
         let targets = groups.filter { ids.contains($0.id) }
         try? targets.forEach { try store.ignore($0.id) }
         ignoredKeys = (try? store.ignoredGroupKeys()) ?? ignoredKeys
         selection.subtract(ids)
         Log.app.event("ignored \(targets.count) sender(s): \(targets.map(\.id.key).joined(separator: ", "))")
+        guard !silently else { return }
         showToast(
             "Ignored \(targets.count) sender\(targets.count == 1 ? "" : "s")",
             undoLabel: "Undo"
@@ -641,20 +979,34 @@ final class AppModel {
     /// the provider's own Trash retention.
     private static let maxUndoableTrash = 100
 
-    func trash(_ ids: Set<GroupID>) async {
+    func trash(_ ids: Set<GroupID>, silently: Bool = false) async {
         guard let backend, let store else { return }
         let targets = groups.filter { ids.contains($0.id) }
         let messages = targets.flatMap(\.messages)
         let uids = messages.map(\.uid)
         do {
-            try await backend.trash(uids)
-            try store.delete(uids: uids)
+            // Only forget locally what the server confirms it moved, so a
+            // partial trash leaves the app agreeing with the mailbox instead of
+            // hiding messages that are still sitting in the inbox.
+            let movedUIDs = try await backend.trash(uids)
+            let moved = Set(movedUIDs)
+            try store.delete(uids: movedUIDs)
             await reloadFromStore()
             selection.subtract(ids)
-            let n = uids.count
+            let n = movedUIDs.count
             Log.app.event("trashed \(n) messages from \(targets.count) sender(s)")
 
-            let restorable = messages.filter { !$0.messageId.isEmpty }
+            if n < uids.count {
+                // Always reported, even when the caller asked for silence: a
+                // partial trash is exactly the case the user must be told about.
+                showToast(
+                    "Trashed \(n.formatted()) of \(uids.count.formatted()) — the rest timed out. Try again to finish.",
+                    undoLabel: nil, undo: nil)
+                return
+            }
+            guard !silently else { return }
+
+            let restorable = messages.filter { !$0.messageId.isEmpty && moved.contains($0.uid) }
             if n <= Self.maxUndoableTrash, !restorable.isEmpty {
                 showToast("Trashed \(n) message\(n == 1 ? "" : "s")", undoLabel: "Undo") {
                     [weak self] in await self?.untrash(restorable)
@@ -740,6 +1092,10 @@ final class AppModel {
         onProgress: @MainActor (Int, UnsubTarget) -> Void
     ) async -> [UnsubTarget] {
         guard let backend, let store else { return targets }
+        // Work out where the cursor should land *before* acting: once these
+        // senders are unsubscribed (and possibly trashed) they leave the list,
+        // so "the row after the selection" is only answerable now.
+        let next = rowAfterSelection()
         let engine = UnsubscribeEngine { to, subject, body, from in
             try await backend.sendMail(to: to, subject: subject, body: body, from: from)
         }
@@ -757,7 +1113,19 @@ final class AppModel {
                 continue
             }
             let from = sendAsFrom(for: source.deliveredTo)
-            let outcome = await engine.run(unsub, fromAddress: from)
+            // The engine is the one path that makes its own HTTP requests
+            // rather than going through the backend, so demo mode has to stop
+            // short of it explicitly. A demo must never send a real
+            // unsubscribe request to a real (or fabricated) endpoint.
+            let outcome: UnsubscribeEngine.Outcome
+            if isDemoMode {
+                try? await Task.sleep(for: .milliseconds(350))  // let the progress UI be seen
+                outcome = SenderRow.method(for: group) == .manual
+                    ? .needsManual
+                    : .requested(detail: "demo — no request sent")
+            } else {
+                outcome = await engine.run(unsub, fromAddress: from)
+            }
             results[index].outcome = outcome
             Log.unsubscribe.event(
                 "\(group.id.key) [\(SenderRow.method(for: group))]: \(describe(outcome))")
@@ -777,6 +1145,10 @@ final class AppModel {
         }
         history = (try? store.unsubscribeHistory()) ?? history
         selection.subtract(Set(targets.map(\.id)))
+        // Keep triage flowing, the same way ignore and trash do. Without this
+        // the selection is simply emptied and the next keystroke has nothing
+        // to act on.
+        advance(to: next)
         return results
     }
 
@@ -802,6 +1174,15 @@ final class AppModel {
     /// Build a manual-unsubscribe target for a sender, or nil if there's no web
     /// page to open (e.g. a mailto:-only sender, which can't be done in a browser).
     func manualTarget(for id: GroupID) -> ManualUnsubscribe? {
+        // The manual flow loads a sender-published URL in a real web view. The
+        // demo's senders are invented, so their URLs point at domains we don't
+        // own — loading one would send a live request somewhere arbitrary.
+        if isDemoMode {
+            showToast(
+                "Demo mode — the browser unsubscribe is disabled here.",
+                undoLabel: nil, undo: nil)
+            return nil
+        }
         guard let group = self.group(for: id), let source = group.unsubscribeSource else {
             return nil
         }
@@ -838,12 +1219,30 @@ final class AppModel {
 
     // MARK: - Toast
 
+    private var toastTask: Task<Void, Never>?
+
+    /// How long a toast — and the undo it offers — stays live.
+    ///
+    /// Previously neither ever expired: `dismissToast()` had no callers, so the
+    /// status bar kept the last message forever and ⌘Z stayed armed
+    /// indefinitely. Pressing it an hour later would silently reverse an action
+    /// the user had long forgotten.
+    private static let toastLifetime: Duration = .seconds(12)
+
     private func showToast(
         _ message: String, undoLabel: String?,
         undo: (@MainActor () async -> Void)?
     ) {
+        toastTask?.cancel()
         pendingUndo = undo
-        toast = Toast(message: message, undo: undoLabel.map { UndoAction(label: $0) })
+        let shown = Toast(message: message, undo: undoLabel.map { UndoAction(label: $0) })
+        toast = shown
+        toastTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.toastLifetime)
+            guard !Task.isCancelled, let self, self.toast == shown else { return }
+            self.toast = nil
+            self.pendingUndo = nil
+        }
     }
 
     private func showToast(
@@ -859,5 +1258,31 @@ final class AppModel {
         await reloadFromStore()
     }
 
-    func dismissToast() { toast = nil; pendingUndo = nil }
+    func dismissToast() {
+        toastTask?.cancel()
+        toast = nil
+        pendingUndo = nil
+    }
+
+    /// Trash a sender's messages and ignore them, as one undoable step.
+    ///
+    /// Doing these as two calls fired two toasts back to back: the second
+    /// replaced the first, so the trash's undo was destroyed a frame after it
+    /// appeared and ⌘Z would un-ignore while leaving the messages in Trash.
+    func trashAndIgnore(_ id: GroupID) async {
+        let targets = groups.filter { $0.id == id }
+        let messages = targets.flatMap(\.messages)
+        await trash([id], silently: true)
+        ignore([id], silently: true)
+        let restorable = messages.filter { !$0.messageId.isEmpty }
+        showToast(
+            "Trashed \(messages.count.formatted()) message\(messages.count == 1 ? "" : "s") and ignored the sender",
+            undoLabel: restorable.isEmpty ? nil : "Undo"
+        ) { [weak self] in
+            guard let self, let store = self.store else { return }
+            try? targets.forEach { try store.unignore($0.id) }
+            self.ignoredKeys = (try? store.ignoredGroupKeys()) ?? self.ignoredKeys
+            await self.untrash(restorable)
+        }
+    }
 }

@@ -116,7 +116,11 @@ public struct SenderGroup: Identifiable, Sendable {
         // A dominant name is the brand ("Mint" across slightly varying senders).
         // No dominant name means the field carries per-message data rather than
         // an identity, so the key is the only honest label.
-        if let (name, count) = tally.max(by: { $0.value < $1.value }),
+        // Tie-break by name, not by dictionary order: `max(by: value)` picks
+        // arbitrarily among equal counts, and Dictionary iteration order varies
+        // between launches — so a domain with two equally-common display names
+        // would relabel itself every time the app started.
+        if let (name, count) = tally.max(by: { ($0.value, $1.key) < ($1.value, $0.key) }),
             count * 2 >= names.count
         {
             return name

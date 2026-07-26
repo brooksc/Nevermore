@@ -30,6 +30,40 @@ public struct AccountRegistry: Sendable {
         directory.appendingPathComponent("\(account).sqlite").path
     }
 
+    /// Where the demo mailbox lives. Deliberately not an entry in `accounts()`:
+    /// the demo is a mode, not an account, so it can't be switched to by
+    /// accident, can't be picked up as `accounts.first` on launch, and its data
+    /// can never mingle with a real mailbox's.
+    public var demoDatabasePath: String {
+        directory.appendingPathComponent("Demo.sqlite").path
+    }
+
+    /// Delete the demo database so the next entry into demo mode rebuilds it.
+    /// Demo mode is for showing the app off; it should look the same every time.
+    public func resetDemoDatabase() {
+        for suffix in ["", "-wal", "-shm"] {
+            try? FileManager.default.removeItem(atPath: demoDatabasePath + suffix)
+        }
+    }
+
+    /// Delete every account database, the demo database, and the registry
+    /// itself — returning the app to its never-launched state.
+    ///
+    /// Keychain items are deliberately left alone: this exists so onboarding can
+    /// be tested repeatedly, and dropping the saved password would mean fetching
+    /// a fresh app password from the provider before each run. `Keychain.delete`
+    /// is the separate, explicit way to do that.
+    public func resetAllLocalData() {
+        for account in accounts() {
+            for suffix in ["", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(atPath: databasePath(for: account) + suffix)
+            }
+        }
+        resetDemoDatabase()
+        try? FileManager.default.removeItem(at: registryFile)
+        try? FileManager.default.removeItem(at: providersFile)
+    }
+
     public func accounts() -> [String] {
         guard let data = try? Data(contentsOf: registryFile),
             let list = try? JSONDecoder().decode([String].self, from: data)

@@ -47,16 +47,22 @@ struct StatusBarView: View {
             } else {
                 Text("Not synced yet")
             }
-        case .discovering(let w, let total, let found):
+        case .connecting:
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
-                Text("Searching \(w)/\(total) — \(found) found")
+                Text("Connecting…")
+            }
+        case .discovering(let w, let total, let found):
+            HStack(spacing: 6) {
+                ProgressView(value: Double(w), total: Double(max(total, 1)))
+                    .frame(width: 80)
+                Text("Searching — \(found.formatted()) found").monospacedDigit()
             }
         case .fetching(let done, let total):
             HStack(spacing: 6) {
                 ProgressView(value: Double(done), total: Double(max(total, 1)))
                     .frame(width: 80)
-                Text("Reading headers \(done)/\(total)")
+                Text("Reading \(done.formatted()) of \(total.formatted())").monospacedDigit()
             }
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle")
@@ -65,6 +71,10 @@ struct StatusBarView: View {
     }
 
     private func relative(_ date: Date) -> String {
+        // RelativeDateTimeFormatter renders a just-finished sync as "in 0
+        // seconds" — it rounds to zero and then picks the future phrasing.
+        let elapsed = Date().timeIntervalSince(date)
+        if elapsed < 60 { return "just now" }
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .full
         return f.localizedString(for: date, relativeTo: Date())

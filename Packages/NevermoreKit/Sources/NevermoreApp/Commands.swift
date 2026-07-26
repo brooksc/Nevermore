@@ -9,7 +9,7 @@ struct AppCommands: Commands {
         // File
         CommandGroup(after: .newItem) {
             Button("Add Account…") { model.wantsToAddAccount = true }
-            Button("Sync Now") { Task { await model.sync() } }
+            Button("Sync Now") { model.startSync() }
                 .keyboardShortcut("r")
         }
 
@@ -35,6 +35,7 @@ struct AppCommands: Commands {
         // Help → Keyboard Shortcuts (⌘? works from anywhere; plain ? works while
         // the list is focused, handled by the table).
         CommandGroup(replacing: .help) {
+            Button("How Nevermore Works") { model.showHowItWorks = true }
             Button("Keyboard Shortcuts") { model.showShortcuts = true }
                 .keyboardShortcut("?", modifiers: .command)
         }
@@ -43,6 +44,13 @@ struct AppCommands: Commands {
         CommandMenu("Actions") {
             Button("Unsubscribe") { unsubscribeSelected() }
                 .keyboardShortcut("u")
+                .disabled(model.selection.isEmpty)
+            Button("Unsubscribe and Delete Messages") { unsubscribeAndDeleteSelected() }
+                .keyboardShortcut("u", modifiers: [.command, .shift])
+                .disabled(model.selection.isEmpty)
+            Divider()
+            Button("View Latest Message") { model.viewLatestMessage() }
+                .keyboardShortcut("v", modifiers: [.command, .shift])
                 .disabled(model.selection.isEmpty)
             Divider()
             Button("Ignore Sender") { model.ignore(model.selection) }
@@ -72,8 +80,14 @@ struct AppCommands: Commands {
         // window observes. Kept simple: drive through the model's selection.
         NotificationCenter.default.post(name: .unsubscribeSelected, object: nil)
     }
+
+    private func unsubscribeAndDeleteSelected() {
+        NotificationCenter.default.post(name: .unsubscribeAndDeleteSelected, object: nil)
+    }
 }
 
 extension Notification.Name {
     static let unsubscribeSelected = Notification.Name("nevermore.unsubscribeSelected")
+    static let unsubscribeAndDeleteSelected = Notification.Name(
+        "nevermore.unsubscribeAndDeleteSelected")
 }

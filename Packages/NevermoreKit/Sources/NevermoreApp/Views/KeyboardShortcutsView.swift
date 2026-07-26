@@ -22,7 +22,11 @@ struct KeyboardShortcutsView: View {
         (
             "Triage the selected sender",
             [
+                Shortcut(keys: "v  /  ⌘⇧V", action: "View newest message in the browser"),
                 Shortcut(keys: "u  /  ⌘U", action: "Unsubscribe"),
+                Shortcut(
+                    keys: "⇧U  /  ⌘⇧U",
+                    action: "Unsubscribe and delete — no confirmation"),
                 Shortcut(keys: "i  /  ⌘I", action: "Ignore"),
                 Shortcut(keys: "d  /  ⌘⌫", action: "Trash messages"),
                 Shortcut(keys: "⌘Z", action: "Undo the last ignore or trash"),
@@ -69,7 +73,7 @@ struct KeyboardShortcutsView: View {
                             }
                         }
                     }
-                    Text("Single-key shortcuts (j, k, u, i, d, ?) work while the sender list is focused. The ⌘ versions work anywhere.")
+                    Text("Single-key shortcuts (j, k, u, ⇧U, i, d, ?) work while the sender list is focused. The ⌘ versions work anywhere.")
                         .font(.caption).foregroundStyle(.secondary)
                         .padding(.top, 4)
                 }
