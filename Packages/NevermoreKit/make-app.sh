@@ -85,7 +85,7 @@ PLIST
 SPARKLE_KEY_FILE="$(dirname "$0")/Resources/sparkle-public-key.txt"
 if [ "${NEVERMORE_SANDBOX:-0}" != "1" ] && [ -s "$SPARKLE_KEY_FILE" ]; then
   SPARKLE_PUBLIC_KEY=$(tr -d ' \t\n\r' < "$SPARKLE_KEY_FILE")
-  SPARKLE_FEED=${NEVERMORE_FEED_URL:-https://brooksc.github.io/nevermore/appcast.xml}
+  SPARKLE_FEED=${NEVERMORE_FEED_URL:-https://brooksc.github.io/Nevermore/appcast.xml}
   /usr/bin/python3 - "$APP/Contents/Info.plist" "$SPARKLE_PUBLIC_KEY" "$SPARKLE_FEED" <<'PYEOF'
 import sys
 path, key, feed = sys.argv[1], sys.argv[2], sys.argv[3]

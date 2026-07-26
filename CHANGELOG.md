@@ -67,4 +67,4 @@ Everything below is pre-release work leading to 0.1.0, which has not shipped.
 - Header-injection defence on `mailto:` unsubscribes; STARTTLS required when
   sending; app password stored `WhenUnlockedThisDeviceOnly`.
 
-[Unreleased]: https://github.com/brooksc/nevermore
+[Unreleased]: https://github.com/brooksc/Nevermore

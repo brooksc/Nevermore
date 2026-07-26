@@ -1,0 +1,15 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Nevermore</title>
+        <item>
+            <title>0.1.0</title>
+            <pubDate>Sun, 26 Jul 2026 12:34:46 -0700</pubDate>
+            <sparkle:version>22</sparkle:version>
+            <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/brooksc/Nevermore/releases/download/v0.1.0/Nevermore-0.1.0.dmg" length="9636216" type="application/octet-stream" sparkle:edSignature="WNY31WIgkslCRmmjksXMenXD3yINNetuGnO46igAV+N+FzxWw6bG4IskaGhl2gzK6yAu+HXETUUXi/Hw9lfCAQ=="/>
+        </item>
+    </channel>
+</rss>
