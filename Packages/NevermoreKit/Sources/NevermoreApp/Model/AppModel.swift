@@ -120,12 +120,20 @@ final class AppModel {
     private(set) var lastSyncedAt: Date?
 
     /// Transient status-bar message with an optional undo, mirroring the design.
-    struct Toast: Equatable { var message: String; var undo: UndoAction? }
+    struct Toast: Equatable {
+        var message: String
+        var undo: UndoAction?
+        /// A follow-up offer — "delete their messages", "mark unsubscribed".
+        /// Separate from `undo` on purpose: it shares the button but must *not*
+        /// be bound to ⌘Z, which would make an undo keystroke delete mail.
+        var action: UndoAction?
+    }
     struct UndoAction: Equatable { let id = UUID(); var label: String }
     private(set) var toast: Toast?
     /// Whether the current toast offers an undo (drives ⌘Z / the Undo menu item).
     var canUndo: Bool { toast?.undo != nil }
     private var pendingUndo: (@MainActor () async -> Void)?
+    private var pendingAction: (@MainActor () async -> Void)?
 
     init() {
         accounts = registry.accounts()
@@ -1258,6 +1266,34 @@ final class AppModel {
         // Updating attemptedAt to now clears the reappeared state — old messages
         // predate it — so a re-unsubscribed sender leaves Reappeared.
         selection.remove(id)
+
+        // The automated flow offers to clear the backlog once an unsubscribe
+        // succeeds; the manual flow didn't offer it at all, so finishing in the
+        // browser left every message behind with no hint that deleting was even
+        // an option. Offer, don't assume — this is the user's mail.
+        guard confirmed, !group.messages.isEmpty else { return }
+        let count = group.messages.count
+        showToast(
+            "Unsubscribed from \(group.displayName)",
+            actionLabel: "Delete \(count.formatted()) Message\(count == 1 ? "" : "s")"
+        ) { [weak self] in
+            await self?.trash([id])
+        }
+    }
+
+    /// Called when the browser sheet closes with no outcome recorded.
+    ///
+    /// Closing a window is not a statement about whether the unsubscribe
+    /// worked, but the user has usually just done the work — so keep it
+    /// one click away instead of silently discarding it.
+    func promptManualOutcome(_ target: ManualUnsubscribe) {
+        guard history[target.id.storageKey] == nil else { return }
+        showToast(
+            "Closed without recording — did you unsubscribe from \(target.name)?",
+            actionLabel: "Mark Unsubscribed"
+        ) { [weak self] in
+            self?.recordManual(target.id, confirmed: true)
+        }
     }
 
     // MARK: - Toast
@@ -1272,13 +1308,27 @@ final class AppModel {
     /// the user had long forgotten.
     private static let toastLifetime: Duration = .seconds(12)
 
+    /// A toast whose button performs a follow-up rather than an undo.
+    private func showToast(
+        _ message: String, actionLabel: String,
+        action: @escaping @MainActor () async -> Void
+    ) {
+        showToast(message, undoLabel: nil, undo: nil, actionLabel: actionLabel, action: action)
+    }
+
     private func showToast(
         _ message: String, undoLabel: String?,
-        undo: (@MainActor () async -> Void)?
+        undo: (@MainActor () async -> Void)?,
+        actionLabel: String? = nil,
+        action: (@MainActor () async -> Void)? = nil
     ) {
         toastTask?.cancel()
         pendingUndo = undo
-        let shown = Toast(message: message, undo: undoLabel.map { UndoAction(label: $0) })
+        pendingAction = action
+        let shown = Toast(
+            message: message,
+            undo: undoLabel.map { UndoAction(label: $0) },
+            action: actionLabel.map { UndoAction(label: $0) })
         toast = shown
         toastTask = Task { [weak self] in
             try? await Task.sleep(for: Self.toastLifetime)
@@ -1301,10 +1351,19 @@ final class AppModel {
         await reloadFromStore()
     }
 
+    /// Perform a toast's follow-up offer. Deliberately not reachable from ⌘Z.
+    func runToastAction() async {
+        let action = pendingAction
+        pendingAction = nil
+        toast = nil
+        await action?()
+    }
+
     func dismissToast() {
         toastTask?.cancel()
         toast = nil
         pendingUndo = nil
+        pendingAction = nil
     }
 
     /// Trash a sender's messages and ignore them, as one undoable step.

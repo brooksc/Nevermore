@@ -14,6 +14,8 @@ struct WebUnsubscribeSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var copied = false
+    /// Whether an outcome was recorded before this sheet closed.
+    @State private var recorded = false
     /// Set when the loaded page looks like a successful-unsubscribe confirmation.
     @State private var detectedConfirmation = false
 
@@ -29,7 +31,14 @@ struct WebUnsubscribeSheet: View {
             footer
         }
         .frame(width: 900, height: 700)
-        .onExitCommand { dismiss() }
+        .onExitCommand { close() }
+    }
+
+    /// Closing is not itself an answer, so ask rather than assume — but don't
+    /// throw the work away either.
+    private func close() {
+        if !recorded { model.promptManualOutcome(target) }
+        dismiss()
     }
 
     private var header: some View {
@@ -68,7 +77,7 @@ struct WebUnsubscribeSheet: View {
             // A sheet is not a window, so Cmd-W never reached it; and the
             // embedded web view swallows key events, so Escape didn't either.
             // Bind both explicitly.
-            Button("Done") { dismiss() }
+            Button("Done") { close() }
                 .keyboardShortcut("w", modifiers: .command)
         }
         .padding(12)
@@ -84,6 +93,7 @@ struct WebUnsubscribeSheet: View {
             Button("Not Yet") { detectedConfirmation = false }
                 .controlSize(.small)
             Button("Mark Confirmed") {
+                recorded = true
                 model.recordManual(target.id, confirmed: true)
                 dismiss()
             }
@@ -109,10 +119,12 @@ struct WebUnsubscribeSheet: View {
             }
             Spacer()
             Button("Couldn't Unsubscribe") {
+                recorded = true
                 model.recordManual(target.id, confirmed: false)
                 dismiss()
             }
             Button("Mark Unsubscribed") {
+                recorded = true
                 model.recordManual(target.id, confirmed: true)
                 dismiss()
             }

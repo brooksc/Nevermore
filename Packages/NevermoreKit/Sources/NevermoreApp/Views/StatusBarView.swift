@@ -13,6 +13,9 @@ struct StatusBarView: View {
                 if let undo = toast.undo {
                     Button(undo.label) { Task { await model.runUndo() } }
                         .buttonStyle(.link)
+                } else if let action = toast.action {
+                    Button(action.label) { Task { await model.runToastAction() } }
+                        .buttonStyle(.link)
                 }
                 Spacer()
             }
