@@ -363,7 +363,8 @@ public actor IMAPBackend: MailBackend {
             isUnread: !info.flags.contains(.seen),
             unsubscribe: unsubscribe,
             deliveredTo: EmailSender(header: deliveredTo).address,
-            messageId: info.messageId?.description ?? header("Message-ID") ?? ""
+            messageId: info.messageId?.description ?? header("Message-ID") ?? "",
+            listID: MailingList.id(fromHeader: header("List-ID"))
         )
     }
 

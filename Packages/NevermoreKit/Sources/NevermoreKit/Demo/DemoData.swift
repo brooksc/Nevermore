@@ -34,11 +34,13 @@ public enum DemoData {
         let unreadFraction: Double
         /// Which alias the mail was delivered to.
         let deliveredTo: String
+        /// RFC 2919 List-ID, for senders that are actually mailing lists.
+        let listID: String?
 
         init(
             from: String, subjects: [String], unsubscribe: String?, oneClick: Bool = false,
             latestAgeHours: Double, cadenceHours: Double = 72, unreadFraction: Double = 0.5,
-            deliveredTo: String = DemoData.address
+            deliveredTo: String = DemoData.address, listID: String? = nil
         ) {
             self.from = from
             self.subjects = subjects
@@ -48,6 +50,7 @@ public enum DemoData {
             self.cadenceHours = cadenceHours
             self.unreadFraction = unreadFraction
             self.deliveredTo = deliveredTo
+            self.listID = listID
         }
     }
 
@@ -83,7 +86,8 @@ public enum DemoData {
                         isUnread: index < unreadCount,
                         unsubscribe: unsub,
                         deliveredTo: sender.deliveredTo,
-                        messageId: "<demo-\(uid)@example.invalid>"
+                        messageId: "<demo-\(uid)@example.invalid>",
+                        listID: sender.listID
                     ))
             }
         }
@@ -200,7 +204,8 @@ public enum DemoData {
                 "Author talk: Thursday at 7pm",
             ],
             unsubscribe: "<mailto:lists@ferndalelibrary.org?subject=unsubscribe>",
-            latestAgeHours: 40, cadenceHours: 150, unreadFraction: 0.0),
+            latestAgeHours: 40, cadenceHours: 150, unreadFraction: 0.0,
+            listID: "notices.ferndalelibrary.org"),
 
         Sender(
             from: "Sable & Finch <hello@sableandfinch.com>",

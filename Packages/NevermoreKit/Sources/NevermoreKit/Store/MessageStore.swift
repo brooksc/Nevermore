@@ -117,6 +117,13 @@ public final class MessageStore: Sendable {
                 t.add(column: "messageId", .text).notNull().defaults(to: "")
             }
         }
+        // RFC 2919 List-ID, so the UI can tell a discussion list or a
+        // notification stream from a marketing blast.
+        m.registerMigration("v4-list-id") { db in
+            try db.alter(table: "message") { t in
+                t.add(column: "listId", .text)
+            }
+        }
         return m
     }
 
@@ -132,8 +139,8 @@ public final class MessageStore: Sendable {
                         INSERT INTO message
                           (uid, senderAddress, senderHost, senderName, subject, receivedAt,
                            isUnread, unsubscribeRaw, unsubscribePost, deliveredTo, syncedAt,
-                           messageId)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           messageId, listId)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(uid) DO UPDATE SET
                           isUnread = excluded.isUnread,
                           syncedAt = excluded.syncedAt,
@@ -142,7 +149,8 @@ public final class MessageStore: Sendable {
                           unsubscribeRaw = excluded.unsubscribeRaw,
                           unsubscribePost = excluded.unsubscribePost,
                           deliveredTo = excluded.deliveredTo,
-                          messageId = excluded.messageId
+                          messageId = excluded.messageId,
+                          listId = excluded.listId
                         """,
                     arguments: [
                         Int(m.uid.value), m.sender.address, m.sender.host, m.sender.displayName,
@@ -156,7 +164,7 @@ public final class MessageStore: Sendable {
                         // exactly what ListUnsubscribe looks for when decoding.
                         m.unsubscribe?.supportsOneClick == true
                             ? "List-Unsubscribe=One-Click" : nil,
-                        m.deliveredTo, now, m.messageId,
+                        m.deliveredTo, now, m.messageId, m.listID,
                     ])
             }
         }
@@ -221,7 +229,8 @@ public final class MessageStore: Sendable {
                 postHeader: row["unsubscribePost"]
             ),
             deliveredTo: row["deliveredTo"] ?? "",
-            messageId: row["messageId"] ?? ""
+            messageId: row["messageId"] ?? "",
+            listID: row["listId"]
         )
     }
 

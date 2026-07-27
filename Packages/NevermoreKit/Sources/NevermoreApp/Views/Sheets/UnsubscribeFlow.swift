@@ -86,6 +86,12 @@ struct UnsubscribeFlow: View {
                 .frame(maxHeight: 160)
             }
 
+            if let lists = mailingListWarning {
+                Label(lists, systemImage: "person.3")
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             if let warning = aliasWarning {
                 Label(warning, systemImage: "exclamationmark.triangle")
                     .font(.caption).foregroundStyle(.orange)
@@ -126,6 +132,18 @@ struct UnsubscribeFlow: View {
         if web > 0 { parts.append("\(web) will open a web page") }
         if email > 0 { parts.append("\(email) send\(email == 1 ? "s" : "") an email") }
         return parts.joined(separator: ". ") + (parts.isEmpty ? "" : ".")
+    }
+
+    /// Mailing lists are a different decision from marketing: leaving one can
+    /// mean losing a discussion you're a member of, or notifications you rely
+    /// on. Worth naming before the button, not after.
+    private var mailingListWarning: String? {
+        let lists = targets.compactMap(\.mailingListID)
+        guard !lists.isEmpty else { return nil }
+        if lists.count == 1, let only = lists.first {
+            return "\(only) is a mailing list, not a marketing sender — unsubscribing leaves it."
+        }
+        return "\(lists.count) of these are mailing lists, not marketing senders — unsubscribing leaves them."
     }
 
     private var aliasWarning: String? {

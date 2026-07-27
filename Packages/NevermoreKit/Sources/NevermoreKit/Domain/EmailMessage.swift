@@ -20,6 +20,9 @@ public struct EmailMessage: Hashable, Sendable, Identifiable {
     /// RFC 5322 `Message-ID` (e.g. `<abc@host>`). The stable identifier used to
     /// find a message again in Trash for undo, since IMAP UIDs differ per folder.
     public let messageId: String
+    /// RFC 2919 `List-ID`, when the sender is a mailing list. Nil for ordinary
+    /// bulk mail, which is most marketing.
+    public let listID: String?
 
     public var id: MessageUID { uid }
     public var canUnsubscribe: Bool { unsubscribe != nil }
@@ -32,7 +35,8 @@ public struct EmailMessage: Hashable, Sendable, Identifiable {
         isUnread: Bool,
         unsubscribe: ListUnsubscribe?,
         deliveredTo: String = "",
-        messageId: String = ""
+        messageId: String = "",
+        listID: String? = nil
     ) {
         self.uid = uid
         self.sender = sender
@@ -42,6 +46,7 @@ public struct EmailMessage: Hashable, Sendable, Identifiable {
         self.unsubscribe = unsubscribe
         self.deliveredTo = deliveredTo
         self.messageId = messageId
+        self.listID = listID
     }
 }
 
@@ -93,6 +98,15 @@ public struct SenderGroup: Identifiable, Sendable {
     }
     public var latest: EmailMessage? { messages.first }
     public var newest: Date { messages.first?.receivedAt ?? .distantPast }
+
+    /// The list identifier if this sender is a mailing list.
+    ///
+    /// Taken from any message in the group: a list's id is stable, and older
+    /// messages carry it even when a recent one is missing the header.
+    public var mailingListID: String? {
+        messages.lazy.compactMap(\.listID).first
+    }
+    public var isMailingList: Bool { mailingListID != nil }
 
     /// The message to drive an unsubscribe from — newest one that has a target.
     public var unsubscribeSource: EmailMessage? {

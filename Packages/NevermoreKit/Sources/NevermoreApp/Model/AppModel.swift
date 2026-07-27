@@ -1073,6 +1073,8 @@ final class AppModel {
         let count: Int
         let method: UnsubscribeMethod
         let deliveredTo: String
+        /// Set when the sender is an RFC 2919 mailing list.
+        let mailingListID: String?
         var outcome: UnsubscribeEngine.Outcome?
     }
 
@@ -1085,6 +1087,7 @@ final class AppModel {
                 count: g.total,
                 method: SenderRow.method(for: g),
                 deliveredTo: g.unsubscribeSource?.deliveredTo ?? "",
+                mailingListID: g.mailingListID,
                 outcome: nil
             )
         }

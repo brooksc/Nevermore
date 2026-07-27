@@ -67,6 +67,11 @@ struct InspectorView: View {
                 Divider()
                 statistics(group)
 
+                if let listID = group.mailingListID {
+                    Divider()
+                    mailingListNote(listID)
+                }
+
                 Divider()
                 methodExplanation(method, sender: name)
 
@@ -103,6 +108,20 @@ struct InspectorView: View {
             Text(value).font(.callout.weight(.semibold)).monospacedDigit()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// A List-ID means this is a mailing list or notification stream, not a
+    /// marketing blast — a different decision, so say so before the buttons.
+    private func mailingListNote(_ listID: String) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: "person.3")
+                .font(.system(size: 16)).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Mailing list").font(.callout.weight(.semibold))
+                Text("Unsubscribing leaves the list \u{201C}\(listID)\u{201D}, not just a promotion.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func methodExplanation(_ method: UnsubscribeMethod, sender: String) -> some View {

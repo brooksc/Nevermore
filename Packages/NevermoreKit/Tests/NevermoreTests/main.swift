@@ -396,7 +396,7 @@ Harness.suite("UnsubscribeEngine.looksLikeConfirmation") {
 
 func makeMessage(
     _ uid: UInt32, from: String, unsub: String? = "<https://ex.com/u>",
-    messageId: String = "", deliveredTo: String = ""
+    messageId: String = "", deliveredTo: String = "", listID: String? = nil
 ) -> EmailMessage {
     EmailMessage(
         uid: MessageUID(uid),
@@ -406,7 +406,8 @@ func makeMessage(
         isUnread: true,
         unsubscribe: ListUnsubscribe(header: unsub),
         deliveredTo: deliveredTo,
-        messageId: messageId)
+        messageId: messageId,
+        listID: listID)
 }
 
 Harness.suite("MessageStore") {
@@ -1031,6 +1032,49 @@ Harness.suite("Forwarded-address mailto handling") {
             reason: "delivered to alias@ex.com, which you can't send from")
         expect(noLink != wrongIdentity, "distinguishable")
         expect(!noLink.isSuccess && !wrongIdentity.isSuccess, "neither counts as done")
+    }
+}
+
+Harness.suite("Mailing list detection") {
+    Harness.test("List-ID with a description keeps only the identifier") {
+        eq(
+            MailingList.id(fromHeader: "Ruby Talk <ruby-talk.ruby-lang.org>"),
+            "ruby-talk.ruby-lang.org")
+        eq(
+            MailingList.id(fromHeader: "<ptamemberconnection.wastatepta.org>"),
+            "ptamemberconnection.wastatepta.org")
+    }
+
+    Harness.test("case and whitespace are normalised") {
+        eq(MailingList.id(fromHeader: "  <Ruby-Talk.Example.ORG>  "), "ruby-talk.example.org")
+    }
+
+    Harness.test("a bare identifier is accepted, a bare description is not") {
+        eq(MailingList.id(fromHeader: "list.example.com"), "list.example.com")
+        // A phrase with no brackets is a description missing its id.
+        expect(MailingList.id(fromHeader: "Some Newsletter") == nil, "description alone")
+        expect(MailingList.id(fromHeader: nil) == nil, "absent")
+        expect(MailingList.id(fromHeader: "") == nil, "empty")
+        expect(MailingList.id(fromHeader: "<>") == nil, "empty brackets")
+    }
+
+    Harness.test("a group reports its list id from any message that carries one") {
+        // Senders don't always repeat List-ID on every message.
+        let group = SenderGroup(
+            id: GroupID(kind: .domain, key: "ex.org"),
+            messages: [
+                makeMessage(2, from: "L <l@ex.org>"),
+                makeMessage(1, from: "L <l@ex.org>", listID: "chat.ex.org"),
+            ])
+        eq(group.mailingListID, "chat.ex.org")
+        expect(group.isMailingList, "flagged as a list")
+    }
+
+    Harness.test("ordinary marketing is not a mailing list") {
+        let group = SenderGroup(
+            id: GroupID(kind: .domain, key: "shop.com"),
+            messages: [makeMessage(1, from: "Shop <a@shop.com>")])
+        expect(!group.isMailingList, "no List-ID means not a list")
     }
 }
 
