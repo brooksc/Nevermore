@@ -126,10 +126,16 @@ struct HowItWorksSheet: View {
             ScrollView { HowItWorksView().padding(.trailing, 4) }
             HStack {
                 Spacer()
-                Button("Done") { onDone() }.buttonStyle(.borderedProminent)
+                Button("Done") { onDone() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                Button("") { onDone() }
+                    .keyboardShortcut("w", modifiers: .command)
+                    .hidden()
             }
         }
         .padding(24)
         .frame(width: 580, height: 620)
+        .onExitCommand { onDone() }
     }
 }

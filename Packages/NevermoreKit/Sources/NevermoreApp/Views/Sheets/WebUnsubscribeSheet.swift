@@ -29,6 +29,7 @@ struct WebUnsubscribeSheet: View {
             footer
         }
         .frame(width: 900, height: 700)
+        .onExitCommand { dismiss() }
     }
 
     private var header: some View {
@@ -64,7 +65,11 @@ struct WebUnsubscribeSheet: View {
                 .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
             }
 
+            // A sheet is not a window, so Cmd-W never reached it; and the
+            // embedded web view swallows key events, so Escape didn't either.
+            // Bind both explicitly.
             Button("Done") { dismiss() }
+                .keyboardShortcut("w", modifiers: .command)
         }
         .padding(12)
     }

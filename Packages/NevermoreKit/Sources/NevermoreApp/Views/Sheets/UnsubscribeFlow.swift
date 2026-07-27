@@ -34,6 +34,15 @@ struct UnsubscribeFlow: View {
         }
         .frame(width: 460)
         .padding(24)
+        // Closable with Cmd-W and Escape like any other window — except while
+        // requests are in flight, where the Cancel button is the only correct
+        // exit because it stops cleanly between senders.
+        .overlay {
+            Button("") { if stage != .progress { dismiss() } }
+                .keyboardShortcut("w", modifiers: .command)
+                .hidden()
+        }
+        .onExitCommand { if stage != .progress { dismiss() } }
         .onAppear {
             // Honor "Ask before unsubscribing": when off, skip the confirm and
             // go straight to the action, deleting if that's the default.
@@ -232,7 +241,9 @@ struct UnsubscribeFlow: View {
                     }
                 }
                 Spacer()
-                Button("Done") { dismiss() }.buttonStyle(.borderedProminent)
+                Button("Done") { dismiss() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
             }
         }
     }

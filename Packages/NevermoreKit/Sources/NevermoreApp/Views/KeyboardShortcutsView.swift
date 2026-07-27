@@ -51,6 +51,9 @@ struct KeyboardShortcutsView: View {
                 Text("Keyboard Shortcuts").font(.title2.weight(.semibold))
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+                Button("") { dismiss() }
+                    .keyboardShortcut("w", modifiers: .command)
+                    .hidden()
             }
             .padding(20)
             Divider()
@@ -81,5 +84,6 @@ struct KeyboardShortcutsView: View {
             }
         }
         .frame(width: 420, height: 480)
+        .onExitCommand { dismiss() }
     }
 }
