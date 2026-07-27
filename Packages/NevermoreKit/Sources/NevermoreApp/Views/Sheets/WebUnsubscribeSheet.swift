@@ -16,6 +16,8 @@ struct WebUnsubscribeSheet: View {
     @State private var copied = false
     /// Whether an outcome was recorded before this sheet closed.
     @State private var recorded = false
+    /// Asking, at the moment of closing, whether the unsubscribe worked.
+    @State private var askOutcome = false
     /// Set when the loaded page looks like a successful-unsubscribe confirmation.
     @State private var detectedConfirmation = false
 
@@ -31,14 +33,43 @@ struct WebUnsubscribeSheet: View {
             footer
         }
         .frame(width: 900, height: 700)
+        // Without this SwiftUI dismisses the sheet on Escape itself, before
+        // onExitCommand runs — so the sheet closed and nothing was ever
+        // recorded. Every exit now routes through close().
+        .interactiveDismissDisabled()
         .onExitCommand { close() }
+        .confirmationDialog(
+            "Did you unsubscribe from \(target.name)?",
+            isPresented: $askOutcome, titleVisibility: .visible
+        ) {
+            Button("Yes, and Delete Their Messages") {
+                recorded = true
+                model.recordManualAndDelete(target.id)
+                dismiss()
+            }
+            Button("Yes") {
+                recorded = true
+                model.recordManual(target.id, confirmed: true)
+                dismiss()
+            }
+            Button("Not Yet", role: .cancel) { dismiss() }
+        } message: {
+            Text("Nevermore can't tell whether the sender accepted it, so it records what you say happened.")
+        }
     }
 
-    /// Closing is not itself an answer, so ask rather than assume — but don't
-    /// throw the work away either.
+    /// Closing is not itself an answer, so ask — at the moment of closing,
+    /// which is when the user knows it.
+    ///
+    /// This was a status-bar toast, which was too weak: it sat at the bottom of
+    /// the window for twelve seconds while the user was looking at the list,
+    /// and closing the sheet felt like it should have been the answer.
     private func close() {
-        if !recorded { model.promptManualOutcome(target) }
-        dismiss()
+        if recorded {
+            dismiss()
+        } else {
+            askOutcome = true
+        }
     }
 
     private var header: some View {

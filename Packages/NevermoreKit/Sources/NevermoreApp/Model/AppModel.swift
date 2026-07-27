@@ -1251,7 +1251,7 @@ final class AppModel {
     }
 
     /// Record the result of a manual browser unsubscribe and drop the sender.
-    func recordManual(_ id: GroupID, confirmed: Bool) {
+    func recordManual(_ id: GroupID, confirmed: Bool, offerDelete: Bool = true) {
         guard let store, let group = self.group(for: id) else { return }
         let source = group.unsubscribeSource
         let url = source?.unsubscribe?.webTargets.first?.absoluteString
@@ -1271,7 +1271,7 @@ final class AppModel {
         // succeeds; the manual flow didn't offer it at all, so finishing in the
         // browser left every message behind with no hint that deleting was even
         // an option. Offer, don't assume — this is the user's mail.
-        guard confirmed, !group.messages.isEmpty else { return }
+        guard offerDelete, confirmed, !group.messages.isEmpty else { return }
         let count = group.messages.count
         showToast(
             "Unsubscribed from \(group.displayName)",
@@ -1281,19 +1281,11 @@ final class AppModel {
         }
     }
 
-    /// Called when the browser sheet closes with no outcome recorded.
-    ///
-    /// Closing a window is not a statement about whether the unsubscribe
-    /// worked, but the user has usually just done the work — so keep it
-    /// one click away instead of silently discarding it.
-    func promptManualOutcome(_ target: ManualUnsubscribe) {
-        guard history[target.id.storageKey] == nil else { return }
-        showToast(
-            "Closed without recording — did you unsubscribe from \(target.name)?",
-            actionLabel: "Mark Unsubscribed"
-        ) { [weak self] in
-            self?.recordManual(target.id, confirmed: true)
-        }
+    /// Record a manual unsubscribe and clear the sender's backlog in one step.
+    func recordManualAndDelete(_ id: GroupID) {
+        // Suppress the "Delete N Messages" offer: the user just chose it.
+        recordManual(id, confirmed: true, offerDelete: false)
+        Task { await trash([id]) }
     }
 
     // MARK: - Toast
