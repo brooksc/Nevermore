@@ -209,6 +209,7 @@ struct MainWindowView: View {
                 model.startSync()
             } label: { Image(systemName: "arrow.clockwise") }
             .help("Sync now")
+            .accessibilityLabel("Sync Now")
             .disabled(model.isSyncing)
         }
         ToolbarItem(placement: .primaryAction) {
@@ -216,6 +217,7 @@ struct MainWindowView: View {
                 beginUnsubscribe(model.selection)
             } label: { Image(systemName: "envelope.open") }
             .help("Unsubscribe from selected")
+            .accessibilityLabel("Unsubscribe from Selected Senders")
             .disabled(model.selection.isEmpty)
         }
         ToolbarItem(placement: .primaryAction) {
@@ -223,6 +225,7 @@ struct MainWindowView: View {
                 Image(systemName: "eye.slash")
             }
             .help("Ignore selected")
+            .accessibilityLabel("Ignore Selected Senders")
             .disabled(model.selection.isEmpty)
         }
         ToolbarItem(placement: .primaryAction) {
@@ -230,6 +233,7 @@ struct MainWindowView: View {
                 Image(systemName: "trash")
             }
             .help("Trash messages from selected")
+            .accessibilityLabel("Move Messages to Trash")
             .disabled(model.selection.isEmpty)
         }
         ToolbarItem(placement: .primaryAction) {
@@ -237,6 +241,7 @@ struct MainWindowView: View {
                 Image(systemName: "sidebar.trailing")
             }
             .help("Toggle inspector")
+            .accessibilityLabel("Toggle Inspector")
         }
     }
 

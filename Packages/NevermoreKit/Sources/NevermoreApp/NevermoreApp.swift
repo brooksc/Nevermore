@@ -29,6 +29,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             FileHandle.standardError.write(Data(text.utf8))
         }
+        // No tab bar: tabs exist to gather many documents, and this app has one
+        // window showing one mailbox. Leaving it on put "Show Tab Bar" and
+        // "Show All Tabs" at the top of the View menu, above the app's own
+        // commands, for a feature that does nothing useful here.
+        NSWindow.allowsAutomaticWindowTabbing = false
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
     }

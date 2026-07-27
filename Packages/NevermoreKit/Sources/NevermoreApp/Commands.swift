@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import NevermoreKit
 
 /// Menu-bar commands (spec §8). Every primary verb has a shortcut, and items
 /// disable when there's no selection.
@@ -7,8 +8,18 @@ struct AppCommands: Commands {
     @Bindable var model: AppModel
 
     var body: some Commands {
-        // File
-        CommandGroup(after: .newItem) {
+        // A custom About, so the panel carries the real version, the licence,
+        // and where to read the privacy policy — an app holding a mail
+        // credential should say who wrote it.
+        CommandGroup(replacing: .appInfo) {
+            Button("About Nevermore") { showAboutPanel() }
+        }
+
+        // File. `replacing:` rather than `after:` deliberately: the default
+        // group contributes New Window, and a second window shares this app's
+        // single AppModel — same selection, same search, same collection. Two
+        // linked mirrors of one mailbox is worse than one window.
+        CommandGroup(replacing: .newItem) {
             Button("Add Account…") { model.wantsToAddAccount = true }
             Button("Sync Now") { model.startSync() }
                 .keyboardShortcut("r")
@@ -94,6 +105,27 @@ struct AppCommands: Commands {
     /// Where the Help menu's links point. One place, so the marketing site and
     /// the FAQ can't drift apart from the app that links to them.
     static let website = "https://brooksc.github.io/Nevermore/"
+
+    private func showAboutPanel() {
+        let credits = NSAttributedString(
+            string: """
+                Find and bulk-unsubscribe from newsletters, entirely on your Mac.
+
+                Reads message headers only — never bodies — and never sends your                 data anywhere except to the unsubscribe endpoint the sender                 published. Deleted mail moves to your provider's Trash and is                 never permanently destroyed.
+
+                Personal-use licence. Source available for inspection.
+                """,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ])
+        NSApplication.shared.orderFrontStandardAboutPanel(options: [
+            .applicationVersion: AppVersion.marketing,
+            .version: AppVersion.build,
+            .credits: credits,
+        ])
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
 
     private func open(_ urlString: String) {
         guard let url = URL(string: urlString) else { return }
