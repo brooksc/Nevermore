@@ -11,8 +11,13 @@ unsubscribe endpoint the sender published.
 The name is the point: senders that keep mailing after you unsubscribe get
 flagged and shut down for good.
 
-> **Status:** working, pre-release, and not yet on the Mac App Store. Built and
-> used daily against a real ~132,000-message mailbox.
+**[nevermore website](https://brooksc.github.io/Nevermore/)** ·
+[download 0.1.0](https://github.com/brooksc/Nevermore/releases/latest) ·
+[FAQ](https://brooksc.github.io/Nevermore/faq.html) ·
+[privacy](PRIVACY.md)
+
+> **Status:** 0.1.0 released for direct download; not yet on the Mac App Store.
+> Built and used daily against a real ~132,000-message mailbox.
 > _Docs last reviewed: 26 July 2026._
 
 ![Nevermore's main window: a list of senders grouped by domain, with an inspector showing one sender's unsubscribe method](docs/screenshots/main-window.png)
@@ -88,6 +93,12 @@ Available any time from **Help ▸ How Nevermore Works**, including an honest li
 of what the app *won't* find.
 
 ![The How Nevermore Works sheet, explaining the four steps and the meaning of each unsubscribe-method icon](docs/screenshots/how-it-works.png)
+
+## Install
+
+Download the latest DMG from
+[Releases](https://github.com/brooksc/Nevermore/releases/latest), open it, and
+drag Nevermore to Applications. Signed and notarized by Apple.
 
 ## Requirements
 
