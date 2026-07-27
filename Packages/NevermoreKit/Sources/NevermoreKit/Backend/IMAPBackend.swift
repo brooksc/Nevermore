@@ -511,6 +511,47 @@ public actor IMAPBackend: MailBackend {
     /// Some providers expose alias APIs; IMAP has no equivalent, but the distinct
     /// `From` addresses on recently sent mail are a good proxy. The probe
     /// recovered 5 real aliases this way.
+    /// Gmail's conversation id for one message.
+    ///
+    /// Fetched on demand rather than stored: it is only needed when the user
+    /// asks to view a message, so paying for it on every message of every sync
+    /// — and carrying a schema migration — would be a poor trade. One extra
+    /// round trip on an already-open connection.
+    ///
+    /// Returns nil rather than throwing: a non-Gmail server answers this with a
+    /// tagged BAD, and the caller has a working fallback either way.
+    public func gmailThreadID(for uid: MessageUID) async -> UInt64? {
+        guard config.imapHost.contains("gmail") || config.imapHost.contains("google")
+        else { return nil }
+
+        // Retry once on a fresh connection. A cached IMAP connection that has
+        // gone stale — Gmail drops idle ones, and this runs only when the user
+        // asks, often hours after the last sync — fails on first use. Sync
+        // already reconnects on error; without the same here, a stale socket
+        // silently degraded "view message" to a search result.
+        for attempt in 1...2 {
+            do {
+                let server = try await connected()
+                let folders = try await resolvedFolders(on: server)
+                _ = try await select(folders.searchScope, on: server)
+                let attributes = try await server.fetchGmailAttributes(
+                    for: UIDSet([UID(uid.value)]))
+                guard let threadID = attributes.values.first?.threadID else {
+                    Log.backend.detail("no gmail thread id for uid \(uid.value)")
+                    return nil
+                }
+                Log.backend.detail("gmail thread id for uid \(uid.value): \(threadID)")
+                return threadID
+            } catch {
+                Log.backend.detail(
+                    "gmail thread id attempt \(attempt) failed: \(error.localizedDescription)")
+                guard attempt == 1 else { return nil }
+                await disconnect()
+            }
+        }
+        return nil
+    }
+
     public func sendAsAddresses() async throws -> [String] {
         if let cachedSendAs { return cachedSendAs }
 

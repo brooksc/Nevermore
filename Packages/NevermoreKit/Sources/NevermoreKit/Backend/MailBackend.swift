@@ -83,6 +83,13 @@ public protocol MailBackend: Sendable {
     func verifyConnection() async throws
     func sendMail(to: String, subject: String, body: String, from: String?) async throws
 
+    /// Gmail's internal conversation id for a message, if the server offers the
+    /// `X-GM-EXT-1` extension. Used to open the conversation in Gmail's web UI
+    /// directly rather than a search that the user then has to click through.
+    /// Nil for every non-Gmail server, and on any failure — this is a
+    /// convenience, never a requirement.
+    func gmailThreadID(for uid: MessageUID) async -> UInt64?
+
     /// Addresses this account can legitimately send as.
     func sendAsAddresses() async throws -> [String]
     var primaryAddress: String { get }

@@ -16,7 +16,10 @@ let package = Package(
         // Pin the exact tag revision instead — reproducible, and revisit on upgrade.
         .package(
             url: "https://github.com/Cocoanetics/SwiftMail.git",
-            revision: "dbb1d0bb6bc7742249cf4800513c5562d54fa734"  // tag 1.8.0
+            // Past 1.8.0: PR #192 (merged 2026-07-25) adds fetchGmailAttributes,
+            // which is how "view this message" opens the Gmail conversation
+            // directly instead of a search result. No tag contains it yet.
+            revision: "7ba22114bf681acc105fe728d0130c79a6a51cf0"
         ),
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.9.0"),
         // Sparkle powers in-app updates for the Developer ID / DMG build only.

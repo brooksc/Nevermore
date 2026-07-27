@@ -110,6 +110,20 @@ public struct MailProvider: Sendable, Hashable, Identifiable {
         return "https://mail.google.com/mail/?authuser=\(encoded)"
     }
 
+    /// Direct link to a Gmail *conversation*, from Gmail's internal thread id.
+    ///
+    /// Gmail's web UI addresses threads by the lowercase hex of the decimal
+    /// `X-GM-THRID` it returns over IMAP. This opens the conversation itself
+    /// rather than a search result the user then has to click.
+    ///
+    /// The `#all/` fragment is an undocumented web-UI convention — stable for
+    /// years, but not a promise — so callers keep the `rfc822msgid:` search as
+    /// a fallback.
+    public func webThreadURL(threadID: UInt64, account: String? = nil) -> URL? {
+        guard id == "gmail", threadID != 0 else { return nil }
+        return URL(string: "\(Self.gmailBase(account))#all/\(String(threadID, radix: 16))")
+    }
+
     public func webMessageURL(messageId rawID: String, account: String? = nil) -> URL? {
         let messageID = rawID.trimmingCharacters(in: CharacterSet(charactersIn: "<> "))
         guard !messageID.isEmpty else { return nil }

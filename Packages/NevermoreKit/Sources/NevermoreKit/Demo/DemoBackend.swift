@@ -80,5 +80,8 @@ public actor DemoBackend: MailBackend {
 
     public func sendAsAddresses() async throws -> [String] { DemoData.sendAsAddresses }
 
+    /// The demo has no Gmail behind it, so there is no conversation to open.
+    public func gmailThreadID(for uid: MessageUID) async -> UInt64? { nil }
+
     public func disconnect() async {}
 }

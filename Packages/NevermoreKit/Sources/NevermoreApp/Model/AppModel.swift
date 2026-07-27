@@ -421,6 +421,10 @@ final class AppModel {
     /// to a search for the sender — stated in a toast rather than silently
     /// landing somewhere other than asked for.
     func viewLatestMessage() {
+        Task { await viewLatestMessageAsync() }
+    }
+
+    private func viewLatestMessageAsync() async {
         guard !isDemoMode else {
             showToast("Demo mode — there's no real message to open.", undoLabel: nil, undo: nil)
             return
@@ -428,6 +432,17 @@ final class AppModel {
         guard let id = selection.first, let group = group(for: id), let message = group.latest
         else { return }
 
+        // Prefer Gmail's own conversation link. Costs one round trip on an
+        // open connection, and only when the user actually asks to view — far
+        // cheaper than fetching a thread id for every message of every sync.
+        if let backend,
+            let threadID = await backend.gmailThreadID(for: message.uid),
+            let url = currentProvider.webThreadURL(threadID: threadID, account: currentAccount)
+        {
+            Log.app.event("opening gmail conversation for \(group.id.key)")
+            NSWorkspace.shared.open(url)
+            return
+        }
         if let url = currentProvider.webMessageURL(
             messageId: message.messageId, account: currentAccount)
         {

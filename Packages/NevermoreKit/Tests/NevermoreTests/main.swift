@@ -788,6 +788,24 @@ Harness.suite("Per-message webmail links") {
             "sender search also routes: \(search?.absoluteString ?? "nil")")
     }
 
+    Harness.test("a Gmail thread id becomes a direct conversation link") {
+        // Gmail's web UI addresses threads by lowercase hex of the decimal
+        // X-GM-THRID. 1785028440153 -> 19f9c0f2599.
+        let url = MailProvider.gmail.webThreadURL(
+            threadID: 1_785_028_440_153, account: "someone@gmail.com")
+        eq(
+            url?.absoluteString,
+            "https://mail.google.com/mail/?authuser=someone@gmail.com#all/19f9bfc7059")
+    }
+
+    Harness.test("thread links are Gmail-only and reject a zero id") {
+        expect(
+            MailProvider.gmail.webThreadURL(threadID: 0) == nil, "0 is not a thread")
+        for other in MailProvider.known where other.id != "gmail" {
+            expect(other.webThreadURL(threadID: 123) == nil, "\(other.id) has no thread URL")
+        }
+    }
+
     Harness.test("no account falls back to /u/0/") {
         expect(
             MailProvider.gmail.webMessageURL(messageId: "<a@b.com>", account: nil)?
