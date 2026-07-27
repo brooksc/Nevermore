@@ -274,7 +274,7 @@ struct UnsubscribeFlow: View {
     private func detail(_ outcome: UnsubscribeEngine.Outcome?) -> String {
         switch outcome {
         case .confirmed(let d), .requested(let d), .failed(let d): d
-        case .needsManual: "no unsubscribe link"
+        case .needsManual(let reason): reason
         case nil: ""
         }
     }

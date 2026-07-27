@@ -1002,4 +1002,36 @@ Harness.suite("Pre-migration backup") {
     }
 }
 
+Harness.suite("Forwarded-address mailto handling") {
+    Harness.test("a tokenised mailto identifies the recipient") {
+        // ?subject= carries the sender's own token, so which address you send
+        // from doesn't matter.
+        let u = ListUnsubscribe(header: "<mailto:unsub@ex.com?subject=unsub-a1b2c3>")
+        eq(u?.mailtoTargets.first?.identifiesRecipient, true)
+        eq(u?.mailtoTargets.first?.subject, "unsub-a1b2c3")
+    }
+
+    Harness.test("a bare mailto identifies you only by the From address") {
+        let u = ListUnsubscribe(header: "<mailto:unsub@ex.com>")
+        eq(u?.mailtoTargets.first?.identifiesRecipient, false)
+        // Falls back to a generic subject, which tells the sender nothing.
+        eq(u?.mailtoTargets.first?.subject, "unsubscribe")
+    }
+
+    Harness.test("a body token counts too") {
+        let u = ListUnsubscribe(header: "<mailto:u@ex.com?body=remove%20id%3A99>")
+        eq(u?.mailtoTargets.first?.identifiesRecipient, true)
+    }
+
+    Harness.test("needsManual carries a reason the UI can show") {
+        // Both cases land in the same bucket but mean different things to a
+        // user: one has no link at all, the other can't be sent as you.
+        let noLink = UnsubscribeEngine.Outcome.needsManual(reason: "no unsubscribe link")
+        let wrongIdentity = UnsubscribeEngine.Outcome.needsManual(
+            reason: "delivered to alias@ex.com, which you can't send from")
+        expect(noLink != wrongIdentity, "distinguishable")
+        expect(!noLink.isSuccess && !wrongIdentity.isSuccess, "neither counts as done")
+    }
+}
+
 exit(Harness.finish())

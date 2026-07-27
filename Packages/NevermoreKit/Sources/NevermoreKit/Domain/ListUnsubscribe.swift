@@ -11,6 +11,24 @@ public struct ListUnsubscribe: Hashable, Sendable {
         public let address: String
         public let subject: String
         public let body: String
+        /// True when the sender put a token in the URI's subject or body.
+        ///
+        /// Decides whether the *From* address matters. A sender who wrote
+        /// `?subject=unsub-a1b2c3` identifies you by that token and doesn't
+        /// care which address you send from. A bare `mailto:unsub@example.com`
+        /// has nothing else to go on, so the From address is the only thing
+        /// that can match you to a subscription — and sending it from the
+        /// wrong one is a request that quietly goes nowhere.
+        public let identifiesRecipient: Bool
+
+        public init(
+            address: String, subject: String, body: String, identifiesRecipient: Bool = false
+        ) {
+            self.address = address
+            self.subject = subject
+            self.body = body
+            self.identifiesRecipient = identifiesRecipient
+        }
     }
 
     /// `https`/`http` targets, in header order.
@@ -99,10 +117,13 @@ public struct ListUnsubscribe: Hashable, Sendable {
         func value(_ name: String) -> String? {
             items.first { $0.name.lowercased() == name }?.value
         }
+        let subject = value("subject")
+        let body = value("body")
         return MailtoTarget(
             address: address,
-            subject: value("subject") ?? "unsubscribe",
-            body: value("body") ?? "Please unsubscribe me from this mailing list."
+            subject: subject ?? "unsubscribe",
+            body: body ?? "Please unsubscribe me from this mailing list.",
+            identifiesRecipient: subject != nil || body != nil
         )
     }
 

@@ -14,8 +14,10 @@ public struct UnsubscribeEngine: Sendable {
         /// a non-committal status. May still have worked.
         case requested(detail: String)
         case failed(detail: String)
-        /// No usable target; the caller should fall back to opening webmail.
-        case needsManual
+        /// Nothing was sent, and the caller should hand this to the manual
+        /// flow. Carries why, because "no unsubscribe link" and "we can't send
+        /// as the address this was delivered to" need different responses.
+        case needsManual(reason: String)
 
         public var isSuccess: Bool {
             if case .failed = self { return false }
@@ -84,7 +86,7 @@ public struct UnsubscribeEngine: Sendable {
                 return .failed(detail: error.localizedDescription)
             }
         }
-        return .needsManual
+        return .needsManual(reason: "no unsubscribe link")
     }
 
     // MARK: - HTTP

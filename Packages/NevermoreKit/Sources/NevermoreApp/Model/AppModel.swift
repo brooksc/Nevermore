@@ -1101,7 +1101,7 @@ final class AppModel {
         case .confirmed(let d): "confirmed (\(d))"
         case .requested(let d): "requested (\(d))"
         case .failed(let d): "failed (\(d))"
-        case .needsManual: "needs manual"
+        case .needsManual(let reason): "needs manual (\(reason))"
         }
     }
 
@@ -1129,10 +1129,29 @@ final class AppModel {
                 let source = group.unsubscribeSource,
                 let unsub = source.unsubscribe
             else {
-                results[index].outcome = .needsManual
+                results[index].outcome = .needsManual(reason: "no unsubscribe link")
                 continue
             }
             let from = sendAsFrom(for: source.deliveredTo)
+
+            // A bare mailto: identifies you only by who the mail comes from.
+            // If it arrived at a forwarded address we can't send as, the
+            // request would go out from the wrong identity and be ignored —
+            // and we'd then record it as "requested", quietly retiring a
+            // sender that never actually unsubscribed you. Hand it to the
+            // manual flow instead of pretending.
+            let bareMailto =
+                unsub.webTargets.isEmpty
+                && unsub.mailtoTargets.first.map { !$0.identifiesRecipient } == true
+            if bareMailto, from == nil, !source.deliveredTo.isEmpty,
+                source.deliveredTo != currentAccount
+            {
+                results[index].outcome = .needsManual(
+                    reason: "delivered to \(source.deliveredTo), which you can't send from")
+                Log.unsubscribe.event(
+                    "\(group.id.key): skipped mailto — delivered to \(source.deliveredTo), no send-as")
+                continue
+            }
             // The engine is the one path that makes its own HTTP requests
             // rather than going through the backend, so demo mode has to stop
             // short of it explicitly. A demo must never send a real
@@ -1141,7 +1160,7 @@ final class AppModel {
             if isDemoMode {
                 try? await Task.sleep(for: .milliseconds(350))  // let the progress UI be seen
                 outcome = SenderRow.method(for: group) == .manual
-                    ? .needsManual
+                    ? .needsManual(reason: "no unsubscribe link")
                     : .requested(detail: "demo — no request sent")
             } else {
                 outcome = await engine.run(unsub, fromAddress: from)
