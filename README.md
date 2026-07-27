@@ -91,7 +91,7 @@ of what the app *won't* find.
 
 ## Requirements
 
-- macOS 14 or later
+- macOS 14 or later, Apple Silicon or Intel (universal binary)
 - Xcode 26 (or matching Swift 6 toolchain) to build
 - An app-specific password for your mail account
 

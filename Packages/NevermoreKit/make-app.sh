@@ -9,8 +9,17 @@ export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode-beta.app/Contents/Deve
 CONFIG=${1:-debug}
 
 cd "$(dirname "$0")"
-BIN_DIR=$(swift build --product NevermoreApp -c "$CONFIG" --show-bin-path)
-swift build --product NevermoreApp -c "$CONFIG"
+# Universal by default for anything shipped: macOS 14 still runs on Intel, and
+# an arm64-only DMG simply refuses to launch there. NEVERMORE_ARCHS=native
+# builds host-only, which is roughly half the time and what the edit/run loop
+# wants.
+ARCH_FLAGS=(--arch arm64 --arch x86_64)
+if [ "${NEVERMORE_ARCHS:-}" = "native" ]; then
+  ARCH_FLAGS=()
+fi
+
+BIN_DIR=$(swift build --product NevermoreApp -c "$CONFIG" "${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"}" --show-bin-path)
+swift build --product NevermoreApp -c "$CONFIG" "${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"}"
 
 # Version comes from the VERSION file, and the build number from the commit
 # count — monotonic, reproducible from any checkout, nothing to maintain by
@@ -103,6 +112,7 @@ else
 fi
 
 echo "version: $MARKETING_VERSION ($BUILD_NUMBER)" >&2
+echo "architectures: $(lipo -archs "$APP/Contents/MacOS/Nevermore")" >&2
 
 # Sign with a stable identity so Keychain items survive rebuilds. An ad-hoc
 # signature (`-`) gets a fresh code identity every build, which invalidates the

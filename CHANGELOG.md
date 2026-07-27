@@ -6,7 +6,9 @@ All notable changes to Nevermore are recorded here. Format follows
 
 ## [Unreleased]
 
-Everything below is pre-release work leading to 0.1.0, which has not shipped.
+## [0.1.0] — 2026-07-26
+
+First public release. Universal binary for Apple Silicon and Intel, macOS 14+.
 
 ### Added
 
@@ -31,6 +33,13 @@ Everything below is pre-release work leading to 0.1.0, which has not shipped.
   for repeated onboarding tests.
 - Pre-migration database backup before any new schema migration runs.
 - `VERSION` file and commit-count build numbers written into the bundle.
+- Mailing-list detection via RFC 2919 `List-ID`, so a discussion list or
+  notification stream is distinguishable from a marketing blast before you
+  unsubscribe.
+- Gmail conversations open directly from the app, and webmail links route to the
+  right account rather than whichever Google account signed in first.
+- In-app updates via Sparkle (direct download build only; the Mac App Store
+  build has no updater, as Apple requires).
 
 ### Fixed
 
@@ -67,4 +76,5 @@ Everything below is pre-release work leading to 0.1.0, which has not shipped.
 - Header-injection defence on `mailto:` unsubscribes; STARTTLS required when
   sending; app password stored `WhenUnlockedThisDeviceOnly`.
 
-[Unreleased]: https://github.com/brooksc/Nevermore
+[Unreleased]: https://github.com/brooksc/Nevermore/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/brooksc/Nevermore/releases/tag/v0.1.0
