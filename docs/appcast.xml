@@ -3,6 +3,26 @@
     <channel>
         <title>Nevermore</title>
         <item>
+            <title>1.0.0</title>
+            <description><![CDATA[
+                <p>The version number catching up to what the app is: no known
+                data-loss bugs, and a verified sandboxed build. The app is
+                unchanged from 0.1.1.</p>
+                <ul>
+                  <li>Nevermore is now on the Mac App Store, listed as
+                  "Nevermore Mail Cleanup". This direct-download build is the
+                  same app and keeps updating itself.</li>
+                  <li>Support now has its own page, with an email address, so
+                  getting help never requires a GitHub account.</li>
+                </ul>
+            ]]></description>
+            <pubDate>Sat, 01 Aug 2026 21:50:59 -0700</pubDate>
+            <sparkle:version>40</sparkle:version>
+            <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/brooksc/Nevermore/releases/download/v1.0.0/Nevermore-1.0.0.dmg" length="19652161" type="application/octet-stream" sparkle:edSignature="cRAKFjfpT9xMqTLlv+2yPlCCU/Sk/vFYxpmPtoL8BYWIQYMdvg6CTjtt4PwNGFHQsoEIRKiYlWM6XkLHYOhdCA=="/>
+        </item>
+        <item>
             <title>0.1.1</title>
             <description><![CDATA[
                 <p>Packaging and documentation. The app itself is unchanged
