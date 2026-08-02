@@ -41,3 +41,8 @@ token*.json
 
 # Sparkle signing: the public key is committed, the private key never is.
 sparkle-private-key.txt
+
+# App Store Connect API key. Apple issues the .p8 once and never again, so a
+# stray copy in the repo is both a leak and a thing someone might delete.
+*.p8
+AuthKey_*.p8

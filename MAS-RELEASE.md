@@ -136,6 +136,26 @@ is per-bundle-id, so a profile from another app will not work — let Xcode
 create one when you enable automatic signing on the new target, or make it in
 the Developer portal.
 
+### App Store Connect API key (for uploading builds)
+
+`altool` needs credentials that aren't an interactive password. A team API key
+supplies them, and the key file is referenced by path — nothing secret ends up
+on a command line.
+
+| | |
+|---|---|
+| Key ID | `68BGNV3CCC` ("Upload builds", Developer role) |
+| Issuer ID | `7ab554b4-f208-4c99-9003-30c1320a3262` |
+| Key file | `~/.appstoreconnect/private_keys/AuthKey_68BGNV3CCC.p8` (mode 600) |
+
+The `.p8` is downloadable **once**, at creation — back it up to 1Password. It is
+also shared with the jobhunt project, so revoking it breaks both. The IDs above
+are not secrets; the `.p8` is, and it is never committed.
+
+Developer role is enough to upload a build. It is deliberately not App Manager:
+nothing in this flow needs to edit listings, and sales reports would need
+Finance, which this key does not have.
+
 The notarytool credential is only needed for the DMG channel:
 
 ```bash
@@ -155,6 +175,37 @@ Be ready to justify this: reviewers sometimes assume a mail app must be
 uploading something. The answer is that the app talks only to the user's own
 mail provider and to the unsubscribe endpoint the sender published.
 
+### 8.5. Build the store archive with a RELEASED Xcode, never the beta
+
+**This will waste an evening if you forget it.** Apple's App Store ingestion
+rejects anything built with a beta toolchain:
+
+```
+This bundle is invalid. Apple is not currently accepting applications
+built with this version of Xcode. (90301)
+```
+
+It is checked server-side against the `DTXcodeBuild` / `DTSDKBuild` keys the
+toolchain stamps into `Info.plist`, so no upload flag works around it — the
+bundle has to be rebuilt.
+
+Notarization has no such check, which is why this is easy to miss: the same
+beta-built binary notarizes and staples fine for the DMG channel. The two paths
+disagree by design. Hit on 1 August 2026 with Xcode-beta 27.0 (`DTXcode 2700`,
+`DTXcodeBuild 27A5218g`).
+
+Every script here defaults `DEVELOPER_DIR` to `/Applications/Xcode-beta.app`,
+which is right for the DMG and wrong for the store. For a store build, point it
+at the released Xcode explicitly:
+
+```bash
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+xcodebuild -version    # confirm it is NOT a beta before archiving
+```
+
+Multiple Xcodes coexist happily as long as every build site says which one it
+wants.
+
 ### 9. Archive and upload
 
 Product ▸ Archive ▸ Distribute App ▸ App Store Connect from Xcode works, and
@@ -164,8 +215,12 @@ catches entitlement and profile mismatches before the upload.
 The scripted equivalent, if you'd rather not drive the GUI:
 
 ```bash
+# Released Xcode, not the beta — see 8.5. This is the whole reason the first
+# 1.0.0 upload was rejected.
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+
 TUIST_BUILD_NUMBER=$(git rev-list --count HEAD) \
-TUIST_MAS_PROFILE_NAME="<profile name>" tuist generate --no-open
+TUIST_MAS_PROFILE_NAME="Nevermore Mac App Store" tuist generate --no-open
 
 xcodebuild archive \
   -workspace Nevermore.xcworkspace \
