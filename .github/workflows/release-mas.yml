@@ -1,0 +1,186 @@
+name: Release MAS
+
+# Manual trigger only. Two reasons, and both matter:
+#
+#  1. Actions minutes are limited here, and a macOS runner burns them at 10x
+#     the Linux rate. Nothing should build without someone asking for it.
+#  2. Nothing reaches App Store Connect by accident. Building the .pkg and
+#     delivering it are separate decisions — the upload only happens when the
+#     box below is ticked.
+#
+# Why this exists at all: Apple rejects binaries built on a beta macOS
+# (ITMS-90301, "not currently accepting applications built with this version of
+# the OS"), and the maintainer's Mac runs a macOS beta. A released Xcode is not
+# enough — the host OS is stamped into the bundle as BuildMachineOSBuild. The
+# runner has a released macOS and a released Xcode, so this is the only path to
+# a store-acceptable build until the Mac is off the beta.
+on:
+  workflow_dispatch:
+    inputs:
+      upload_to_app_store_connect:
+        description: 'Deliver the .pkg to App Store Connect (unticked = build the artifact only)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-mas:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Show toolchain
+        # The two values that decide whether Apple accepts the upload at all.
+        # Printed first so a rejection can be diagnosed from the log alone.
+        run: |
+          sw_vers
+          xcodebuild -version
+
+      - name: Install Tuist
+        run: |
+          curl -fsSL https://install.tuist.io | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Before generation, so Project.swift can pin the app target to the
+      # profile by name. Installing a profile doesn't touch the keychain search
+      # list, unlike the cert import below.
+      - name: Install provisioning profile
+        run: |
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILE_DIR"
+          echo "${{ secrets.MAS_PROVISIONING_PROFILE_BASE64 }}" | base64 --decode \
+            > "$PROFILE_DIR/nevermore-mas.provisionprofile"
+          security cms -D -i "$PROFILE_DIR/nevermore-mas.provisionprofile" > /tmp/mas-profile.plist
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print :Name" /tmp/mas-profile.plist)
+          echo "MAS_PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+          echo "Installed provisioning profile: $PROFILE_NAME"
+
+      - name: Import signing certificates
+        run: |
+          # One .p12 carries both identities: "Apple Distribution" signs the app,
+          # "3rd Party Mac Developer Installer" signs the .pkg. Hence both tool
+          # authorizations on the import.
+          echo "${{ secrets.MAS_CERT_BASE64 }}" | base64 --decode > mas.p12
+          security create-keychain -p "" build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import mas.p12 -k build.keychain -P "${{ secrets.MAS_CERT_PASSWORD }}" \
+            -T /usr/bin/codesign -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+          security list-keychains -d user -s build.keychain
+          security find-identity -v build.keychain
+
+      - name: Build number
+        # The commit count, matching make-app.sh and the DMG channel, so the two
+        # channels never disagree about what build 43 means. Comfortably inside
+        # App Store Connect's uint32 limit, and monotonic on a linear main.
+        run: echo "BUILD_NUMBER=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+
+      - name: Generate Xcode project
+        # No Sparkle package is declared in Project.swift at all, so
+        # canImport(Sparkle) is false and the updater compiles out — Apple bans
+        # third-party updaters. TUIST_MAS_PROFILE_NAME pins manual signing to
+        # the app target only; a global profile override breaks framework
+        # targets, which reject one.
+        run: |
+          TUIST_BUILD_NUMBER="$BUILD_NUMBER" \
+          TUIST_MAS_PROFILE_NAME="$MAS_PROFILE_NAME" \
+          tuist generate --no-open
+
+      - name: Archive
+        run: |
+          xcodebuild archive \
+            -workspace Nevermore.xcworkspace \
+            -scheme Nevermore \
+            -configuration Release \
+            -archivePath build/Nevermore-MAS.xcarchive \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            DEVELOPMENT_TEAM=${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Preflight the archive
+        # Everything here fails in seconds. The alternative is finding out after
+        # ingestion, or after review.
+        run: |
+          APP="build/Nevermore-MAS.xcarchive/Products/Applications/Nevermore.app"
+          test -d "$APP" || { echo "ERROR: Nevermore.app missing from archive"; exit 1; }
+
+          # Apple rejects apps that update themselves. This should be
+          # structurally impossible — which is why it is cheap to assert.
+          if otool -L "$APP/Contents/MacOS/Nevermore" | grep -qi sparkle; then
+            echo "ERROR: Sparkle is linked into the store build"; exit 1
+          fi
+          if [ -e "$APP/Contents/Frameworks/Sparkle.framework" ]; then
+            echo "ERROR: Sparkle.framework is embedded in the store build"; exit 1
+          fi
+
+          test -f "$APP/Contents/embedded.provisionprofile" \
+            || { echo "ERROR: no embedded.provisionprofile — manual signing did not take effect"; exit 1; }
+
+          codesign --display --entitlements :- "$APP" 2>/dev/null | grep -q "app-sandbox" \
+            || { echo "ERROR: app-sandbox entitlement missing"; exit 1; }
+
+          # The stamps behind ITMS-90301. A beta OS or beta Xcode here means the
+          # upload will be rejected, so surface them before spending the upload.
+          plist="$APP/Contents/Info.plist"
+          echo "DTXcodeBuild:        $(/usr/libexec/PlistBuddy -c 'Print DTXcodeBuild' "$plist")"
+          echo "DTSDKName:           $(/usr/libexec/PlistBuddy -c 'Print DTSDKName' "$plist")"
+          echo "BuildMachineOSBuild: $(/usr/libexec/PlistBuddy -c 'Print BuildMachineOSBuild' "$plist")"
+          echo "version:             $(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$plist") ($BUILD_NUMBER)"
+          echo "architectures:       $(lipo -archs "$APP/Contents/MacOS/Nevermore")"
+          echo "preflight passed"
+
+      - name: Package
+        run: |
+          APP="build/Nevermore-MAS.xcarchive/Products/Applications/Nevermore.app"
+          mkdir -p build/export-mas
+          # productbuild rather than `xcodebuild -exportArchive`: the app is
+          # already signed by the archive step, and exportArchive fails on this
+          # runner with "IDEDistribution: Unknown Distribution Error" (an empty
+          # allowed-method set, so any `method` value is rejected). Learned from
+          # the jobhunt project, which hit exactly this.
+          INSTALLER_ID=$(security find-identity -v build.keychain \
+            | grep -o '3rd Party Mac Developer Installer: [^"]*' | head -1)
+          [ -n "$INSTALLER_ID" ] || { echo "ERROR: no installer identity in the keychain"; exit 1; }
+          productbuild --component "$APP" /Applications \
+            --sign "$INSTALLER_ID" \
+            build/export-mas/Nevermore.pkg
+          ls -la build/export-mas/Nevermore.pkg
+
+      - name: Upload to App Store Connect
+        if: ${{ inputs.upload_to_app_store_connect }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          # altool, not notarytool: store delivery is not notarization. An API
+          # key is used rather than an Apple ID and app-specific password so no
+          # human credential is involved.
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "${{ secrets.ASC_KEY_BASE64 }}" | base64 --decode \
+            > "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          xcrun altool --upload-app \
+            --type macos \
+            --file build/export-mas/Nevermore.pkg \
+            --apiKey "$ASC_KEY_ID" \
+            --apiIssuer "$ASC_ISSUER_ID"
+          echo "Uploaded. Apple processes it for 5-30 minutes, then attach the build to the version in App Store Connect."
+
+      - name: Clean up signing material
+        if: always()
+        run: |
+          rm -f mas.p12
+          rm -f "$HOME/.appstoreconnect/private_keys/"*.p8
+          security delete-keychain build.keychain 2>/dev/null || true
+
+      - name: Upload .pkg as artifact
+        # Kept even when delivery fails, so the .pkg can still be sent by hand
+        # through Transporter.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Nevermore-MAS-pkg
+          path: build/export-mas/*.pkg
+          if-no-files-found: warn
