@@ -6,6 +6,30 @@ All notable changes to Nevermore are recorded here. Format follows
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-08-01
+
+Packaging and documentation. No change to how the app behaves.
+
+### Fixed
+
+- The app inside the DMG carried no stapled notarization ticket — only the
+  image did. An update installed by Sparkle on a machine that was offline or
+  behind a filter could stall at launch while Gatekeeper tried to reach Apple.
+  `make-dmg.sh` now notarizes and staples the app before packaging it.
+
+### Changed
+
+- The privacy policy is published at
+  <https://brooksc.github.io/Nevermore/privacy.html> and the site links there
+  rather than to a file on GitHub.
+- The privacy policy said the app had "no update server". The direct-download
+  build carries Sparkle, which fetches an appcast from GitHub Pages, so the
+  policy now describes that request and what it does and doesn't reveal.
+
+### Added
+
+- `./run` builds the app from source and launches it, for development.
+
 ## [0.1.0] — 2026-07-26
 
 First public release. Universal binary for Apple Silicon and Intel, macOS 14+.
@@ -76,5 +100,6 @@ First public release. Universal binary for Apple Silicon and Intel, macOS 14+.
 - Header-injection defence on `mailto:` unsubscribes; STARTTLS required when
   sending; app password stored `WhenUnlockedThisDeviceOnly`.
 
-[Unreleased]: https://github.com/brooksc/Nevermore/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/brooksc/Nevermore/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/brooksc/Nevermore/releases/tag/v0.1.1
 [0.1.0]: https://github.com/brooksc/Nevermore/releases/tag/v0.1.0

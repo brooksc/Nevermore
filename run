@@ -1,0 +1,26 @@
+#!/bin/bash
+# Build the app from the current source and launch it. Debug + host-arch by
+# default, which is the fast edit/run loop; pass `release` for a release build.
+# Any further arguments go to the app itself.
+#
+#   ./run                 # debug build, launch
+#   ./run release         # release build, launch
+set -euo pipefail
+
+CONFIG=debug
+if [ "${1:-}" = "debug" ] || [ "${1:-}" = "release" ]; then
+  CONFIG=$1
+  shift
+fi
+
+cd "$(dirname "$0")/Packages/NevermoreKit"
+
+# swift build's progress also lands on stdout, so the bundle path make-app.sh
+# echoes is only the last line.
+APP=$(NEVERMORE_ARCHS=${NEVERMORE_ARCHS:-native} ./make-app.sh "$CONFIG" | tail -1)
+
+# Quit any copy already running so the launch below is the build we just made,
+# not the old one the Dock still holds open.
+osascript -e 'quit app "Nevermore"' 2>/dev/null || true
+
+open "$APP" ${1+--args "$@"}

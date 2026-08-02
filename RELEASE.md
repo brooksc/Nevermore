@@ -325,8 +325,9 @@ Left, all of it in [MAS-RELEASE.md](MAS-RELEASE.md):
 
 - [ ] The thin Xcode app target — the only structural work.
 - [ ] App Store Connect record, signing assets, privacy nutrition label.
-- [ ] Publish `PRIVACY.md` at a stable URL (GitHub Pages, from `docs/`) and
-      point App Store Connect at it.
+- [x] Publish `PRIVACY.md` at a stable URL — `docs/privacy.html`, served at
+      <https://brooksc.github.io/Nevermore/privacy.html>. Still to do: point
+      App Store Connect at it.
 - [ ] First archive, upload, and review submission.
 
 And for the DMG channel:
@@ -334,11 +335,12 @@ And for the DMG channel:
 - [x] `make-dmg.sh` — builds, signs, notarizes, staples a mountable DMG.
 - [x] Sparkle wired in behind `#if canImport(Sparkle)`, framework embedded and
       signed by `make-app.sh`.
-- [ ] Generate the EdDSA keypair; commit the public half, back the private half
+- [x] Generate the EdDSA keypair; commit the public half, back the private half
       up to 1Password.
-- [ ] Store notarytool credentials:
+- [x] Store notarytool credentials:
       `xcrun notarytool store-credentials nevermore-notary --apple-id … --team-id SU999VT2G2`
-- [ ] Publish `docs/appcast.xml` and confirm an old build updates itself.
+- [x] Publish `docs/appcast.xml` and confirm an old build updates itself —
+      verified 0.1.0 → 0.1.1 on 1 August 2026.
 
 Open questions:
 

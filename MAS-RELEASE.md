@@ -86,8 +86,9 @@ Create the app with bundle id `com.brooksc.nevermore`. You'll need:
 - **Primary category** — Productivity.
 - **Age rating** — the questionnaire; the app has an in-app browser that opens
   sender-chosen pages, so answer the unrestricted-web-access question honestly.
-- **Privacy policy URL** — required. Publish [PRIVACY.md](PRIVACY.md) at a
-  stable URL; the GitHub Pages site in `docs/` is the intended home.
+- **Privacy policy URL** — required, and published:
+  <https://brooksc.github.io/Nevermore/privacy.html> (`docs/privacy.html`,
+  kept in step with [PRIVACY.md](PRIVACY.md)).
 - **Support URL** — the same site or the repository's issues page.
 
 ### 7. Signing assets

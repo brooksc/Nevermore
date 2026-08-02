@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nevermore — Privacy Policy</title>
+<meta name="description" content="Nevermore has no servers, collects nothing, and transmits nothing to its developer. What the app accesses, what it stores, and what leaves your Mac.">
+<style>
+  :root {
+    --ink: #14161a; --muted: #5b6270; --line: #e3e6ec;
+    --brand: #0a7cff; --bg: #fff; --panel: #f7f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #e9ecf1; --muted: #9aa3b2; --line: #2a2f3a; --bg: #101216; --panel: #171a20; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 17px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px; }
+  h1 { font-size: clamp(2rem, 5vw, 2.8rem); letter-spacing: -0.02em; margin: 0 0 .3em; }
+  h2 { font-size: 1.15rem; margin: 2.2em 0 .5em; letter-spacing: -0.01em; }
+  h2:first-of-type { margin-top: 1.4em; }
+  p { margin: 0 0 1em; }
+  a { color: var(--brand); }
+  header { padding: 70px 0 10px; }
+  .lede { color: var(--muted); font-size: 1.1rem; }
+  .updated { color: var(--muted); font-size: .92rem; margin-top: .6em; }
+  .back { display: inline-block; margin-bottom: 26px; font-size: .92rem; text-decoration: none; }
+  code {
+    font: .88em ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 5px; padding: 1px 5px;
+  }
+  ul, ol { margin: 0 0 1em; padding-left: 1.3em; }
+  li { margin-bottom: .5em; }
+  table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: .95rem; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; }
+  tbody td:first-child { white-space: nowrap; }
+  .note {
+    background: var(--panel); border: 1px solid var(--line);
+    border-left: 3px solid var(--brand); border-radius: 8px;
+    padding: 14px 16px; margin: 1.2em 0; font-size: .95rem;
+  }
+  footer { margin: 80px 0 60px; padding-top: 26px; border-top: 1px solid var(--line); font-size: .9rem; color: var(--muted); }
+  footer a { margin-right: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <a class="back" href="./">← Nevermore</a>
+  <h1>Privacy policy</h1>
+  <p class="lede">Nevermore for macOS.</p>
+  <p class="updated">Last updated: 1 August 2026</p>
+</header>
+
+<h2>The short version</h2>
+<p>
+  Nevermore has no servers. It collects nothing, transmits nothing to its
+  developer, and contains no analytics, telemetry, crash reporting, or
+  advertising of any kind. Your mail, your credentials, and everything the app
+  derives from them stay on your Mac.
+</p>
+<p>
+  There is no account to create, because there is nothing to create it with.
+</p>
+
+<h2>What the app accesses</h2>
+<p>
+  Nevermore connects directly from your Mac to <strong>your mail provider</strong>
+  over IMAP, using an app-specific password you supply.
+</p>
+<p>
+  It reads <strong>message headers only</strong> — never message bodies.
+  Specifically:
+</p>
+<table>
+  <thead><tr><th>Field</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td><code>From</code></td><td>To identify and group senders</td></tr>
+    <tr><td><code>Subject</code></td><td>To show you what a sender sends</td></tr>
+    <tr><td><code>Date</code></td><td>To sort and show recency</td></tr>
+    <tr><td><code>List-Unsubscribe</code>, <code>List-Unsubscribe-Post</code></td><td>The unsubscribe method itself</td></tr>
+    <tr><td><code>List-ID</code>, <code>Auto-Submitted</code>, <code>Precedence</code></td><td>Bulk-mail signals</td></tr>
+    <tr><td><code>Delivered-To</code> / <code>To</code></td><td>So a <code>mailto:</code> unsubscribe is sent from the address the mail was delivered to</td></tr>
+    <tr><td><code>Message-ID</code></td><td>To find a message again in Trash if you undo, and to open it in webmail</td></tr>
+  </tbody>
+</table>
+<p>
+  Headers are fetched with IMAP <code>BODY.PEEK</code>, which means
+  <strong>reading them does not mark your mail as read</strong>.
+</p>
+
+<h2>What is stored, and where</h2>
+<p>Everything is on your Mac:</p>
+<ul>
+  <li>
+    <strong>Header cache</strong> — a SQLite database in
+    <code>~/Library/Application Support/Nevermore/</code> (inside the app's
+    sandbox container for Mac App Store builds), one per account. It holds the
+    fields above, plus your unsubscribe history, ignored senders, and grouping
+    corrections.
+  </li>
+  <li>
+    <strong>App password</strong> — in the <strong>macOS Keychain</strong>,
+    stored <code>WhenUnlockedThisDeviceOnly</code>, so it cannot ride a backup
+    or Migration Assistant transfer to another machine. Nevermore never writes
+    it to disk in the clear and never logs it.
+  </li>
+  <li>
+    <strong>Preferences</strong> — ordinary macOS user defaults (appearance,
+    sync interval, and similar).
+  </li>
+</ul>
+<p>
+  Deleting the app's Application Support folder erases the cache. Removing an
+  account from Settings deletes both its database and its Keychain item.
+</p>
+
+<h2>What leaves your Mac</h2>
+<p>Three things, all of them direct and all of them initiated by you:</p>
+<ol>
+  <li>
+    <strong>Your mail provider.</strong> IMAP connections to fetch headers and
+    to move messages to Trash, and SMTP to send a <code>mailto:</code>
+    unsubscribe. STARTTLS is required for sending, so the session cannot be
+    downgraded to cleartext.
+  </li>
+  <li>
+    <strong>The sender's unsubscribe endpoint.</strong> When you unsubscribe,
+    Nevermore contacts the address that sender published in their own
+    <code>List-Unsubscribe</code> header — an HTTP request, or an email sent
+    from your account. Nothing beyond what the unsubscribe requires is included.
+  </li>
+  <li>
+    <strong>A web page you choose to open.</strong> The in-app browser and the
+    "view this message" and "manage preferences" links open pages at your
+    request. The in-app browser uses a non-persistent data store, so it never
+    reads or writes your normal browser's cookies.
+  </li>
+</ol>
+<p>
+  Nevermore never contacts the developer. There is no licence check and no
+  "phone home".
+</p>
+
+<h2>Software updates</h2>
+<p>
+  The version downloaded directly from GitHub checks for updates using
+  <a href="https://sparkle-project.org">Sparkle</a>, which fetches a static
+  file — <code>appcast.xml</code> — from this site, hosted on GitHub Pages. That
+  request carries nothing identifying beyond what any web request carries: your
+  IP address and the app's user agent, logged by GitHub under
+  <a href="https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement">their
+  privacy statement</a>, not by the developer. No account, licence, install ID,
+  or usage data is sent, and the developer has no access to those logs.
+</p>
+<div class="note">
+  The Mac App Store version contains no updater at all — Apple's rules forbid
+  it, and Sparkle is compiled out of that build. It updates through the App
+  Store like any other app.
+</div>
+<p>
+  The first time you run it, the app asks whether to check for updates
+  automatically. Decline and it makes no outbound request of its own at all,
+  until you pick <strong>Check for Updates…</strong> from the Help menu
+  yourself.
+</p>
+
+<h2>Third parties</h2>
+<p>
+  The developer shares your information with nobody, because the developer never
+  receives it.
+</p>
+<p>
+  Unsubscribe endpoints belong to the senders who published them and are
+  governed by those senders' own privacy policies — Nevermore has no
+  relationship with them and no control over what they log when you unsubscribe.
+  Contacting them is the point of the app, and it happens only when you ask.
+</p>
+<p>
+  If you obtained Nevermore from the Mac App Store, Apple's own policies cover
+  your purchase and download; the developer receives only Apple's standard
+  aggregate sales reporting, which contains no personal information.
+</p>
+
+<h2>Logging and diagnostics</h2>
+<p>
+  Nevermore writes to the standard macOS unified log. Those entries stay on your
+  Mac. Sender addresses and domains appear in them, because diagnosing an
+  unsubscribe failure requires knowing which sender failed.
+  <strong>Message contents and your password are never logged.</strong>
+</p>
+<p>
+  Settings ▸ Advanced ▸ Export Diagnostics writes a copy of the app's own recent
+  log entries to a file, so that you can inspect it and choose whether to share
+  it when reporting a problem. Nothing is sent anywhere automatically.
+</p>
+
+<h2>Children</h2>
+<p>
+  Nevermore is not directed at children and collects no information from anyone.
+</p>
+
+<h2>Your rights</h2>
+<p>
+  Because nothing is collected, there is no data held about you to access,
+  correct, export, or delete — and no account to close. Everything the app knows
+  is in the files described above, on your own machine, under your control.
+</p>
+
+<h2>Changes</h2>
+<p>
+  Material changes to this policy will be noted in the app's release notes and
+  reflected in the "last updated" date above. Previous versions remain in the
+  <a href="https://github.com/brooksc/Nevermore/commits/main/PRIVACY.md">project's
+  Git history</a>.
+</p>
+
+<h2>Contact</h2>
+<p>
+  Questions about this policy, or about the app's handling of your data: open an
+  issue on <a href="https://github.com/brooksc/Nevermore/issues">GitHub</a>.
+</p>
+
+<footer>
+  <a href="./">Home</a>
+  <a href="faq.html">FAQ</a>
+  <a href="https://github.com/brooksc/Nevermore">GitHub</a>
+  <a href="https://github.com/brooksc/Nevermore/issues">Support</a>
+</footer>
+
+</div>
+</body>
+</html>

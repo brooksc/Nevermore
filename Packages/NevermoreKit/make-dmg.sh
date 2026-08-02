@@ -34,6 +34,25 @@ fi
 APP=$(./make-app.sh release | tail -1)
 echo "built: $APP" >&2
 
+# Notarize and staple the .app *before* it goes into the image. Stapling only
+# the DMG is enough for someone who downloads it — Gatekeeper checks the image —
+# but Sparkle installs the .app it extracts from that image, and an unstapled
+# app has to reach Apple's servers to prove it's notarized. On a machine that's
+# offline or behind a filter, that's a launch failure after an update. The app
+# can't be stapled once it's inside a read-only image, hence the separate
+# submission here.
+if [ "$NOTARIZE" = "1" ]; then
+  ZIP="${APP%.app}.zip"
+  rm -f "$ZIP"
+  ditto -c -k --keepParent "$APP" "$ZIP"
+  echo "submitting the app to Apple (this can take a few minutes)…" >&2
+  xcrun notarytool submit "$ZIP" --keychain-profile "$PROFILE" --wait
+  rm -f "$ZIP"
+  xcrun stapler staple "$APP"
+  xcrun stapler validate "$APP"
+  echo "app notarized and stapled" >&2
+fi
+
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 cp -R "$APP" "$STAGE/"
@@ -62,7 +81,7 @@ else
 fi
 
 if [ "$NOTARIZE" = "1" ]; then
-  echo "submitting to Apple (this can take a few minutes)…" >&2
+  echo "submitting the image to Apple (this can take a few minutes)…" >&2
   xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait
   # Staple to the DMG so it validates with no network on the user's machine.
   xcrun stapler staple "$DMG"

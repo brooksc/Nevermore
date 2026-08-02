@@ -1,7 +1,7 @@
 # Privacy Policy
 
 **Nevermore for macOS**
-_Last updated: 26 July 2026_
+_Last updated: 1 August 2026_
 
 ## The short version
 
@@ -67,8 +67,27 @@ Three things, all of them direct and all of them initiated by you:
    in-app browser uses a non-persistent data store, so it never reads or writes
    your normal browser's cookies.
 
-Nevermore never contacts the developer. There is no update server, no licence
-check, and no "phone home".
+Nevermore never contacts the developer. There is no licence check and no
+"phone home".
+
+## Software updates
+
+The version downloaded directly from GitHub checks for updates using
+[Sparkle](https://sparkle-project.org), which fetches a static file —
+`appcast.xml` — from the project's GitHub Pages site. That request carries
+nothing identifying beyond what any web request carries: your IP address and the
+app's user agent, logged by GitHub under [their privacy
+statement](https://docs.github.com/site-policy/privacy-policies/github-general-privacy-statement),
+not by the developer. No account, licence, install ID, or usage data is sent,
+and the developer has no access to those logs.
+
+The Mac App Store version contains no updater at all — Apple's rules forbid it,
+and Sparkle is compiled out of that build. It updates through the App Store like
+any other app.
+
+The first time you run it, the app asks whether to check for updates
+automatically. Decline and it makes no outbound request of its own at all, until
+you pick **Check for Updates…** from the Help menu yourself.
 
 ## Third parties
 
