@@ -12,11 +12,11 @@ The name is the point: senders that keep mailing after you unsubscribe get
 flagged and shut down for good.
 
 **[nevermore website](https://brooksc.github.io/Nevermore/)** ·
-[download 0.1.0](https://github.com/brooksc/Nevermore/releases/latest) ·
+[download 1.0.0](https://github.com/brooksc/Nevermore/releases/latest) ·
 [FAQ](https://brooksc.github.io/Nevermore/faq.html) ·
 [privacy](PRIVACY.md)
 
-> **Status:** 0.1.0 released for direct download; not yet on the Mac App Store.
+> **Status:** 1.0.0 released for direct download; Mac App Store submission in review.
 > Built and used daily against a real ~132,000-message mailbox.
 > _Docs last reviewed: 26 July 2026._
 
