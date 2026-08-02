@@ -163,6 +163,30 @@ xcrun notarytool store-credentials nevermore-notary \
   --apple-id "you@example.com" --team-id SU999VT2G2
 ```
 
+### 7.5. The App Review test account
+
+Guideline 2.1 expects a working account for anything with a login. A built-in
+demo mode is only accepted *in lieu of* one "due to legal or security
+obligations" and needs Apple's prior approval — which does not describe this
+app, so demo mode alone invites a 2.1 rejection. Supply both: real credentials
+for the actual IMAP path, demo mode as the fast way to see the interface.
+
+**The account and its app-specific password live in 1Password** (item:
+*Nevermore App Review account*). They are deliberately not written down here —
+this repository is public. Paste them into App Store Connect ▸ App Review
+Information ▸ Notes by hand at submission time.
+
+What the account needs to be, and stay:
+
+- A **real mailbox that receives newsletters directly**. Do not seed it by
+  forwarding mail from another account: forwarding rewrites headers and drops
+  `List-Unsubscribe`, which is the only thing this app looks for — the reviewer
+  would see an empty list and conclude the app does not work.
+- Authenticated with an **app-specific password**, never the account password,
+  so no 2FA prompt can reach a reviewer who cannot answer it.
+- **Alive for every submission**, not just the first. App Review re-checks on
+  updates, and a dead review mailbox becomes a 2.1 rejection later.
+
 ### 8. Privacy nutrition label
 
 In App Store Connect, under App Privacy. The honest answers:

@@ -46,3 +46,7 @@ sparkle-private-key.txt
 # stray copy in the repo is both a leak and a thing someone might delete.
 *.p8
 AuthKey_*.p8
+
+# Local-only working notes and credentials. This repository is public; nothing
+# under here is ever committed.
+.local/
