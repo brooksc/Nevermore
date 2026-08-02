@@ -3,6 +3,26 @@
     <channel>
         <title>Nevermore</title>
         <item>
+            <title>0.1.1</title>
+            <description><![CDATA[
+                <p>Packaging and documentation. The app itself is unchanged
+                from 0.1.0.</p>
+                <ul>
+                  <li>The app inside the disk image now carries its own stapled
+                  notarization ticket, so an update installs cleanly on a Mac
+                  that is offline or behind a filter.</li>
+                  <li>The privacy policy is published at
+                  brooksc.github.io/Nevermore/privacy.html, and now describes
+                  this update check.</li>
+                </ul>
+            ]]></description>
+            <pubDate>Sat, 01 Aug 2026 19:20:34 -0700</pubDate>
+            <sparkle:version>36</sparkle:version>
+            <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/brooksc/Nevermore/releases/download/v0.1.1/Nevermore-0.1.1.dmg" length="19652182" type="application/octet-stream" sparkle:edSignature="SF3qeK/A9d9tayVstq+c3XgqBgSTxyIvzkYGmZhFhRyV2TSLWWmipXL3w5SLHeidJTPrwsG9YI9Y5KXR93iKDA=="/>
+        </item>
+        <item>
             <title>0.1.0</title>
             <pubDate>Sun, 26 Jul 2026 22:18:19 -0700</pubDate>
             <sparkle:version>33</sparkle:version>
