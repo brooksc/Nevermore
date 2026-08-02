@@ -31,6 +31,11 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          # Full history: the build number is the commit count, and the default
+          # shallow clone makes that 1 — which App Store Connect rejects, since
+          # build numbers must increase and 42 is already uploaded.
+          fetch-depth: 0
 
       - name: Show toolchain
         # The two values that decide whether Apple accepts the upload at all.
@@ -84,7 +89,17 @@ jobs:
         # The commit count, matching make-app.sh and the DMG channel, so the two
         # channels never disagree about what build 43 means. Comfortably inside
         # App Store Connect's uint32 limit, and monotonic on a linear main.
-        run: echo "BUILD_NUMBER=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+        run: |
+          BUILD_NUMBER=$(git rev-list --count HEAD)
+          # A shallow checkout silently yields 1. Guard rather than discover it
+          # when Apple rejects the upload for a non-increasing build number.
+          if [ "$BUILD_NUMBER" -lt 43 ]; then
+            echo "ERROR: build number $BUILD_NUMBER is too low — build 42 is already uploaded."
+            echo "The checkout is probably shallow; fetch-depth: 0 is required."
+            exit 1
+          fi
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          echo "build number: $BUILD_NUMBER"
 
       - name: Generate Xcode project
         # No Sparkle package is declared in Project.swift at all, so
