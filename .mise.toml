@@ -1,0 +1,4 @@
+# Pinned so CI and this machine generate the same Xcode project. Bumping Tuist
+# is a deliberate change, not something a runner picks up on its own.
+[tools]
+tuist = "4.203.1"

@@ -39,10 +39,18 @@ jobs:
           sw_vers
           xcodebuild -version
 
+      # Tuist via mise, pinned in .mise.toml to the version this project is
+      # developed against. The first attempt piped `curl install.tuist.io` into
+      # bash; the URL now 403s, and because curl's failure was swallowed by the
+      # pipe the step passed and blew up two steps later instead.
       - name: Install Tuist
-        run: |
-          curl -fsSL https://install.tuist.io | bash
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac # v2
+        with:
+          install: true
+          cache: true
+
+      - name: Verify Tuist is on PATH
+        run: tuist version
 
       # Before generation, so Project.swift can pin the app target to the
       # profile by name. Installing a profile doesn't touch the keychain search
