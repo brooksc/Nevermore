@@ -17,6 +17,8 @@ Nevermore.xcodeproj/
 Nevermore.xcworkspace/
 .tuist-bin/
 Derived/
+# xcarchive and the signed .pkg for App Store delivery.
+build/
 
 # Python bytecode (belt-and-braces; the Python spike has been removed)
 __pycache__/

@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nevermore — Support</title>
+<meta name="description" content="How to get help with Nevermore: email support, answers to common questions, and how to send a diagnostic log.">
+<style>
+  :root {
+    --ink: #14161a; --muted: #5b6270; --line: #e3e6ec;
+    --brand: #0a7cff; --bg: #fff; --panel: #f7f8fa;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --ink: #e9ecf1; --muted: #9aa3b2; --line: #2a2f3a; --bg: #101216; --panel: #171a20; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 17px/1.65 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px; }
+  h1 { font-size: clamp(2rem, 5vw, 2.8rem); letter-spacing: -0.02em; margin: 0 0 .3em; }
+  h2 { font-size: 1.15rem; margin: 2.2em 0 .5em; letter-spacing: -0.01em; }
+  h2:first-of-type { margin-top: 1.4em; }
+  p { margin: 0 0 1em; }
+  a { color: var(--brand); }
+  header { padding: 70px 0 10px; }
+  .lede { color: var(--muted); font-size: 1.1rem; }
+  .back { display: inline-block; margin-bottom: 26px; font-size: .92rem; text-decoration: none; }
+  code {
+    font: .88em ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 5px; padding: 1px 5px;
+  }
+  ul { margin: 0 0 1em; padding-left: 1.3em; }
+  li { margin-bottom: .5em; }
+  .contact {
+    background: var(--panel); border: 1px solid var(--line);
+    border-left: 3px solid var(--brand); border-radius: 8px;
+    padding: 18px 20px; margin: 1.4em 0;
+  }
+  .contact a { font-size: 1.15rem; font-weight: 600; }
+  footer { margin: 80px 0 60px; padding-top: 26px; border-top: 1px solid var(--line); font-size: .9rem; color: var(--muted); }
+  footer a { margin-right: 18px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <a class="back" href="./">← Nevermore</a>
+  <h1>Support</h1>
+  <p class="lede">One person answers these, usually within a couple of days.</p>
+</header>
+
+<div class="contact">
+  <p style="margin:0 0 .3em"><strong>Email</strong></p>
+  <p style="margin:0"><a href="mailto:nevermore@brooksc.com">nevermore@brooksc.com</a></p>
+</div>
+
+<h2>Before you write</h2>
+<p>
+  The <a href="faq.html">FAQ</a> covers the questions that come up most: why a
+  sender's messages are missing, what "requested" means instead of
+  "unsubscribed", where your password is kept, and what happens to mail you
+  delete.
+</p>
+
+<h2>Reporting a problem</h2>
+<p>
+  It helps to include your macOS version, which mail provider you use, and what
+  you expected to happen. If the app misbehaved, attach a diagnostic log:
+  <strong>Settings ▸ Advanced ▸ Export Diagnostics</strong> writes the app's own
+  recent log entries to a file you can read before deciding whether to send it.
+</p>
+<p>
+  Those logs contain sender addresses and domains, because diagnosing a failed
+  unsubscribe means knowing which sender failed. They never contain message
+  contents or your password.
+</p>
+
+<h2>Feature requests and bug reports</h2>
+<p>
+  Email is fine for anything. If you'd rather file it publicly and you have a
+  GitHub account, the
+  <a href="https://github.com/brooksc/Nevermore/issues">issue tracker</a> is
+  open — but it is never required.
+</p>
+
+<h2>Privacy</h2>
+<p>
+  Nevermore has no servers and collects nothing; the
+  <a href="privacy.html">privacy policy</a> explains exactly what the app
+  touches and what leaves your Mac. Anything you send to the address above is
+  used only to answer you.
+</p>
+
+<footer>
+  <a href="./">Home</a>
+  <a href="faq.html">FAQ</a>
+  <a href="privacy.html">Privacy</a>
+  <a href="https://github.com/brooksc/Nevermore">GitHub</a>
+</footer>
+
+</div>
+</body>
+</html>
