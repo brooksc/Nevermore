@@ -196,12 +196,30 @@ disagree by design. Hit on 1 August 2026 with Xcode-beta 27.0 (`DTXcode 2700`,
 
 Every script here defaults `DEVELOPER_DIR` to `/Applications/Xcode-beta.app`,
 which is right for the DMG and wrong for the store. For a store build, point it
-at the released Xcode explicitly:
+at the released Xcode explicitly and check before archiving:
 
 ```bash
-export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-xcodebuild -version    # confirm it is NOT a beta before archiving
+export DEVELOPER_DIR=/Users/brooksc/Downloads/Xcode.app/Contents/Developer
+xcodebuild -version    # must NOT say beta. 1.0.0 shipped from Xcode 26.6 (17F113)
 ```
+
+**On a macOS beta, the released Xcode won't install from the Mac App Store** —
+it refuses with "This version of Xcode isn't supported in this version of
+macOS", which is how this machine ended up beta-only in the first place. The way
+through:
+
+1. Download the `.xip` from <https://developer.apple.com/download/all/> (the
+   App Store gate does not apply there).
+2. `xip --expand Xcode_26.6_Apple_silicon.xip` — roughly 2.3 GB compressed,
+   several minutes, and it needs ~20 GB free.
+3. **Do not expect the IDE to launch.** On macOS 27 beta it still refuses. That
+   does not matter: `xcodebuild` inside the bundle runs fine, and the store
+   build only needs the command-line tools. Verify with `xcodebuild -version`
+   against that `DEVELOPER_DIR` and carry on.
+
+The app it produces is stamped `DTXcodeBuild 17F113` / `DTSDKName macosx26.5`,
+which ingestion accepts. Check that before uploading — it is the one property
+that distinguishes a bundle Apple will take from one it will not.
 
 Multiple Xcodes coexist happily as long as every build site says which one it
 wants.
