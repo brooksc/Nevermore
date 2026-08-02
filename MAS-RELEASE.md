@@ -230,7 +230,21 @@ Product ▸ Archive ▸ Distribute App ▸ App Store Connect from Xcode works, a
 for a first submission it is the easier path — it validates first, which
 catches entitlement and profile mismatches before the upload.
 
-The scripted equivalent, if you'd rather not drive the GUI:
+**`./make-mas.sh` does all of this**, and refuses to run against a beta Xcode
+rather than building something ingestion will bounce:
+
+```bash
+./make-mas.sh            # build, preflight, package
+./make-mas.sh --upload   # ...and deliver to App Store Connect
+```
+
+It resolves a released Xcode itself (`NEVERMORE_MAS_XCODE` overrides), takes the
+build number from the commit count, and before packaging asserts: no Sparkle
+linked or embedded, `embedded.provisionprofile` present, the sandbox
+entitlement present, and prints the `DTXcodeBuild`/SDK that decide whether
+Apple accepts the bundle at all.
+
+The steps it runs, if you'd rather do them by hand:
 
 ```bash
 # Released Xcode, not the beta — see 8.5. This is the whole reason the first
