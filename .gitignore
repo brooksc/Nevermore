@@ -10,6 +10,14 @@ DerivedData/
 # Package.resolved IS committed: this becomes an app, so pinning the exact
 # dependency graph is what makes a clean checkout build identically.
 
+# Tuist generates the Xcode project for the Mac App Store target from
+# Project.swift; the manifest is the source of truth, the project is a build
+# artifact. Run `tuist generate` after a checkout. See MAS-RELEASE.md.
+Nevermore.xcodeproj/
+Nevermore.xcworkspace/
+.tuist-bin/
+Derived/
+
 # Python bytecode (belt-and-braces; the Python spike has been removed)
 __pycache__/
 *.pyc
