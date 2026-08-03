@@ -336,4 +336,48 @@ public enum DemoData {
             unsubscribe: "<https://halcyontravel.example/u/2f8b>",
             oneClick: true, latestAgeHours: 195, cadenceHours: 30, unreadFraction: 0.89),
     ]
+
+    // MARK: - Unsubscribes the demo has already made
+
+    /// One unsubscribe the demo pretends you made earlier, expressed the same
+    /// way the app records a real one.
+    public struct PriorUnsubscribe: Sendable {
+        /// Matched against the sender address in `senders`.
+        public let senderEmail: String
+        /// How long ago the attempt was recorded. Whether the sender lands in
+        /// **Reappeared** or stays quietly in **Unsubscribed** is decided by
+        /// this against their newest message — the app's own test, not a flag.
+        public let attemptedAgeHours: Double
+        public let outcome: String
+    }
+
+    /// Without these, demo mode can never show Reappeared — the one behaviour
+    /// the app is named for, and the thing that distinguishes it from a service
+    /// that unsubscribes and hopes. Anyone seeing the app for the first time
+    /// through the demo, including an App Review reviewer, would miss it.
+    ///
+    /// Two senders kept mailing after being asked to stop, and two honoured it.
+    /// The contrast is the point: "Reappeared" only means something next to
+    /// senders who behaved.
+    public static let priorUnsubscribes: [PriorUnsubscribe] = [
+        // Newest mail 2.5h old against a 7-day-old request: a deals list that
+        // simply carried on.
+        PriorUnsubscribe(
+            senderEmail: "deals@mail.northboundgear.com", attemptedAgeHours: 168,
+            outcome: "requested"),
+        // Confirmed on a real confirmation page, and still mailing 33h ago.
+        // The unflattering case the app exists to catch: even "confirmed"
+        // proves nothing.
+        PriorUnsubscribe(
+            senderEmail: "team@e.cadencerunning.com", attemptedAgeHours: 120,
+            outcome: "confirmed"),
+        // Asked yesterday, nothing since — these two are what success looks
+        // like, and they stay out of Reappeared.
+        PriorUnsubscribe(
+            senderEmail: "service@ridgewaymotors.com", attemptedAgeHours: 24,
+            outcome: "requested"),
+        PriorUnsubscribe(
+            senderEmail: "hello@lumenphoto.studio", attemptedAgeHours: 24,
+            outcome: "confirmed"),
+    ]
 }

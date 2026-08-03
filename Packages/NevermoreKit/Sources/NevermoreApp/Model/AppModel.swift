@@ -660,6 +660,7 @@ final class AppModel {
                 try store.setSyncToken(newToken)
                 sendAsAddresses = try await backend.sendAsAddresses()
                 await reloadFromStore()
+                seedDemoHistoryIfNeeded()
                 await notifyNewReappearances()
                 syncState = .idle
                 lastSyncedAt = Date()
@@ -800,6 +801,46 @@ final class AppModel {
     private func isReappearedRecord(_ r: MessageStore.UnsubscribeRecord) -> Bool {
         guard let g = groups.first(where: { $0.id.storageKey == r.groupKey }) else { return false }
         return g.messages.contains { $0.receivedAt > r.attemptedAt }
+    }
+
+    /// Give the demo mailbox an unsubscribe history, so Reappeared has
+    /// something in it.
+    ///
+    /// Demo mode otherwise starts with no history, which means the collection
+    /// the app is named for is always empty — the feature is invisible to
+    /// anyone meeting Nevermore through the demo, reviewers included.
+    ///
+    /// These are ordinary records written through the ordinary API, back-dated
+    /// with `attemptedAt`. Nothing marks them as demo, and nothing special-cases
+    /// them downstream: whether a seeded sender reads as reappeared or as
+    /// honoured falls out of `isReappeared` comparing that date against their
+    /// mail, exactly as it does for a real unsubscribe. Runs only in demo mode,
+    /// and only when the history is empty, so a demo the user has since acted
+    /// in is never rewritten.
+    private func seedDemoHistoryIfNeeded() {
+        guard isDemoMode, let store, history.isEmpty, !groups.isEmpty else { return }
+        let now = Date()
+        for prior in DemoData.priorUnsubscribes {
+            guard
+                let group = groups.first(where: {
+                    $0.messages.contains {
+                        $0.sender.address.caseInsensitiveCompare(prior.senderEmail) == .orderedSame
+                    }
+                }),
+                let outcome = MessageStore.Outcome(rawValue: prior.outcome)
+            else { continue }
+            let source = group.messages.first
+            try? store.recordUnsubscribe(
+                group.id,
+                senderName: group.displayName,
+                senderEmail: source?.sender.address ?? group.id.key,
+                senderDomain: source?.sender.host ?? "",
+                url: source?.unsubscribe?.webTargets.first?.absoluteString,
+                outcome: outcome,
+                attemptedAt: now.addingTimeInterval(-prior.attemptedAgeHours * 3600))
+        }
+        history = (try? store.unsubscribeHistory()) ?? history
+        Log.app.detail("seeded \(self.history.count) demo unsubscribe records")
     }
 
     /// Drop a record entirely (e.g. an accidental unsubscribe the user wants to
