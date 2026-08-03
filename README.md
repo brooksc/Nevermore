@@ -22,8 +22,31 @@ flagged and shut down for good.
 
 ![Nevermore's main window: a list of senders grouped by domain, with an inspector showing one sender's unsubscribe method](docs/screenshots/main-window.png)
 
-<sup>All screenshots use Nevermore's built-in demo mailbox — the senders are
-invented, which is why the app is showing its demo banner.</sup>
+<sup>All screenshots and recordings use Nevermore's built-in demo mailbox — the
+senders are invented, which is why the app is showing its demo banner.</sup>
+
+### One keystroke to unsubscribe
+
+Pick a sender, press `u`. Nevermore sends the request the sender published, then
+tells you what it actually did — "requested", not "unsubscribed", because an
+endpoint returning success proves nothing.
+
+![Moving down the sender list and unsubscribing with a single keystroke](docs/media/unsubscribe.gif)
+
+### Keep what you want, clear out the rest
+
+`i` ignores a sender for good; `⌘⌫` moves everything they've sent to your
+provider's Trash, where you can still get it back.
+
+![Ignoring a sender, then trashing another sender's messages](docs/media/triage.gif)
+
+### And it catches the ones that come back
+
+This is the part a web service can't do. Senders who keep mailing after you
+unsubscribed show up here with a count of what's arrived since — including the
+ones that "confirmed" your request.
+
+![The Reappeared collection listing two senders who kept mailing after an unsubscribe](docs/media/reappeared.gif)
 
 ## Why another one of these
 

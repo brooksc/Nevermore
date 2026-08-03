@@ -1,0 +1,27 @@
+1
+00:00:00,800 --> 00:00:05,600
+Every newsletter in your mailbox, grouped by sender
+
+2
+00:00:05,900 --> 00:00:08,400
+Sorted by who mails you most — and what you never open
+
+3
+00:00:08,600 --> 00:00:11,200
+One keystroke unsubscribes. No web forms, no service in the middle
+
+4
+00:00:11,400 --> 00:00:14,500
+It tells you what it sent — and what it cannot promise
+
+5
+00:00:14,800 --> 00:00:19,000
+Keep the ones you actually read. Ignore hides the rest
+
+6
+00:00:19,200 --> 00:00:24,400
+Or clear out everything a sender ever sent you
+
+7
+00:00:24,700 --> 00:00:28,600
+And when a sender ignores your unsubscribe, Nevermore catches them
