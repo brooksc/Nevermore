@@ -8,7 +8,8 @@
 <meta property="og:title" content="Nevermore">
 <meta property="og:description" content="Bulk-unsubscribe from newsletters on your Mac. No server, no account, headers only.">
 <meta property="og:type" content="website">
-<meta property="og:image" content="screenshots/main-window.png">
+<meta property="og:image" content="media/preview-poster.jpg">
+<meta property="og:video" content="media/nevermore-preview-1080.mp4">
 <style>
   :root {
     --ink: #14161a;
@@ -55,6 +56,7 @@
   .note { font-size: .9rem; color: var(--muted); margin-top: 14px; }
   figure { margin: 40px 0; }
   img { max-width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--line); display: block; }
+  video { max-width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--line); display: block; background: #000; }
   figcaption { font-size: .88rem; color: var(--muted); margin-top: 10px; }
   .grid { display: grid; gap: 26px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); margin: 28px 0; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
@@ -76,7 +78,7 @@
 <div class="wrap">
 
 <header>
-  <span class="badge">Pre-release</span>
+  <span class="badge">Version 1.0</span>
   <h1>Unsubscribe from everything.</h1>
   <p class="lede">
     Nevermore finds every newsletter in your mailbox, groups them by sender, and
@@ -84,15 +86,30 @@
     It runs entirely on your Mac.
   </p>
   <div class="cta">
-    <a class="btn btn-primary" href="https://github.com/brooksc/Nevermore">View the source</a>
+    <a class="btn btn-primary" href="https://github.com/brooksc/Nevermore/releases/latest">Download for macOS</a>
+    <a class="btn btn-ghost" href="https://github.com/brooksc/Nevermore">View the source</a>
     <a class="btn btn-ghost" href="faq.html">FAQ</a>
   </div>
-  <p class="note">macOS 14 or later. Not yet on the Mac App Store.</p>
+  <p class="note">
+    Free. macOS 14 or later, Apple Silicon and Intel. Signed and notarized;
+    updates arrive in the app. Coming to the Mac App Store.
+  </p>
 </header>
 
-<figure>
-  <img src="screenshots/main-window.png" alt="Nevermore's main window: senders grouped by domain, with an inspector showing one sender's unsubscribe method.">
-  <figcaption>Screenshots use the built-in demo mailbox — the senders are invented, which is why the app shows its demo banner.</figcaption>
+<figure id="demo">
+  <video controls playsinline preload="none"
+         poster="media/preview-poster.jpg"
+         width="1920" height="1080">
+    <source src="media/nevermore-preview-1080.mp4" type="video/mp4">
+    <track kind="captions" src="media/captions.vtt" srclang="en" label="English" default>
+    <img src="screenshots/main-window.png" alt="Nevermore's main window: senders grouped by domain, with an inspector showing one sender's unsubscribe method.">
+  </video>
+  <figcaption>
+    Thirty seconds, start to finish: find the newsletters, unsubscribe, keep what
+    you want, and catch the senders who carry on regardless. Recordings use the
+    built-in demo mailbox — the senders are invented, which is why the app shows
+    its demo banner.
+  </figcaption>
 </figure>
 
 <h2>Not another inbox service</h2>
@@ -136,6 +153,40 @@
   <li><span><kbd>d</kbd></span><span>Trash their messages</span></li>
   <li><span><kbd>?</kbd></span><span>Everything else</span></li>
 </ul>
+
+<figure>
+  <img src="media/unsubscribe.gif" alt="Moving down the sender list with j, then pressing u to unsubscribe. A confirmation appears, then a result saying the request was sent.">
+  <figcaption>
+    One keystroke sends the request the sender published — then the app tells you
+    what it did, and what it can't promise.
+  </figcaption>
+</figure>
+
+<figure>
+  <img src="media/triage.gif" alt="Ignoring a sender so it disappears from the list, then trashing every message from another sender.">
+  <figcaption>
+    Keep the ones you actually read. Everything else goes, along with the mail
+    it already sent.
+  </figcaption>
+</figure>
+
+<h2>It catches the ones that come back</h2>
+<p>
+  This is the part a web service can't do for you. An unsubscribe request is
+  accepted, not honoured — plenty of senders confirm it and keep mailing. Every
+  sender that mails you again after you unsubscribed shows up in
+  <strong>Reappeared</strong>, with a count of what has arrived since. From
+  there you can finish the job by hand in the built-in browser, or trash and
+  ignore them for good.
+</p>
+
+<figure>
+  <img src="media/reappeared.gif" alt="The Reappeared collection listing two senders with counts of new messages received since the unsubscribe.">
+  <figcaption>
+    Two senders who carried on regardless — one of which had confirmed the
+    unsubscribe. Catching that is what the app is named for.
+  </figcaption>
+</figure>
 
 <h2>Try it before you trust it</h2>
 <p>

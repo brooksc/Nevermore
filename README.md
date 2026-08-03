@@ -25,6 +25,9 @@ flagged and shut down for good.
 <sup>All screenshots and recordings use Nevermore's built-in demo mailbox — the
 senders are invented, which is why the app is showing its demo banner.</sup>
 
+**[Watch the 30-second walkthrough](https://brooksc.github.io/Nevermore/#demo)**
+— sync, unsubscribe, keep what you want, and catch the senders who carry on.
+
 ### One keystroke to unsubscribe
 
 Pick a sender, press `u`. Nevermore sends the request the sender published, then
