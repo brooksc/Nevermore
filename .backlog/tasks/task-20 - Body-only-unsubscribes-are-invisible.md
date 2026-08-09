@@ -4,10 +4,12 @@ title: Body-only unsubscribes are invisible
 status: On Hold
 assignee: []
 created_date: '2026-08-09 18:53'
+updated_date: '2026-08-09 19:00'
 labels:
   - product
 dependencies: []
 priority: low
+ordinal: 2000
 ---
 
 ## Description

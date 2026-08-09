@@ -4,10 +4,12 @@ title: Ship 1.0.1 so demo mode can show Reappeared
 status: On Hold
 assignee: []
 created_date: '2026-08-09 18:50'
+updated_date: '2026-08-09 19:00'
 labels:
   - release
 dependencies: []
 priority: high
+ordinal: 1000
 ---
 
 ## Description

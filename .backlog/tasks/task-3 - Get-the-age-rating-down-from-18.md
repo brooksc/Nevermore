@@ -1,13 +1,15 @@
 ---
 id: TASK-3
 title: Get the age rating down from 18+
-status: To Do
+status: On Hold
 assignee: []
 created_date: '2026-08-09 18:50'
+updated_date: '2026-08-09 19:00'
 labels:
   - store
 dependencies: []
 priority: high
+ordinal: 5000
 ---
 
 ## Description
