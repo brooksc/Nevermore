@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-08-09 18:45'
+updated_date: '2026-08-10 01:53'
 labels:
   - ui
   - consistency
@@ -42,4 +43,13 @@ Worth deciding while implementing: whether selection carries *across* collection
 - [ ] #4 Existing per-row actions still work and still act on their own row, not on the selection
 - [ ] #5 Toolbar and menu actions that operate on the selection either work in these collections or are disabled with a reason, rather than silently acting on a stale sender
 - [ ] #6 A decision is recorded on whether selection persists across collection switches, and the chosen behaviour is covered by a test
+- [ ] #7 Reappeared offers a way to open the latest message before deciding, using viewLatestMessage() so Gmail opens the conversation and other providers fall back to search
+- [ ] #8 The v shortcut and Actions > View Latest Message work in every collection that has a selection, not just All Senders
+- [ ] #9 Demo mode keeps its explanatory toast rather than opening a browser
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Merged TASK-22 into this on 2026-08-09. TASK-22 reported the symptom from the Reappeared side: deciding whether to escalate or trash is the hardest call in the app, and it is the one view with nothing to decide with. The cause is the same missing selection model — viewLatestMessage() reads selection.first (AppModel.swift:440), so both the v shortcut and the Actions menu item silently no-op there. Fixing selection fixes the shortcut; the View affordance on the row is the remaining piece.
+<!-- SECTION:NOTES:END -->

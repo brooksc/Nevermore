@@ -7,7 +7,7 @@ created_date: '2026-08-10 01:49'
 labels:
   - product
 dependencies:
-  - TASK-28
+  - TASK-36
 priority: medium
 ---
 

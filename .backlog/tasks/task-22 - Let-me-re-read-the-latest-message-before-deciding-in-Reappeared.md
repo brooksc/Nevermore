@@ -1,9 +1,10 @@
 ---
 id: TASK-22
 title: Let me re-read the latest message before deciding in Reappeared
-status: To Do
+status: Wont Do
 assignee: []
 created_date: '2026-08-09 19:11'
+updated_date: '2026-08-10 01:55'
 labels:
   - product
 dependencies: []
