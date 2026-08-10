@@ -646,6 +646,63 @@ Harness.suite("Demo mailbox") {
     }
 }
 
+Harness.suite("Demo unsubscribe history") {
+    // The demo seeds unsubscribe records so Reappeared is not empty. Whether a
+    // seeded sender reads as reappeared or as honoured is not a flag: it falls
+    // out of comparing the record's date against that sender's newest message,
+    // exactly as it does for a real unsubscribe. These tests use that same
+    // comparison, so they fail if the seed dates drift past the mail.
+    let now = Date()
+    let groups = Grouping().group(DemoData.messages(now: now))
+    let planned = DemoData.plannedUnsubscribes(for: groups, now: now)
+
+    func newest(_ id: GroupID) -> Date {
+        groups.first { $0.id == id }?.messages.map(\.receivedAt).max() ?? .distantPast
+    }
+
+    Harness.test("every prior unsubscribe matches a sender in the demo mailbox") {
+        expect(
+            planned.count == DemoData.priorUnsubscribes.count,
+            "matched \(planned.count) of \(DemoData.priorUnsubscribes.count)")
+    }
+
+    Harness.test("two senders kept mailing after the request") {
+        let reappeared = planned.filter { newest($0.groupID) > $0.attemptedAt }
+        expect(reappeared.count == 2, "expected 2 reappeared, got \(reappeared.count)")
+    }
+
+    Harness.test("two senders honoured it, so the contrast lands") {
+        let honoured = planned.filter { newest($0.groupID) <= $0.attemptedAt }
+        expect(honoured.count == 2, "expected 2 honoured, got \(honoured.count)")
+    }
+
+    Harness.test("one reappearance is a confirmed unsubscribe") {
+        // The unflattering case the app exists to catch: a sender that showed a
+        // confirmation page and carried on regardless.
+        let confirmedAndBack = planned.contains {
+            $0.outcome == "confirmed" && newest($0.groupID) > $0.attemptedAt
+        }
+        expect(confirmedAndBack, "a confirmed unsubscribe is among the reappeared")
+    }
+
+    Harness.test("records carry the sender details a real one would") {
+        expect(planned.allSatisfy { !$0.senderName.isEmpty }, "every record names its sender")
+        expect(planned.allSatisfy { $0.senderEmail.contains("@") }, "every record has an address")
+        expect(planned.allSatisfy { !$0.senderDomain.isEmpty }, "every record has a domain")
+    }
+
+    Harness.test("outcomes are values the store accepts") {
+        // A typo here would be silently dropped by the app, leaving Reappeared
+        // empty for the reason this whole feature exists to avoid.
+        let valid = Set(["requested", "confirmed", "failed"])
+        expect(planned.allSatisfy { valid.contains($0.outcome) }, "outcomes are known values")
+    }
+
+    Harness.test("attempt dates are in the past") {
+        expect(planned.allSatisfy { $0.attemptedAt < now }, "nothing attempted in the future")
+    }
+}
+
 Harness.suite("Debug reset") {
     Harness.test("resetAllLocalData clears databases, registry, and providers") {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())

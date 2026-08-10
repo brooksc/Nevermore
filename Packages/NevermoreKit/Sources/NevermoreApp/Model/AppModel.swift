@@ -819,25 +819,18 @@ final class AppModel {
     /// in is never rewritten.
     private func seedDemoHistoryIfNeeded() {
         guard isDemoMode, let store, history.isEmpty, !groups.isEmpty else { return }
-        let now = Date()
-        for prior in DemoData.priorUnsubscribes {
-            guard
-                let group = groups.first(where: {
-                    $0.messages.contains {
-                        $0.sender.address.caseInsensitiveCompare(prior.senderEmail) == .orderedSame
-                    }
-                }),
-                let outcome = MessageStore.Outcome(rawValue: prior.outcome)
-            else { continue }
-            let source = group.messages.first
+        // Which records to write is decided in NevermoreKit, where it can be
+        // tested; this only applies them.
+        for planned in DemoData.plannedUnsubscribes(for: groups) {
+            guard let outcome = MessageStore.Outcome(rawValue: planned.outcome) else { continue }
             try? store.recordUnsubscribe(
-                group.id,
-                senderName: group.displayName,
-                senderEmail: source?.sender.address ?? group.id.key,
-                senderDomain: source?.sender.host ?? "",
-                url: source?.unsubscribe?.webTargets.first?.absoluteString,
+                planned.groupID,
+                senderName: planned.senderName,
+                senderEmail: planned.senderEmail,
+                senderDomain: planned.senderDomain,
+                url: planned.url,
                 outcome: outcome,
-                attemptedAt: now.addingTimeInterval(-prior.attemptedAgeHours * 3600))
+                attemptedAt: planned.attemptedAt)
         }
         history = (try? store.unsubscribeHistory()) ?? history
         Log.app.detail("seeded \(self.history.count) demo unsubscribe records")

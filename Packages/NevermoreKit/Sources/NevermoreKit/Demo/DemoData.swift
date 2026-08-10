@@ -351,6 +351,48 @@ public enum DemoData {
         public let outcome: String
     }
 
+    /// One record the demo should write, already matched to a real group.
+    public struct PlannedUnsubscribe: Sendable {
+        public let groupID: GroupID
+        public let senderName: String
+        public let senderEmail: String
+        public let senderDomain: String
+        public let url: String?
+        public let outcome: String
+        public let attemptedAt: Date
+    }
+
+    /// Match `priorUnsubscribes` against real groups and say what to write.
+    ///
+    /// Deliberately pure, and deliberately here rather than in the app: the app
+    /// target is an executable, so anything living there cannot be imported by
+    /// the tests. The rule that decides whether the demo shows a reappearance
+    /// is worth testing — a regression is silent, since the collection simply
+    /// goes back to being empty, which is the bug this fixed in the first
+    /// place.
+    public static func plannedUnsubscribes(
+        for groups: [SenderGroup], now: Date = Date()
+    ) -> [PlannedUnsubscribe] {
+        priorUnsubscribes.compactMap { prior in
+            guard
+                let group = groups.first(where: {
+                    $0.messages.contains {
+                        $0.sender.address.caseInsensitiveCompare(prior.senderEmail) == .orderedSame
+                    }
+                })
+            else { return nil }
+            let source = group.messages.first
+            return PlannedUnsubscribe(
+                groupID: group.id,
+                senderName: group.displayName,
+                senderEmail: source?.sender.address ?? group.id.key,
+                senderDomain: source?.sender.host ?? "",
+                url: source?.unsubscribe?.webTargets.first?.absoluteString,
+                outcome: prior.outcome,
+                attemptedAt: now.addingTimeInterval(-prior.attemptedAgeHours * 3600))
+        }
+    }
+
     /// Without these, demo mode can never show Reappeared — the one behaviour
     /// the app is named for, and the thing that distinguishes it from a service
     /// that unsubscribes and hopes. Anyone seeing the app for the first time
