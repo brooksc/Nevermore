@@ -31,6 +31,18 @@ if [ -n "$TAG" ] && [ "$TAG" != "v$VERSION" ]; then
   exit 1
 fi
 
+# ...and one whose version has nothing to say for itself. The tag guard above
+# catches a version that disagrees with the tag; nothing caught a release with
+# no changelog entry, and CHANGELOG.md is the source for both the GitHub release
+# notes and the App Store "What's New". Shipping without one means writing the
+# notes from memory afterwards, which is when they get thin.
+CHANGELOG="$(dirname "$0")/../../CHANGELOG.md"
+if [ -f "$CHANGELOG" ] && ! grep -qE "^## \[$VERSION\]" "$CHANGELOG"; then
+  echo "CHANGELOG.md has no '## [$VERSION]' entry." >&2
+  echo "Add one before packaging — it is where the release notes come from." >&2
+  exit 1
+fi
+
 APP=$(./make-app.sh release | tail -1)
 echo "built: $APP" >&2
 
