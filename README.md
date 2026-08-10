@@ -18,7 +18,7 @@ flagged and shut down for good.
 
 > **Status:** 1.0.0 released for direct download; Mac App Store submission in review.
 > Built and used daily against a real ~132,000-message mailbox.
-> _Docs last reviewed: 26 July 2026._
+> _Docs last reviewed: 9 August 2026._
 
 ![Nevermore's main window: a list of senders grouped by domain, with an inspector showing one sender's unsubscribe method](docs/screenshots/main-window.png)
 
@@ -137,7 +137,7 @@ drag Nevermore to Applications. Signed and notarized by Apple.
 ```bash
 cd Packages/NevermoreKit
 swift build                       # build everything
-swift run nevermore-tests         # run the test suite (95 tests)
+swift run nevermore-tests         # run the test suite (117 tests)
 ./make-app.sh release             # produce a signed Nevermore.app
 ./make-dmg.sh --notarize          # produce a notarized, stapled DMG
 ```
@@ -155,7 +155,10 @@ NEVERMORE_SANDBOX=1 ./make-app.sh release
 ```
 
 Note the sandbox relocates Application Support into the app container, so a
-sandboxed build starts with no accounts. See [MAS-RELEASE.md](MAS-RELEASE.md).
+sandboxed build starts with no accounts. It also still embeds Sparkle — the
+SwiftPM target links it unconditionally, so the framework has to be there for
+the app to launch at all. Only the Tuist store target genuinely omits the
+updater. See [MAS-RELEASE.md](MAS-RELEASE.md).
 
 ## Setup
 

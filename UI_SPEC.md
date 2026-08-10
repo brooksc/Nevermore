@@ -276,8 +276,7 @@ Standard `Undo ⌘Z` / `Redo ⇧⌘Z` / Cut / Copy / Paste · `Select All ⌘A` 
 `View in Gmail ⌘G`
 
 **View**
-`All Senders ⌘1` · `Unsubscribable ⌘2` · `Manual Only ⌘3` · `Reappeared ⌘4` ·
-`Unsubscribed ⌘5` · `Ignored ⌘6` ·
+`All Senders ⌘1` · `Reappeared ⌘2` · `Unsubscribed ⌘3` · `Ignored ⌘4` ·
 `Sort By ▸` (Messages / Sender / Unread / Last Received) ·
 `Show Only Unread` · `Toggle Sidebar ⌥⌘S` · `Toggle Inspector ⌥⌘I` ·
 Enter Full Screen
@@ -289,10 +288,15 @@ Enter Full Screen
 ### Shortcut summary
 
 `⌘R` sync · `⌘U` unsubscribe · `⇧⌘U` unsubscribe + delete · `⌘I` ignore ·
-`⌘⌫` trash · `⌘G` view in Gmail · `⌘F` search · `⌘1`–`⌘6` collections ·
+`⌘⌫` trash · `⌘G` view in Gmail · `⌘F` search · `⌘1`–`⌘4` collections ·
 `⌘Z` undo · `⌥⌘S` sidebar · `⌥⌘I` inspector · `⌘,` settings
 
 Never override standard shortcuts. `⌘⌫` for trash matches Finder.
+
+The collection numbers are positional — `Commands.swift` derives them from the
+order of `Collection.allCases`, so inserting a collection silently renumbers the
+ones after it. Unsubscribable and Manual Only were specified here and never
+built; filtering by method belongs to search, not to a collection.
 
 ---
 

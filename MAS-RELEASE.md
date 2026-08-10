@@ -1,14 +1,13 @@
 # Mac App Store release
 
-_Last updated: 26 July 2026. Status: not yet submitted. Steps 1–4 are done in
-the codebase; steps 5 onward need your Apple account and can't be scripted
-here._
+_Last updated: 9 August 2026. Status: 1.0.0 (build 49) is with App Review,
+built and uploaded by the Release MAS workflow._
 
 Nevermore is built with SwiftPM (`Packages/NevermoreKit`). `make-app.sh` wraps
 the executable into a signed `.app`, which is enough for Developer ID
 distribution but **not** enough for the App Store: a SwiftPM executable can't
 carry a provisioning profile through validation. The store path needs a thin
-Xcode app target. That's the one real piece of work left, and it's step 5.
+Xcode app target, which `Project.swift` now generates via Tuist — see step 5.
 
 > **No Sparkle in this target.** Apple rejects apps that update themselves. The
 > project *does* ship Sparkle in the DMG build, so the store target must leave
@@ -46,6 +45,12 @@ Verify the sandbox locally before doing anything else:
 cd Packages/NevermoreKit
 NEVERMORE_SANDBOX=1 ./make-app.sh release
 ```
+
+Note this build still embeds Sparkle: the SwiftPM `NevermoreApp` target depends
+on it unconditionally, so the binary links `@rpath/Sparkle.framework` and will
+not launch without it. The feed keys are omitted, so the updater is inert — but
+if you want an artifact that genuinely contains no updater, that is the Tuist
+store build (`./make-mas.sh`), which never declares the package.
 
 Launch it, add an account, sync. **It will start with no accounts** — the
 sandbox relocates Application Support to
@@ -128,7 +133,7 @@ installed**, presumably from an earlier project:
 | Developer ID Application | ✅ present (used by `make-app.sh` / `make-dmg.sh`) |
 | Apple Distribution | ✅ present |
 | 3rd Party Mac Developer Installer | ✅ present |
-| Mac App Store provisioning profile for `com.brooksc.nevermore` | ❌ **missing** (the only profile on this machine is JobHunt's, a different bundle id) |
+| Mac App Store provisioning profile for `com.brooksc.nevermore` | ✅ present — "Nevermore Mac App Store", expires 2027-06-21 |
 | notarytool keychain credential | ✅ present as `nevermore-notary` (used for the 0.1.1 release) |
 
 Certificates are per-team, so the ones above carry over. A provisioning profile

@@ -1,9 +1,10 @@
 ---
 id: TASK-13
 title: Fix docs that no longer describe the app
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-09 18:52'
+updated_date: '2026-08-10 02:07'
 labels:
   - docs
 dependencies: []
@@ -27,3 +28,11 @@ Several documents drifted while shipping 1.0.0:
 - [ ] #2 RELEASE.md checkboxes reflect reality
 - [ ] #3 Test count and review dates corrected
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fixed more than the task listed. UI_SPEC's View menu and shortcut summary now match the four collections that exist (Command-1 to Command-4), with a note that the numbers are positional so inserting a collection renumbers the rest, and that Unsubscribable and Manual Only were specified but never built. RELEASE.md: four done items checked off, the status paragraph rewritten (it still described the appcast and submission as future work), and the 'single source of truth' section rewritten from a proposal into a description of what exists. PLAN.md 97 tests to 117; README 95 to 117. MAS-RELEASE.md status, and the provisioning profile row that still said missing.
+
+Also recorded the finding from TASK-16 where it matters: a NEVERMORE_SANDBOX=1 build still embeds Sparkle, because the SwiftPM target links it unconditionally. Only the Tuist store build genuinely has no updater.
+<!-- SECTION:NOTES:END -->
