@@ -50,3 +50,6 @@ AuthKey_*.p8
 # Local-only working notes and credentials. This repository is public; nothing
 # under here is ever committed.
 .local/
+
+# git worktrees for parallel task branches
+.worktrees/
