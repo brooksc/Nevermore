@@ -2746,21 +2746,70 @@ Harness.suite("MCP server dispatch") {
 }
 
 Harness.suite("MCP tool catalog") {
-    Harness.test("the nine read tools are present, and nothing that writes") {
-        eq(MCPToolCatalog.tools.count, 9)
+    Harness.test("the surface is nine read tools and eleven narrow writes, and nothing else") {
         let names = Set(MCPToolCatalog.tools.map(\.name))
+        eq(MCPToolCatalog.tools.count, 20, "and no tool is defined twice")
         eq(
             names,
             [
+                // Reads (TASK-44).
                 "list_senders", "get_sender", "list_messages", "search_senders",
                 "unsubscribe_history", "list_reappeared", "mailbox_summary", "sync_status",
                 "list_by_context",
+                // Writes (TASK-46).
+                "propose_selection", "get_proposal_status", "unsubscribe", "ignore", "unignore",
+                "set_classification", "trash_sender_messages", "start_sync", "set_grouping",
+                "forget_unsubscribe_record", "get_policy",
             ])
-        // TASK-41: the agent proposes, the human actuates. A verb here would be a
-        // reversal of that, not a feature.
-        for forbidden in ["unsubscribe_sender", "ignore", "trash", "delete", "propose", "act"] {
-            expect(!names.contains(forbidden), "no write verb named \(forbidden)")
+        // TASK-39/TASK-41: the agent proposes, the human actuates. `unsubscribe`
+        // is one sender through the app's own confirmation; a verb that took a
+        // set would be the reversal of the product decision, not a convenience.
+        for forbidden in [
+            "unsubscribe_all", "unsubscribe_senders", "unsubscribe_selection", "batch_unsubscribe",
+            "unsubscribe_batch", "act_on_proposal", "accept_proposal", "confirm_selection",
+        ] {
+            expect(!names.contains(forbidden), "no bulk-unsubscribe verb named \(forbidden)")
         }
+    }
+
+    Harness.test("no tool takes a review token, because an agent can never hold one") {
+        // The gate is that the batch path needs a human confirmation the MCP
+        // surface has no way to produce. A token argument here — however
+        // carefully validated — would be the surface offering to carry one.
+        for tool in MCPToolCatalog.tools {
+            let data = tool.schemaJSON.data(using: .utf8) ?? Data()
+            let schema = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            let arguments = (schema["properties"] as? [String: Any])?.keys.map { $0.lowercased() }
+                ?? []
+            for argument in arguments {
+                // A token to present, a confirmation to assert, a policy to
+                // override: three spellings of the same missing argument.
+                for forbidden in ["token", "confirm", "force", "override", "skip", "unattended"] {
+                    expect(
+                        !argument.contains(forbidden),
+                        "\(tool.name) takes an argument named '\(argument)'")
+                }
+            }
+        }
+    }
+
+    Harness.test("the policy tells an agent there is no batch unsubscribe") {
+        let policy = MCPWriteRoutes.policy
+        expect(!policy.batchUnsubscribeAvailable, "and it is not a capability")
+        expect(policy.noBatchUnsubscribe.contains("no bulk unsubscribe"))
+        eq(policy.proposalCap, SenderProposal.maxItems)
+        // The two verbs that reach the mailbox or a third party are never
+        // unattended, whatever else moves between the lists.
+        for confirmed in ["unsubscribe", "trash_sender_messages"] {
+            expect(policy.requiresHumanConfirmation.contains(confirmed), confirmed)
+            expect(!policy.unattended.contains(confirmed), "\(confirmed) is not unattended")
+        }
+        // And every tool the catalog offers is accounted for in one list or the
+        // other, so a new tool cannot arrive with an unstated policy.
+        let described = Set(policy.unattended + policy.requiresHumanConfirmation)
+        let writes = Set(
+            MCPToolCatalog.tools.filter { MCPWriteRoutes.paths.contains($0.path) }.map(\.name))
+        eq(writes.subtracting(described), [], "writes with no stated policy")
     }
 
     Harness.test("every description states that message bodies are unavailable") {
@@ -2794,13 +2843,17 @@ Harness.suite("MCP tool catalog") {
     }
 
     Harness.test("every tool points at a route the server actually serves") {
+        let served = MCPRoutes.paths.union(MCPWriteRoutes.paths)
         for tool in MCPToolCatalog.tools {
-            expect(MCPRoutes.paths.contains(tool.path), "\(tool.name) -> \(tool.path)")
+            expect(served.contains(tool.path), "\(tool.name) -> \(tool.path)")
         }
         // And nothing is served that no tool can reach — an unreachable route is
         // either a missing tool or dead code, and both want finding.
         let reached = Set(MCPToolCatalog.tools.map(\.path))
-        eq(reached, MCPRoutes.paths)
+        eq(reached, served)
+        // The read and write surfaces don't overlap: a path is one or the other,
+        // so "does this tool write" is answerable from the route alone.
+        eq(MCPRoutes.paths.intersection(MCPWriteRoutes.paths), [])
     }
 
     Harness.test("the paging contract in the schema matches the one the server enforces") {
@@ -3194,6 +3247,614 @@ Harness.suite("Proposals survive a relaunch") {
         eq(try! store.count(), 1, "their messages are untouched")
         eq(try! store.ignoredGroupKeys(), [id.storageKey], "the ignore list is untouched")
         eq(try! store.unsubscribeHistory().count, 1, "the unsubscribe log is untouched")
+    }
+}
+
+// MARK: - TASK-46: the agent acts only on a selection the human confirmed
+
+/// `Harness.test` for a body that has to await something.
+///
+/// The action layer, the token vault and the outcome ledger are all actors —
+/// they are reached from the server's actor and from the main actor — so nearly
+/// every test below is async. This keeps `runAsync` out of thirty test bodies.
+func asyncTest(_ name: String, _ body: @escaping @Sendable () async -> Void) {
+    Harness.test(name) { runAsync { await body() } }
+}
+
+Harness.suite("Review tokens") {
+    let acme = "domain:acme.com"
+    let shop = "domain:shop.com"
+    let news = "domain:news.com"
+
+    asyncTest("a confirmed selection can be acted on, once") {
+        let vault = ReviewTokenVault()
+        let token = await vault.mint(confirming: [acme, shop])
+        do {
+            try await vault.redeem(token, for: [acme, shop])
+        } catch { expect(false, "the confirmed set was refused: \(error)") }
+    }
+
+    asyncTest("a token cannot be replayed") {
+        // The captured-token case: whatever else went wrong, spending it twice
+        // must not work, because the human said yes once.
+        let vault = ReviewTokenVault()
+        let token = await vault.mint(confirming: [acme])
+        try? await vault.redeem(token, for: [acme])
+        do {
+            try await vault.redeem(token, for: [acme])
+            expect(false, "a spent token was accepted a second time")
+        } catch { eq(error as? ReviewTokenError, .notOutstanding) }
+    }
+
+    asyncTest("a token is worthless against a set the user never saw") {
+        let vault = ReviewTokenVault()
+        let token = await vault.mint(confirming: [acme, shop])
+        // One extra sender smuggled into the batch.
+        do {
+            try await vault.redeem(token, for: [acme, shop, news])
+            expect(false, "a token was accepted for a larger set")
+        } catch { eq(error as? ReviewTokenError, .setMismatch) }
+        // A subset is refused too: the token records what was confirmed, not a
+        // budget to spend part of.
+        do {
+            try await vault.redeem(token, for: [acme])
+            expect(false, "a token was accepted for a subset")
+        } catch { eq(error as? ReviewTokenError, .setMismatch) }
+        // A different set of the same size — the substitution a replay would
+        // actually try.
+        do {
+            try await vault.redeem(token, for: [acme, news])
+            expect(false, "a token was accepted for a substituted set")
+        } catch { eq(error as? ReviewTokenError, .setMismatch) }
+        // And none of that burned the confirmation the user really gave.
+        do {
+            try await vault.redeem(token, for: [shop, acme])
+        } catch { expect(false, "a failed attempt spent the real confirmation: \(error)") }
+    }
+
+    asyncTest("an expired token is refused, and stays refused") {
+        let vault = ReviewTokenVault()
+        let issued = Date(timeIntervalSince1970: 1_700_000_000)
+        let token = await vault.mint(confirming: [acme], now: issued)
+        let justInside = issued.addingTimeInterval(ReviewTokenVault.lifetime - 1)
+        let justOutside = issued.addingTimeInterval(ReviewTokenVault.lifetime)
+        expect(!token.isExpired(at: justInside), "still good a second before")
+        expect(token.isExpired(at: justOutside), "dead on the boundary")
+        do {
+            try await vault.redeem(token, for: [acme], now: justOutside)
+            expect(false, "an expired token was accepted")
+        } catch { eq(error as? ReviewTokenError, .expired) }
+        // Not merely refused this once — gone, so a clock that moves back
+        // doesn't resurrect it.
+        do {
+            try await vault.redeem(token, for: [acme], now: justInside)
+            expect(false, "an expired token came back to life")
+        } catch { eq(error as? ReviewTokenError, .notOutstanding) }
+    }
+
+    asyncTest("a token nobody minted is refused") {
+        // Belt and braces on the type's non-public initializer: a second vault
+        // is as close as anything can get to fabricating one.
+        let real = ReviewTokenVault()
+        let other = ReviewTokenVault()
+        let token = await other.mint(confirming: [acme])
+        do {
+            try await real.redeem(token, for: [acme])
+            expect(false, "a foreign token was accepted")
+        } catch { eq(error as? ReviewTokenError, .notOutstanding) }
+    }
+
+    asyncTest("the fingerprint is about the senders, not the order or the duplicates") {
+        eq(
+            ReviewToken.fingerprint(of: [acme, shop]),
+            ReviewToken.fingerprint(of: [shop, acme, acme]))
+        expect(
+            ReviewToken.fingerprint(of: [acme]) != ReviewToken.fingerprint(of: [shop]),
+            "different senders, different fingerprint")
+        // Not a join that could be gamed by a key containing the separator.
+        expect(
+            ReviewToken.fingerprint(of: ["a\nb"]) != ReviewToken.fingerprint(of: ["a", "b"]),
+            "the separator isn't forgeable through a key")
+    }
+
+    asyncTest("expired tokens don't accumulate") {
+        let vault = ReviewTokenVault()
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        for _ in 0 ..< 5 {
+            _ = await vault.mint(confirming: [acme], now: start)
+        }
+        eq(await vault.outstandingCount, 5)
+        // One later mint, after they have all aged out.
+        _ = await vault.mint(
+            confirming: [shop], now: start.addingTimeInterval(ReviewTokenVault.lifetime))
+        eq(await vault.outstandingCount, 1, "the dead ones were swept, not kept")
+        // A token that is merely old is untouched.
+        _ = await vault.mint(
+            confirming: [news], now: start.addingTimeInterval(ReviewTokenVault.lifetime + 1))
+        eq(await vault.outstandingCount, 2, "the live one survived the next mint")
+    }
+}
+
+/// A stub action layer, so the write routes can be driven without a running app.
+///
+/// TASK-41 refuses the MCP surface in demo mode, so there is no mailbox a test
+/// may drive these through — the harness is the only place they can be proven,
+/// by design rather than by omission. It records what it was asked to do, which
+/// is what most of these tests are actually asserting: that the route passed the
+/// right thing along, or refused before it got here.
+actor StubActions: MCPActions {
+    struct Call: Equatable {
+        let verb: String
+        let detail: String
+    }
+
+    private(set) var calls: [Call] = []
+    var proposalOutcome: AgentActionOutcome?
+
+    private func note(_ verb: String, _ detail: String = "") {
+        calls.append(Call(verb: verb, detail: detail))
+    }
+
+    func verbs() -> [String] { calls.map(\.verb) }
+    func details(of verb: String) -> [String] {
+        calls.filter { $0.verb == verb }.map(\.detail)
+    }
+
+    func propose(summary: String?, requests: [AgentProposalRequest]) async -> AgentActionOutcome {
+        note("propose", requests.map(\.senderId).joined(separator: ","))
+        let items = requests.map {
+            SenderProposal.Item(
+                groupKey: $0.senderId, senderName: $0.senderId, senderEmail: "x@\($0.senderId)",
+                reason: $0.reason)
+        }
+        return .proposal(
+            AgentProposalBuilder.build(
+                summary: summary, resolved: items, candidatesReceived: requests.count
+            ).result)
+    }
+
+    func proposalStatus() async -> AgentActionOutcome {
+        note("status")
+        return .status(
+            AgentProposalStatus(
+                state: AgentProposalStatus.awaitingReview, proposalId: "p", createdAt: nil,
+                summary: nil, proposedCount: 1, remainingCount: 1, removedByHuman: [],
+                outcomes: [], note: "note"))
+    }
+
+    func requestUnsubscribe(senderId: String) async -> AgentActionOutcome {
+        note("unsubscribe", senderId)
+        return .result(
+            AgentActionResult(
+                status: AgentActionResult.awaitingConfirmation, senderId: senderId,
+                detail: "asking the user"))
+    }
+
+    func requestTrash(senderId: String) async -> AgentActionOutcome {
+        note("trash", senderId)
+        return .result(
+            AgentActionResult(
+                status: AgentActionResult.awaitingConfirmation, senderId: senderId,
+                detail: "asking the user"))
+    }
+
+    func setIgnored(_ ignored: Bool, senderIds: [String]) async -> AgentActionOutcome {
+        note(ignored ? "ignore" : "unignore", senderIds.joined(separator: ","))
+        return .result(
+            AgentActionResult(
+                status: AgentActionResult.done, detail: "done",
+                results: senderIds.map {
+                    AgentSenderResult(senderId: $0, senderName: $0, applied: true, detail: "ok")
+                }))
+    }
+
+    func setClassification(
+        senderId: String, classification: String, reason: String, context: String?
+    ) async -> AgentActionOutcome {
+        note("classify", "\(senderId)|\(classification)|\(reason)|\(context ?? "-")")
+        return .result(
+            AgentActionResult(status: AgentActionResult.done, senderId: senderId, detail: "done"))
+    }
+
+    func startSync() async -> AgentActionOutcome {
+        note("sync")
+        return .result(AgentActionResult(status: AgentActionResult.done, detail: "started"))
+    }
+
+    func setGrouping(senderId: String, mode: AgentGroupingMode) async -> AgentActionOutcome {
+        note("grouping", "\(senderId)|\(mode.rawValue)")
+        return .result(
+            AgentActionResult(status: AgentActionResult.done, senderId: senderId, detail: "done"))
+    }
+
+    func forgetUnsubscribeRecord(senderId: String) async -> AgentActionOutcome {
+        note("forget", senderId)
+        return .result(
+            AgentActionResult(status: AgentActionResult.done, senderId: senderId, detail: "done"))
+    }
+}
+
+func mcpWrite(_ path: String, _ arguments: [String: Any] = [:], actions: (any MCPActions)?)
+    async -> HTTPResponse
+{
+    let body = try? JSONSerialization.data(withJSONObject: arguments)
+    let request = HTTPRequest(
+        method: "POST", path: path, headers: ["content-type": "application/json"], body: body)
+    return await MCPWriteRoutes.handle(path: path, request: request, actions: actions)
+        ?? .error("no such route", code: 404)
+}
+
+Harness.suite("MCP write routes") {
+    asyncTest("a proposal over the cap is truncated and the agent is told") {
+        // AC #3. The half that matters is the reporting: the human sees 25 of
+        // the 40, and an agent that wasn't told would go on to report on 15
+        // senders nobody ever looked at.
+        let actions = StubActions()
+        let senders = (0 ..< 40).map { ["sender_id": "domain:s\($0)", "reason": "r\($0)"] }
+        let response = await mcpWrite(
+            "/mcp/proposal/create", ["summary": "the 2026 job search", "senders": senders],
+            actions: actions)
+        eq(response.statusCode, 200)
+        let json = mcpJSON(response)
+        eq(json["proposed"] as? Int, SenderProposal.maxItems)
+        eq(json["candidates_received"] as? Int, 40)
+        eq(json["dropped"] as? Int, 40 - SenderProposal.maxItems)
+        eq(json["truncated"] as? Bool, true)
+        eq(json["cap"] as? Int, SenderProposal.maxItems)
+        let note = json["note"] as? String ?? ""
+        expect(note.contains("\(40 - SenderProposal.maxItems) were dropped"), "note: \(note)")
+        expect(note.contains("Do not report them as proposed"), "and says what not to do")
+    }
+
+    asyncTest("a proposal under the cap says so too, rather than saying nothing") {
+        let response = await mcpWrite(
+            "/mcp/proposal/create",
+            ["senders": [["sender_id": "domain:a", "reason": "unread since March"]]],
+            actions: StubActions())
+        let json = mcpJSON(response)
+        eq(json["truncated"] as? Bool, false)
+        eq(json["dropped"] as? Int, 0)
+        eq(json["proposed"] as? Int, 1)
+        expect(
+            (json["note"] as? String ?? "").contains("Nothing has happened to these senders"),
+            "and is clear that proposing is not acting")
+    }
+
+    asyncTest("a sender with no reason is refused rather than shown blank") {
+        // The reason is the only thing that makes the agent's judgement
+        // checkable; a row without one can only be rubber-stamped.
+        let actions = StubActions()
+        let response = await mcpWrite(
+            "/mcp/proposal/create",
+            ["senders": [["sender_id": "domain:a", "reason": "ok"], ["sender_id": "domain:b"]]],
+            actions: actions)
+        eq(response.statusCode, 400)
+        eq(await actions.verbs(), [], "and nothing was proposed")
+        let message = String(decoding: response.body, as: UTF8.self)
+        expect(message.contains("rubber-stamp"), "and says why: \(message)")
+    }
+
+    asyncTest("an empty proposal is refused") {
+        eq(await mcpWrite("/mcp/proposal/create", [:], actions: StubActions()).statusCode, 400)
+        eq(
+            await mcpWrite("/mcp/proposal/create", ["senders": []], actions: StubActions())
+                .statusCode, 400)
+    }
+
+    asyncTest("unsubscribe takes one sender, and says why when asked for more") {
+        // AC #1 at the surface: the batch path an agent would reach for isn't
+        // refused for lack of a token — it does not exist, and the refusal says
+        // what to do instead.
+        let actions = StubActions()
+        let response = await mcpWrite(
+            "/mcp/senders/unsubscribe", ["sender_ids": ["domain:a", "domain:b"]], actions: actions)
+        eq(response.statusCode, 400)
+        eq(await actions.verbs(), [], "nothing was attempted")
+        let message = String(decoding: response.body, as: UTF8.self)
+        expect(message.contains("no bulk unsubscribe over MCP"), message)
+        expect(message.contains("propose_selection"), "and points at the way that works")
+
+        let single = await mcpWrite(
+            "/mcp/senders/unsubscribe", ["sender_id": "domain:a"], actions: actions)
+        eq(single.statusCode, 200)
+        eq(mcpJSON(single)["status"] as? String, "awaiting_confirmation")
+        eq(await actions.details(of: "unsubscribe"), ["domain:a"])
+    }
+
+    asyncTest("trash asks the user, whatever else is in the request") {
+        // AC #6. There is no argument that changes this, so the ones an agent
+        // might try are simply ignored.
+        let actions = StubActions()
+        for extras in [[:], ["confirm": true], ["force": true], ["skip_confirmation": true]]
+            as [[String: Any]]
+        {
+            var arguments: [String: Any] = ["sender_id": "domain:a"]
+            for (key, value) in extras { arguments[key] = value }
+            let response = await mcpWrite("/mcp/senders/trash", arguments, actions: actions)
+            eq(response.statusCode, 200)
+            eq(
+                mcpJSON(response)["status"] as? String, "awaiting_confirmation",
+                "with \(extras.keys.joined(separator: ","))")
+        }
+        eq(await actions.verbs().count, 4, "each one reached the app as a request, not an action")
+    }
+
+    asyncTest("ignore and unignore report per sender, never a total") {
+        let actions = StubActions()
+        let response = await mcpWrite(
+            "/mcp/senders/ignore", ["sender_ids": ["domain:a", "domain:b"]], actions: actions)
+        let rows = mcpRows(response, "results")
+        eq(rows.count, 2)
+        eq(rows.first?["sender_id"] as? String, "domain:a")
+        eq(await actions.details(of: "ignore"), ["domain:a,domain:b"])
+
+        eq(
+            await mcpWrite("/mcp/senders/unignore", ["sender_id": "domain:a"], actions: actions)
+                .statusCode, 200)
+        eq(await actions.details(of: "unignore"), ["domain:a"])
+        // A single sender and a one-element list mean the same thing.
+        eq(await mcpWrite("/mcp/senders/ignore", [:], actions: actions).statusCode, 400)
+    }
+
+    asyncTest("a classification needs a label and a reason") {
+        let actions = StubActions()
+        eq(
+            await mcpWrite(
+                "/mcp/senders/classify", ["sender_id": "domain:a", "classification": "keep"],
+                actions: actions
+            ).statusCode, 400, "no reason")
+        eq(
+            await mcpWrite(
+                "/mcp/senders/classify", ["sender_id": "domain:a", "reason": "why"],
+                actions: actions
+            ).statusCode, 400, "no classification")
+        eq(
+            await mcpWrite(
+                "/mcp/senders/classify",
+                [
+                    "sender_id": "domain:a", "classification": "expired-situation",
+                    "reason": "the job search ended", "context": "job-search-2026",
+                ], actions: actions
+            ).statusCode, 200)
+        eq(
+            await actions.details(of: "classify"),
+            ["domain:a|expired-situation|the job search ended|job-search-2026"])
+    }
+
+    asyncTest("grouping takes one of two modes") {
+        let actions = StubActions()
+        eq(
+            await mcpWrite(
+                "/mcp/senders/grouping", ["sender_id": "domain:a", "mode": "shuffle"],
+                actions: actions
+            ).statusCode, 400)
+        for mode in AgentGroupingMode.allCases {
+            eq(
+                await mcpWrite(
+                    "/mcp/senders/grouping", ["sender_id": "domain:a", "mode": mode.rawValue],
+                    actions: actions
+                ).statusCode, 200, mode.rawValue)
+        }
+    }
+
+    asyncTest("every write refuses when no mailbox is open") {
+        // A 200 for a write that landed nowhere would be reported to the user as
+        // done. Only the policy answers without an app behind it.
+        for path in MCPWriteRoutes.paths.sorted() {
+            let response = await mcpWrite(path, ["sender_id": "domain:a"], actions: nil)
+            if path == MCPWriteRoutes.policyPath {
+                eq(response.statusCode, 200, "the policy is answerable with no mailbox")
+            } else {
+                eq(response.statusCode, 503, path)
+            }
+        }
+    }
+
+    asyncTest("the policy route answers with the surface's own rules") {
+        let json = mcpJSON(await mcpWrite("/mcp/policy", [:], actions: nil))
+        eq(json["batch_unsubscribe_available"] as? Bool, false)
+        eq(json["proposal_cap"] as? Int, SenderProposal.maxItems)
+        let confirmed = json["requires_human_confirmation"] as? [String] ?? []
+        eq(Set(confirmed), ["unsubscribe", "trash_sender_messages"])
+    }
+
+    asyncTest("a path that isn't a write route is left for the read surface") {
+        let request = HTTPRequest(method: "POST", path: "/mcp/senders/list", headers: [:], body: nil)
+        let response = await MCPWriteRoutes.handle(
+            path: "/mcp/senders/list", request: request, actions: StubActions())
+        expect(response == nil, "the write dispatcher claimed a read route")
+    }
+}
+
+Harness.suite("Agent outcome honesty") {
+    asyncTest("the four outcomes reach the agent as four outcomes") {
+        // AC #4/#5. The app itself only says 'confirmed' when a human watched
+        // the sender's confirmation page, so an agent reporting 'unsubscribed'
+        // for a 'requested' would be inventing evidence Nevermore refuses to.
+        eq(UnsubscribeEngine.Outcome.confirmed(detail: "d").agentOutcomeName, "confirmed")
+        eq(UnsubscribeEngine.Outcome.requested(detail: "d").agentOutcomeName, "requested")
+        eq(UnsubscribeEngine.Outcome.failed(detail: "d").agentOutcomeName, "failed")
+        eq(UnsubscribeEngine.Outcome.needsManual(reason: "r").agentOutcomeName, "needs_manual")
+        // Distinct, not merely present: nothing collapses two of them.
+        let names = Set(
+            [
+                UnsubscribeEngine.Outcome.confirmed(detail: ""), .requested(detail: ""),
+                .failed(detail: ""), .needsManual(reason: ""),
+            ].map(\.agentOutcomeName))
+        eq(names.count, 4)
+    }
+
+    asyncTest("the engine's own words survive the trip") {
+        eq(
+            UnsubscribeEngine.Outcome.requested(detail: "one-click accepted (HTTP 202), unverifiable")
+                .agentDetail,
+            "one-click accepted (HTTP 202), unverifiable")
+        eq(
+            UnsubscribeEngine.Outcome.needsManual(reason: "no unsubscribe link").agentDetail,
+            "no unsubscribe link")
+    }
+
+    asyncTest("a success flag would have hidden three of the four") {
+        // Why the wire carries the name rather than isSuccess: an endpoint
+        // answering 'success' proves nothing about an unsubscribe.
+        let requested = UnsubscribeEngine.Outcome.requested(detail: "accepted, unverifiable")
+        expect(requested.isSuccess, "the app counts it a success")
+        eq(requested.agentOutcomeName, "requested", "and still never calls it confirmed")
+    }
+
+    asyncTest("the ledger answers per sender, and only about the senders asked for") {
+        let ledger = AgentOutcomeLedger()
+        await ledger.record([
+            AgentOutcome(
+                senderId: "domain:a", senderName: "A", outcome: .requested(detail: "accepted")),
+            AgentOutcome(
+                senderId: "domain:b", senderName: "B", outcome: .needsManual(reason: "no link")),
+            AgentOutcome(
+                senderId: "domain:c", senderName: "C", outcome: .failed(detail: "HTTP 500")),
+        ])
+        let mine = await ledger.outcomes(for: ["domain:a", "domain:b"])
+        eq(mine.count, 2)
+        eq(mine.map(\.outcome), ["requested", "needs_manual"])
+        eq(await ledger.outcomes(for: ["domain:z"]).count, 0)
+    }
+
+    asyncTest("the ledger is bounded, keeping the newest") {
+        let ledger = AgentOutcomeLedger()
+        let overflow = AgentOutcomeLedger.capacity + 10
+        for index in 0 ..< overflow {
+            await ledger.record(
+                AgentOutcome(
+                    senderId: "domain:s\(index)", senderName: "S", outcome: .failed(detail: "x")))
+        }
+        let kept = await ledger.recent()
+        eq(kept.count, AgentOutcomeLedger.capacity)
+        eq(kept.last?.senderId, "domain:s\(overflow - 1)")
+    }
+
+    asyncTest("an outcome serialises with the distinction intact") {
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let payload = AgentProposalStatus(
+            state: AgentProposalStatus.edited, proposalId: "p", createdAt: nil, summary: nil,
+            proposedCount: 2, remainingCount: 1, removedByHuman: ["domain:b"],
+            outcomes: [
+                AgentOutcome(
+                    senderId: "domain:a", senderName: "A",
+                    outcome: .requested(detail: "accepted, unverifiable"))
+            ],
+            note: "n")
+        let json =
+            (try? JSONSerialization.jsonObject(with: encoder.encode(payload))) as? [String: Any]
+            ?? [:]
+        eq(json["state"] as? String, "edited")
+        eq((json["removed_by_human"] as? [String])?.first, "domain:b")
+        let outcome = (json["outcomes"] as? [[String: Any]])?.first ?? [:]
+        eq(outcome["outcome"] as? String, "requested")
+        eq(outcome["sender_id"] as? String, "domain:a")
+        expect(json["outcome_count"] == nil, "no total stands in for the per-sender rows")
+    }
+}
+
+Harness.suite("Agent-initiated trash always confirms") {
+    asyncTest("an agent's trash prompts however low the user's threshold is") {
+        // AC #6, as a rule rather than as a code path: no message count and no
+        // threshold makes an agent-initiated trash silent.
+        for threshold in [0, 1, 25, 1000] {
+            for count in [0, 1, 5, 5000] {
+                expect(
+                    TrashConfirmation.requiresPrompt(
+                        origin: .agent, messageCount: count, threshold: threshold),
+                    "agent, \(count) messages, threshold \(threshold)")
+            }
+        }
+    }
+
+    asyncTest("an agent's unsubscribe confirms even with confirmations turned off") {
+        // "Ask before unsubscribing" is the user saying *my* keystroke should
+        // just go. The MCP route answers awaiting_confirmation, and that has to
+        // be true in both settings of that switch or the answer is a lie.
+        for askBefore in [true, false] {
+            expect(
+                UnsubscribeConfirmation.requiresPrompt(
+                    origin: .agent, askBeforeUnsubscribe: askBefore),
+                "agent, askBeforeUnsubscribe = \(askBefore)")
+        }
+        expect(
+            UnsubscribeConfirmation.requiresPrompt(origin: .user, askBeforeUnsubscribe: true),
+            "the user's own preference still decides for the user")
+        expect(
+            !UnsubscribeConfirmation.requiresPrompt(origin: .user, askBeforeUnsubscribe: false),
+            "including when they turned it off")
+    }
+
+    asyncTest("the user's own threshold still applies to the user") {
+        expect(
+            !TrashConfirmation.requiresPrompt(origin: .user, messageCount: 5, threshold: 25),
+            "a small trash the user asked for doesn't prompt")
+        expect(
+            TrashConfirmation.requiresPrompt(origin: .user, messageCount: 500, threshold: 25),
+            "a big one does")
+    }
+}
+
+/// A server with a token and no mailbox, so what's under test is the order of
+/// the checks rather than what any route would answer.
+func guardedCall(
+    _ path: String, token: String? = "secret", method: String = "POST", isDemo: Bool = false
+) async -> HTTPResponse {
+    let server = NevermoreServer(isDemo: isDemo, mcpToken: "secret")
+    var headers = ["content-type": "application/json"]
+    if let token { headers["authorization"] = "Bearer \(token)" }
+    return await server.routeRequest(
+        HTTPRequest(method: method, path: path, headers: headers, body: Data("{}".utf8)))
+}
+
+Harness.suite("The write surface is guarded like the read surface") {
+    asyncTest("a write with the wrong credential is 401, before anything else") {
+        for path in MCPWriteRoutes.paths.sorted() {
+            eq(await guardedCall(path, token: "wrong").statusCode, 401, path)
+            eq(await guardedCall(path, token: nil).statusCode, 401, "\(path) with no header")
+        }
+    }
+
+    asyncTest("a write refuses in demo mode") {
+        // TASK-41: the demo mailbox is fabricated, so acting on it is acting on
+        // senders that do not exist. Including the policy — an agent that read a
+        // policy here would think it had a mailbox to apply it to.
+        for path in MCPWriteRoutes.paths.sorted() {
+            let response = await guardedCall(path, isDemo: true)
+            eq(response.statusCode, 403, path)
+        }
+    }
+
+    asyncTest("a write over GET is 405, not a silent no-op") {
+        eq(await guardedCall("/mcp/senders/ignore", method: "GET").statusCode, 405)
+    }
+
+    asyncTest("an unconfigured server refuses writes rather than opening them up") {
+        let server = NevermoreServer(mcpToken: "")
+        let response = await server.routeRequest(
+            HTTPRequest(
+                method: "POST", path: "/mcp/senders/ignore",
+                headers: ["authorization": "Bearer anything"], body: nil))
+        eq(response.statusCode, 503)
+    }
+
+    asyncTest("a write reaches the app once one is attached") {
+        let actions = StubActions()
+        let server = NevermoreServer(mcpToken: "secret")
+        await server.setMCPActions(actions)
+        let response = await server.routeRequest(
+            HTTPRequest(
+                method: "POST", path: "/mcp/senders/ignore",
+                headers: [
+                    "authorization": "Bearer secret", "content-type": "application/json",
+                ],
+                body: try! JSONSerialization.data(withJSONObject: ["sender_id": "domain:a"])))
+        eq(response.statusCode, 200)
+        eq(await actions.details(of: "ignore"), ["domain:a"])
+        // And it needed no snapshot: the write surface acts on the live app, so
+        // a server with actions and no mailbox context still serves it.
     }
 }
 

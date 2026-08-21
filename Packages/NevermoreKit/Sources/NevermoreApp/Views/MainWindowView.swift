@@ -8,6 +8,9 @@ struct MainWindowView: View {
     @Bindable var model: AppModel
     @State private var unsubTargets: [AppModel.UnsubTarget]?
     @State private var immediateDelete = false
+    /// Who asked for the unsubscribe currently being presented. An agent's
+    /// always shows the confirm step; see `UnsubscribeConfirmation`.
+    @State private var unsubOrigin: ActionOrigin = .user
     @State private var manualTarget: AppModel.ManualUnsubscribe?
     /// Keyboard focus for the sender list, so it can be restored after any
     /// sheet closes and single-key triage keeps working without a click.
@@ -29,6 +32,7 @@ struct MainWindowView: View {
             UnsubscribeFlow(
                 model: model, targets: targets.value,
                 immediateDelete: targets.immediateDelete,
+                origin: targets.origin,
                 onManualFallback: beginManual)
         }
         .sheet(item: $manualTarget, onDismiss: refocusList) { target in
@@ -59,6 +63,15 @@ struct MainWindowView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .unsubscribeAndDeleteSelected)) { _ in
             beginUnsubscribeAndDelete(model.selection)
+        }
+        // An agent asked to unsubscribe from one sender (TASK-46). It gets the
+        // same confirm sheet a keystroke would, and the same chance to be told
+        // no — the MCP route has already answered "awaiting confirmation" and
+        // nothing has been sent.
+        .onChange(of: model.agentUnsubscribeRequest) { _, request in
+            guard let request else { return }
+            model.agentUnsubscribeRequest = nil
+            beginAgentUnsubscribe(request.groupID)
         }
         // Clicking a row (selecting it) opens the inspector by default.
         .onChange(of: model.selection) { _, selection in
@@ -281,6 +294,18 @@ struct MainWindowView: View {
         let plan = model.plan(for: ids)
         guard !plan.isEmpty else { return }
         immediateDelete = false
+        unsubOrigin = .user
+        unsubTargets = plan
+    }
+
+    /// The same sheet, marked as an agent's request so it always stops at the
+    /// confirm step. Separate from `beginUnsubscribe` rather than a defaulted
+    /// parameter because that one is passed around as a plain closure.
+    private func beginAgentUnsubscribe(_ id: GroupID) {
+        let plan = model.plan(for: [id])
+        guard !plan.isEmpty else { return }
+        immediateDelete = false
+        unsubOrigin = .agent
         unsubTargets = plan
     }
 
@@ -291,6 +316,7 @@ struct MainWindowView: View {
         let plan = model.plan(for: ids)
         guard !plan.isEmpty else { return }
         immediateDelete = true
+        unsubOrigin = .user
         unsubTargets = plan
     }
 
@@ -303,7 +329,9 @@ struct MainWindowView: View {
     private var unsubBinding: Binding<IdentifiedTargets?> {
         Binding(
             get: {
-                unsubTargets.map { IdentifiedTargets($0, immediateDelete: immediateDelete) }
+                unsubTargets.map {
+                    IdentifiedTargets($0, immediateDelete: immediateDelete, origin: unsubOrigin)
+                }
             },
             set: { unsubTargets = $0?.value })
     }
@@ -311,14 +339,23 @@ struct MainWindowView: View {
     struct IdentifiedTargets: Identifiable {
         let value: [AppModel.UnsubTarget]
         let immediateDelete: Bool
+        let origin: ActionOrigin
         /// Include the mode in the identity: presenting the same senders once
         /// with a confirm and once without must count as two different sheets.
+        /// The origin is in there for the same reason — an agent's request for a
+        /// sender the user just looked at must not be mistaken for the sheet
+        /// that is already up.
         var id: String {
             value.map { $0.id.storageKey }.joined() + (immediateDelete ? "|delete" : "")
+                + "|" + origin.rawValue
         }
-        init(_ value: [AppModel.UnsubTarget], immediateDelete: Bool = false) {
+        init(
+            _ value: [AppModel.UnsubTarget], immediateDelete: Bool = false,
+            origin: ActionOrigin = .user
+        ) {
             self.value = value
             self.immediateDelete = immediateDelete
+            self.origin = origin
         }
     }
 }

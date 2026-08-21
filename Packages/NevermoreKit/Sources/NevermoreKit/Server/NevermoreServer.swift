@@ -63,6 +63,11 @@ public actor NevermoreServer {
     /// because the server outlives the open account: the user switches accounts, or closes the one
     /// that was open, without the listener going down.
     private var mcpContext: MCPContext?
+    /// The running app, for the write routes (TASK-46). Separate from `mcpContext` because they
+    /// answer different questions: the context is a database to read, this is an app to ask. A
+    /// server with a context but no actions serves the read surface and refuses every write, which
+    /// is the honest answer while the window is coming up.
+    private var mcpActions: (any MCPActions)?
 
     public init(
         appVersion: String = AppVersion.marketing,
@@ -134,6 +139,14 @@ public actor NevermoreServer {
     /// would act on very differently.
     public func setMCPContext(_ context: MCPContext?) {
         mcpContext = context
+    }
+
+    /// Point the write routes at the running app, or at nothing.
+    ///
+    /// Nil means every write answers 503 rather than being quietly dropped: an agent that got a
+    /// 200 for an action nothing performed would go on to report it as done.
+    public func setMCPActions(_ actions: (any MCPActions)?) {
+        mcpActions = actions
     }
 
     // MARK: - Listener parameters
@@ -278,7 +291,10 @@ public actor NevermoreServer {
                     return
                 }
                 if let request = parseHTTPRequest(buffer) {
-                    Task { await self.sendResponse(self.routeRequest(request), on: connection) }
+                    Task {
+                        let response = await self.routeRequest(request)
+                        await self.sendResponse(response, on: connection)
+                    }
                 } else {
                     // Headers are framed but the body bytes haven't all arrived — keep reading.
                     readMoreOrFail()
@@ -323,7 +339,7 @@ public actor NevermoreServer {
     // origin list.
 
     /// Public so routing policy can be unit-tested directly, without a socket.
-    public func routeRequest(_ request: HTTPRequest) -> HTTPResponse {
+    public func routeRequest(_ request: HTTPRequest) async -> HTTPResponse {
         // The parser frames bodies by Content-Length only. A request using Transfer-Encoding (e.g.
         // chunked) would otherwise parse with an empty body and be misreported as invalid JSON.
         // Reject it explicitly, before MCP dispatch, so framing policy doesn't vary by route.
@@ -332,7 +348,7 @@ public actor NevermoreServer {
         }
 
         if request.path.hasPrefix("/mcp/") {
-            return routeMCPRequest(request)
+            return await routeMCPRequest(request)
         }
 
         switch (request.method, request.path) {
@@ -351,7 +367,7 @@ public actor NevermoreServer {
     /// means one thing only: 401 the credential, 404 the route, 403 demo mode, 503 no mailbox. A
     /// bridge that got 403 where it expected 404 would report "that tool doesn't exist" for an app
     /// that is merely showing the demo.
-    private func routeMCPRequest(_ request: HTTPRequest) -> HTTPResponse {
+    private func routeMCPRequest(_ request: HTTPRequest) async -> HTTPResponse {
         // Fail closed: an empty server token means MCP is not configured — never "no token
         // required".
         guard !mcpToken.isEmpty else {
@@ -368,7 +384,8 @@ public actor NevermoreServer {
         }
         // Unknown routes are answered before anything about the mailbox, so 404 keeps meaning
         // "no such tool" whatever state the app happens to be in.
-        guard MCPRoutes.paths.contains(request.path) else {
+        guard MCPRoutes.paths.contains(request.path) || MCPWriteRoutes.paths.contains(request.path)
+        else {
             return .error("MCP route not found", code: 404)
         }
         // TASK-41: the demo mailbox is fabricated, and an agent told to triage it would spend a
@@ -379,6 +396,14 @@ public actor NevermoreServer {
                     + "rather than let an agent reason about senders that aren't real. Leave demo "
                     + "mode in the app and try again.",
                 code: 403)
+        }
+        // The write routes (TASK-46) go to the running app rather than to a snapshot: they act on
+        // live state, and several of them do nothing but put a question in front of the user. They
+        // are dispatched first so a write never pays for a snapshot it does not read.
+        if let response = await MCPWriteRoutes.handle(
+            path: request.path, request: request, actions: mcpActions)
+        {
+            return response
         }
         guard let context = mcpContext else {
             return .error(

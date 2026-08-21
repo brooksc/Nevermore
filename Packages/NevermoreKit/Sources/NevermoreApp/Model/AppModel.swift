@@ -491,10 +491,29 @@ final class AppModel {
     private func publishMCPContext() async {
         guard !isDemoMode, let store, let currentAccount else {
             await localServer.setMCPContext(nil)
+            await localServer.setMCPActions(nil)
             return
         }
         await localServer.setMCPContext(MCPContext(account: currentAccount, store: store))
+        // The write surface goes up and down with the read surface: an agent that
+        // could act on a mailbox nobody has open would be acting on nothing.
+        await localServer.setMCPActions(agentActions)
     }
+
+    /// The MCP write surface's view of this app (TASK-46).
+    ///
+    /// One instance for the app's lifetime, because it remembers what it last
+    /// proposed — which is the only way `get_proposal_status` can say the human
+    /// *edited* the proposal rather than merely that it is smaller than it was.
+    @ObservationIgnored private(set) lazy var agentActions = AgentActions(model: self)
+
+    /// Mints the confirmations the batch unsubscribe path requires, and nothing
+    /// else mints them. See `ReviewToken`.
+    let reviewTokens = ReviewTokenVault()
+
+    /// What has actually happened to senders in this run, so an agent that
+    /// proposed them can be told the truth about each one.
+    let agentOutcomes = AgentOutcomeLedger()
 
     /// Remove the token file when the app quits. The port goes away with the
     /// process; the file on disk would not.
@@ -1098,11 +1117,19 @@ final class AppModel {
     /// Not called in demo mode: the whole MCP surface refuses there (TASK-41),
     /// and a proposal seeded into the demo database would survive into the next
     /// person's demo.
-    func receiveProposal(_ incoming: SenderProposal) {
-        guard let store, !isDemoMode else { return }
+    @discardableResult
+    func receiveProposal(_ incoming: SenderProposal) -> Bool {
+        guard let store, !isDemoMode else { return false }
         try? store.setProposal(incoming)
         proposal = incoming
         Log.app.event("received an agent proposal of \(incoming.items.count) sender(s)")
+        // Show it. A proposal that arrives behind three other windows has been
+        // proposed into a void, and the review is the entire safety mechanism.
+        // The cost is a cleared selection if the user was mid-triage, which is
+        // recoverable; a review nobody notices is not.
+        collection = .proposed
+        bringWindowForward()
+        return true
     }
 
     /// Clear the proposal without acting on any sender.
@@ -1134,6 +1161,60 @@ final class AppModel {
         self.proposal = edited
         selection.subtract(ids)
         leaveProposedIfGone()
+    }
+
+    // MARK: - Agent-initiated actions (TASK-46)
+
+    /// A single sender an agent asked to unsubscribe from, waiting for the
+    /// window to put the app's ordinary confirmation in front of the user.
+    ///
+    /// Identifiable, and replaced rather than queued: an agent that asks twice
+    /// while the sheet is up gets one dialog about the later sender, not a stack
+    /// of them. Nothing has happened to the sender while this is set.
+    struct AgentUnsubscribeRequest: Identifiable, Equatable {
+        let id = UUID()
+        let groupID: GroupID
+    }
+
+    var agentUnsubscribeRequest: AgentUnsubscribeRequest?
+
+    /// Ask the window to run the app's normal unsubscribe confirmation for one
+    /// sender. Returns false when there is nothing to act on.
+    func requestAgentUnsubscribe(_ id: GroupID) -> Bool {
+        guard group(for: id) != nil else { return false }
+        selection = [id]
+        agentUnsubscribeRequest = AgentUnsubscribeRequest(groupID: id)
+        bringWindowForward()
+        return true
+    }
+
+    /// Write the agent's judgement about a sender (TASK-43).
+    ///
+    /// Recorded against every address in the group rather than the group key:
+    /// grouping is mutable, and a decision keyed by a row would be lost the
+    /// moment the row split. Returns how many addresses were written.
+    @discardableResult
+    func recordAgentDecision(
+        _ id: GroupID, classification: String, reason: String, context: String?
+    ) -> Int {
+        guard let store, let group = group(for: id) else { return 0 }
+        let addresses = Set(group.messages.map { $0.sender.address.lowercased() })
+            .filter { !$0.isEmpty }
+        for address in addresses {
+            try? store.recordDecision(
+                address: address, classification: classification, reason: reason, context: context)
+        }
+        return addresses.count
+    }
+
+    /// Show the human what an agent has just put in front of them.
+    ///
+    /// An agent proposing into a window that is behind three others has proposed
+    /// into a void: the review is the safety mechanism, so it has to be visible
+    /// that it is waiting.
+    func bringWindowForward() {
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.windows.first { $0.canBecomeKey }?.makeKeyAndOrderFront(nil)
     }
 
     /// Send the user somewhere real when the collection they're looking at
@@ -1346,10 +1427,14 @@ final class AppModel {
     /// Entry point for trashing from the UI: confirms first if the batch exceeds
     /// the Settings threshold, otherwise trashes immediately. Trashing is
     /// recoverable from the provider's Trash, so small batches don't prompt.
-    func requestTrash(_ ids: Set<GroupID>) {
+    func requestTrash(_ ids: Set<GroupID>, origin: ActionOrigin = .user) {
         let targets = groups.filter { ids.contains($0.id) }
         let count = targets.reduce(0) { $0 + $1.messages.count }
-        if count > AppSettings.trashConfirmThreshold {
+        // An agent-initiated trash always prompts, whatever the user's threshold
+        // says — see `TrashConfirmation`, where that rule and its reasoning live.
+        if TrashConfirmation.requiresPrompt(
+            origin: origin, messageCount: count, threshold: AppSettings.trashConfirmThreshold)
+        {
             pendingTrash = PendingTrash(
                 ids: ids, messageCount: count, senderCount: targets.count,
                 advanceTo: rowAfterSelection())
@@ -1508,12 +1593,42 @@ final class AppModel {
         }
     }
 
+    /// Record that a person has just confirmed unsubscribing from exactly these
+    /// senders, and get the proof `performUnsubscribe` demands.
+    ///
+    /// **The only mint point in the app, and it must stay that way.** Every
+    /// caller is a button a human pressed on a list they were looking at. There
+    /// is no MCP route that reaches this — an agent has no way to obtain, ask
+    /// for, or even name a token — and adding one would end the guarantee that
+    /// makes the whole agent surface acceptable (TASK-39, TASK-46).
+    func confirmSelection(_ targets: [UnsubTarget]) async -> ReviewToken {
+        await reviewTokens.mint(confirming: Set(targets.map(\.id.storageKey)))
+    }
+
     /// Perform unsubscribes one at a time, reporting progress via `onProgress`.
     /// Returns the targets annotated with outcomes.
+    ///
+    /// `token` is not a formality. It is redeemed against this exact set before
+    /// anything is sent, so a batch can only run against senders a person saw
+    /// and confirmed: a token minted for one selection cannot be replayed
+    /// against another, cannot be used twice, and dies ten minutes after it was
+    /// issued. A batch with no live confirmation sends nothing and comes back
+    /// with every sender marked failed, saying why.
     func performUnsubscribe(
         _ targets: [UnsubTarget],
+        token: ReviewToken,
         onProgress: @MainActor (Int, UnsubTarget) -> Void
     ) async -> [UnsubTarget] {
+        do {
+            try await reviewTokens.redeem(token, for: Set(targets.map(\.id.storageKey)))
+        } catch {
+            let reason = (error as? ReviewTokenError)?.description ?? "\(error)"
+            Log.unsubscribe.problem("refused an unconfirmed batch of \(targets.count): \(reason)")
+            var refused = targets
+            for index in refused.indices { refused[index].outcome = .failed(detail: reason) }
+            showToast("Nothing was sent — \(reason)", undoLabel: nil, undo: nil)
+            return refused
+        }
         guard let backend, let store else { return targets }
         // Work out where the cursor should land *before* acting: once these
         // senders are unsubscribed (and possibly trashed) they leave the list,
@@ -1586,6 +1701,17 @@ final class AppModel {
             }
         }
         history = (try? store.unsubscribeHistory()) ?? history
+        // Tell the ledger what happened to each sender, keeping the engine's own
+        // four-way distinction. An agent reads this back through
+        // get_proposal_status, and it is the only thing stopping it reporting
+        // "unsubscribed" for what the app would only call "requested".
+        await agentOutcomes.record(
+            results.compactMap { target in
+                target.outcome.map {
+                    AgentOutcome(
+                        senderId: target.id.storageKey, senderName: target.name, outcome: $0)
+                }
+            })
         selection.subtract(Set(targets.map(\.id)))
         // Keep triage flowing, the same way ignore and trash do. Without this
         // the selection is simply emptied and the next keystroke has nothing
