@@ -113,6 +113,12 @@ struct MainWindowView: View {
                     onUnsubscribe: beginUnsubscribe,
                     onUnsubscribeAndDelete: beginUnsubscribeAndDelete,
                     isFocused: $listFocused)
+            case .proposed:
+                ProposedCollectionView(
+                    model: model,
+                    onUnsubscribe: beginUnsubscribe,
+                    onUnsubscribeAndDelete: beginUnsubscribeAndDelete,
+                    isFocused: $listFocused)
             case .reappeared:
                 ReappearedCollectionView(
                     model: model,

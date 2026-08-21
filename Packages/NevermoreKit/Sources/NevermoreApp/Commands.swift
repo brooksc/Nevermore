@@ -25,12 +25,23 @@ struct AppCommands: Commands {
                 .keyboardShortcut("r")
         }
 
-        // View — collection switching (⌘1…⌘6)
+        // View — collection switching (⌘1…⌘5)
         CommandGroup(after: .toolbar) {
             ForEach(Array(SenderCollection.allCases.enumerated()), id: \.element) { index, item in
                 Button(item.title) { model.collection = item }
                     .keyboardShortcut(
                         KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
+                    // Proposed comes and goes with the proposal, so its shortcut
+                    // has to as well: ⌘5 with nothing proposed would select a
+                    // collection that has no sidebar row and nothing in it.
+                    // The number itself is fixed — it is the position in
+                    // `allCases` — so the other four never renumber.
+                    //
+                    // Only Proposed: Reappeared's section also hides when empty,
+                    // but ⌘2 has always worked and lands on an empty state that
+                    // says everyone honoured your unsubscribes, which is worth
+                    // being able to check.
+                    .disabled(item == .proposed && !model.shows(.proposed))
             }
             Divider()
             Button("Toggle Inspector") { model.showInspector.toggle() }

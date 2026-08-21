@@ -99,6 +99,11 @@ public struct MCPSnapshot: Sendable {
     /// The collection a sender currently belongs to. Exactly one holds any
     /// sender that has messages, so naming it on every row saves an agent
     /// running four filtered queries to work out where a sender sits.
+    ///
+    /// Proposed is not one of the answers, and cannot be: a snapshot is built
+    /// from the store's own state, `state(of:)` never sets `isProposed`, and
+    /// `.proposed` sorts last in `allCases` in any case. Being under review is
+    /// an overlay on where a sender lives, not a place it has moved to.
     public func collection(of group: SenderGroup) -> SenderCollection? {
         let state = state(of: group)
         return SenderCollection.allCases.first { $0.contains(state) }

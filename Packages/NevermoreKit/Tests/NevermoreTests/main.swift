@@ -2951,4 +2951,250 @@ Harness.suite("Store build excludes the bridge") {
     }
 }
 
+// MARK: - Agent proposals (TASK-45)
+
+/// One proposal item, with only the field under test spelled out.
+func proposalItem(_ key: String, reason: String = "no reason given") -> SenderProposal.Item {
+    SenderProposal.Item(
+        groupKey: "domain:\(key)", senderName: key.capitalized, senderEmail: "hello@\(key)",
+        reason: reason)
+}
+
+func proposalGroup(_ key: String, messages: Int = 1) -> SenderGroup {
+    SenderGroup(
+        id: GroupID(kind: .domain, key: key),
+        messages: (0..<messages).map { mcpMessage(UInt32(abs(key.hashValue % 1000) + $0), from: "X <a@\(key)>") })
+}
+
+Harness.suite("Agent proposals") {
+    Harness.test("a proposal under the cap is left alone") {
+        let (proposal, dropped) = SenderProposal.capped(items: [proposalItem("a"), proposalItem("b")])
+        eq(proposal.items.count, 2)
+        eq(dropped, 0)
+    }
+
+    Harness.test("an oversized proposal is truncated and says how much was cut") {
+        let items = (0..<40).map { proposalItem("s\($0)") }
+        let (proposal, dropped) = SenderProposal.capped(items: items)
+        // Reviewability is the safety mechanism, so the cap is the product
+        // decision and the count is what stops the agent believing all forty
+        // are under review.
+        eq(proposal.items.count, SenderProposal.maxItems)
+        eq(dropped, 40 - SenderProposal.maxItems)
+        eq(proposal.items.first?.groupKey, "domain:s0", "kept the agent's first choices")
+    }
+
+    Harness.test("one sender proposed twice is one row, and doesn't spend two of the cap") {
+        let items = (0..<30).map { proposalItem("s\($0)") } + [proposalItem("s0", reason: "again")]
+        let (proposal, dropped) = SenderProposal.capped(items: items)
+        eq(proposal.items.count, SenderProposal.maxItems)
+        // 30 distinct senders, not 31: the duplicate is dropped before the cap,
+        // so the cap counts senders rather than mentions.
+        eq(dropped, 30 - SenderProposal.maxItems)
+        eq(proposal.items.filter { $0.groupKey == "domain:s0" }.count, 1)
+        eq(proposal.items.first?.reason, "no reason given", "the first mention wins")
+    }
+
+    Harness.test("removing a sender leaves the rest in the agent's order") {
+        let proposal = SenderProposal(items: [proposalItem("a"), proposalItem("b"), proposalItem("c")])
+        let edited = proposal.removing(groupKeys: ["domain:b"])
+        eq(edited?.items.map(\.groupKey), ["domain:a", "domain:c"])
+        eq(edited?.id, proposal.id, "still the same proposal")
+    }
+
+    Harness.test("removing the last sender clears the proposal outright") {
+        // Nil rather than an empty proposal: the sidebar row exists only while
+        // there is something to review, so emptying it must remove it.
+        let proposal = SenderProposal(items: [proposalItem("a")])
+        expect(proposal.removing(groupKeys: ["domain:a"]) == nil)
+    }
+
+    Harness.test("rows come back in the agent's order, not the mailbox's") {
+        let proposal = SenderProposal(items: [proposalItem("c"), proposalItem("a"), proposalItem("b")])
+        let groups = [proposalGroup("a"), proposalGroup("b"), proposalGroup("c")]
+        eq(proposal.senders(in: groups).map(\.id.key), ["c", "a", "b"])
+    }
+
+    Harness.test("a sender whose mail has gone still gets a row") {
+        // Trashed between the proposal and the review, which are hours apart.
+        // The row stays so the human reviews the proposal that was actually
+        // made; it simply has no group behind it.
+        let proposal = SenderProposal(items: [proposalItem("gone"), proposalItem("here")])
+        let rows = proposal.senders(in: [proposalGroup("here")])
+        eq(rows.count, 2)
+        expect(rows[0].group == nil, "no group for the departed sender")
+        expect(rows[0].item.senderName == "Gone", "but still says who it was")
+        expect(rows[1].group != nil)
+    }
+
+    Harness.test("search matches the agent's reason, not only the sender") {
+        let proposal = SenderProposal(items: [
+            proposalItem("acme", reason: "left over from the 2026 job search"),
+            proposalItem("shop", reason: "unread for two years"),
+        ])
+        let groups = [proposalGroup("acme"), proposalGroup("shop")]
+        eq(proposal.senders(in: groups, matching: "job search").map(\.id.key), ["acme"])
+        eq(proposal.senders(in: groups, matching: "SHOP").map(\.id.key), ["shop"])
+        eq(proposal.senders(in: groups, matching: "  ").count, 2, "blank search filters nothing")
+    }
+
+    Harness.test("an unreadable group key is dropped rather than crashing the list") {
+        let proposal = SenderProposal(items: [
+            SenderProposal.Item(
+                groupKey: "not-a-key", senderName: "?", senderEmail: "?", reason: "?"),
+            proposalItem("ok"),
+        ])
+        eq(proposal.senders(in: [proposalGroup("ok")]).map(\.id.key), ["ok"])
+    }
+}
+
+Harness.suite("Proposed collection") {
+    Harness.test("Proposed holds exactly the senders under review") {
+        expect(SenderCollection.proposed.contains(SenderState(isProposed: true)))
+        expect(!SenderCollection.proposed.contains(SenderState()))
+    }
+
+    Harness.test("being proposed doesn't move a sender out of where it lives") {
+        // The overlay rule: a proposal is a suggestion, and until the human
+        // says otherwise nothing has happened to the sender.
+        let s = SenderState(isProposed: true)
+        eq(SenderCollection.allCases.filter { $0.contains(s) }, [.allSenders, .proposed])
+    }
+
+    Harness.test("Proposed sorts last, so 'which collection is this sender in' is unchanged") {
+        // `MCPSnapshot.collection(of:)` takes the first match. Proposed must
+        // never be that answer, or an agent would read "under review" as the
+        // sender's state.
+        eq(SenderCollection.allCases.last, .proposed)
+        eq(
+            SenderCollection.allCases.first { $0.contains(SenderState(isProposed: true)) },
+            .allSenders)
+    }
+
+    Harness.test("adding Proposed did not renumber the collection shortcuts") {
+        // ⌘1…⌘4 are positions in `allCases` (Commands.swift). Documented in
+        // UI_SPEC.md §8, and in muscle memory.
+        eq(
+            SenderCollection.allCases,
+            [.allSenders, .reappeared, .unsubscribed, .ignored, .proposed])
+    }
+
+    Harness.test("reviewing an untouched sender can do everything All Senders can") {
+        // A review you can't act on sends the user to another list to finish it.
+        // (The one divergence — a row already unsubscribed — is the next test.)
+        for action in SelectionAction.allCases {
+            for withMessages in [2, 0] {
+                let proposed = SelectionContext(
+                    collection: .proposed, count: 2, withMessages: withMessages)
+                let all = SelectionContext(
+                    collection: .allSenders, count: 2, withMessages: withMessages)
+                eq(
+                    action.unavailability(in: proposed),
+                    action.unavailability(in: all),
+                    "\(action.rawValue) with \(withMessages) still holding mail")
+            }
+        }
+    }
+
+    Harness.test("a proposed sender who is already done can't be unsubscribed twice") {
+        // Acting on a row doesn't remove it from the proposal — the proposal is
+        // the record of what was proposed — so this is the one list that can
+        // still be showing a sender who is finished.
+        let done = SelectionContext(
+            collection: .proposed, count: 2, withMessages: 2, alreadyUnsubscribed: 2)
+        eq(
+            SelectionAction.unsubscribe.unavailability(in: done),
+            "Already unsubscribed. Forget the record to unsubscribe again.")
+        // And the escape hatch that sentence names is reachable from here.
+        expect(SelectionAction.forget.unavailability(in: done) == nil, "forget is offered")
+
+        let mixed = SelectionContext(
+            collection: .proposed, count: 3, withMessages: 3, alreadyUnsubscribed: 1)
+        eq(
+            SelectionAction.unsubscribeAndDelete.unavailability(in: mixed),
+            "Some of these are already unsubscribed. Deselect them first.")
+        expect(
+            SelectionAction.forget.unavailability(in: mixed) != nil,
+            "and forget isn't offered for a selection that isn't all records")
+    }
+
+    Harness.test("the read-only MCP surface refuses to list Proposed") {
+        // It lives in the running app, not the database a snapshot is built
+        // from, so serving it would always be an empty list — which an agent
+        // would read as the human having cleared it.
+        let store = try! MessageStore.inMemory()
+        try! store.upsert([mcpMessage(1, from: "A <a@acme.com>")])
+        let response = mcpCall("/mcp/senders/list", try! mcpSnapshot(store), ["collection": "proposed"])
+        eq(response.statusCode, 400)
+        expect(!MCPRoutes.readable.contains(.proposed), "and it isn't offered as an option")
+        expect(
+            !MCPToolCatalog.tools.contains { $0.schemaJSON.contains("\"proposed\"") },
+            "nor advertised in the tool schema")
+    }
+}
+
+Harness.suite("Proposals survive a relaunch") {
+    /// A store on a real path, so it can be closed and opened again — which is
+    /// the only way to prove "survives quitting and reopening the app" without
+    /// a UI.
+    func temporaryPath() -> String {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("nevermore-proposal-\(UUID().uuidString).sqlite").path
+    }
+
+    Harness.test("a proposal is still there after the store is closed and reopened") {
+        let path = temporaryPath()
+        let proposal = SenderProposal(
+            summary: "left over from the 2026 job search",
+            items: [proposalItem("acme", reason: "you stopped opening these in March")])
+        do {
+            let store = try! MessageStore(path: path)
+            try! store.setProposal(proposal)
+        }
+        // A second MessageStore on the same file: a relaunch, as far as
+        // anything below the app can tell.
+        let reopened = try! MessageStore(path: path)
+        let read = reopened.proposal()
+        eq(read?.id, proposal.id)
+        eq(read?.summary, "left over from the 2026 job search")
+        eq(read?.items.first?.reason, "you stopped opening these in March")
+        eq(read?.items.first?.senderEmail, "hello@acme")
+        // Seconds resolution, not identity: the encoding is lossy below that.
+        eq(
+            read.map { Int($0.createdAt.timeIntervalSince1970) },
+            Int(proposal.createdAt.timeIntervalSince1970))
+    }
+
+    Harness.test("a fresh mailbox has no proposal") {
+        expect(try! MessageStore.inMemory().proposal() == nil)
+    }
+
+    Harness.test("a second proposal replaces the first rather than queueing") {
+        let store = try! MessageStore.inMemory()
+        try! store.setProposal(SenderProposal(items: [proposalItem("a")]))
+        try! store.setProposal(SenderProposal(items: [proposalItem("b"), proposalItem("c")]))
+        eq(store.proposal()?.items.map(\.groupKey), ["domain:b", "domain:c"])
+    }
+
+    Harness.test("dismissing clears the proposal and acts on nothing") {
+        // The whole safety argument: declining must be inert. Nothing about the
+        // senders — ignored, unsubscribed, or their mail — may move.
+        let store = try! MessageStore.inMemory()
+        try! store.upsert([mcpMessage(1, from: "A <a@acme.com>")])
+        let id = GroupID(kind: .domain, key: "acme.com")
+        try! store.ignore(id)
+        try! store.recordUnsubscribe(
+            GroupID(kind: .domain, key: "shop.com"), senderName: "Shop",
+            senderEmail: "s@shop.com", senderDomain: "shop.com", url: nil, outcome: .confirmed)
+        try! store.setProposal(SenderProposal(items: [proposalItem("acme.com")]))
+
+        try! store.clearProposal()
+
+        expect(store.proposal() == nil, "the proposal is gone")
+        eq(try! store.count(), 1, "their messages are untouched")
+        eq(try! store.ignoredGroupKeys(), [id.storageKey], "the ignore list is untouched")
+        eq(try! store.unsubscribeHistory().count, 1, "the unsubscribe log is untouched")
+    }
+}
+
 exit(Harness.finish())

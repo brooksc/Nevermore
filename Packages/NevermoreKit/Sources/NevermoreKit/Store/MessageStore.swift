@@ -609,6 +609,59 @@ public final class MessageStore: Sendable {
         }
     }
 
+    // MARK: - Agent proposal
+
+    private static let proposalKey = "agentProposal"
+
+    /// The proposal currently awaiting review, if any.
+    ///
+    /// Stored as JSON in `syncState` rather than in a table of its own, like
+    /// the grouping rules: there is exactly one live proposal, it is read and
+    /// written whole, and nothing ever queries it by field. A table would buy
+    /// indexes nobody uses and a migration to maintain.
+    ///
+    /// It lives in the account's database, so it is per-account, and it dies
+    /// with the account — which is right, since a proposal names that mailbox's
+    /// senders and carries an agent's free-text reasons about them.
+    public func proposal() -> SenderProposal? {
+        let raw = try? pool.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT value FROM syncState WHERE key = ?",
+                arguments: [Self.proposalKey])
+        }
+        guard let value = raw ?? nil, let data = value.data(using: .utf8) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        return try? decoder.decode(SenderProposal.self, from: data)
+    }
+
+    /// Replace the live proposal. One at a time on purpose: a second proposal
+    /// arriving while the first is on screen would either queue up unreviewed
+    /// or silently merge, and both leave the human reviewing something nobody
+    /// proposed.
+    public func setProposal(_ proposal: SenderProposal) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let json = String(decoding: try encoder.encode(proposal), as: UTF8.self)
+        try pool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO syncState (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                arguments: [Self.proposalKey, json])
+        }
+    }
+
+    /// Drop the proposal. Touches nothing else — dismissing a proposal is the
+    /// human declining to act, and it must not act.
+    public func clearProposal() throws {
+        try pool.write { db in
+            try db.execute(
+                sql: "DELETE FROM syncState WHERE key = ?", arguments: [Self.proposalKey])
+        }
+    }
+
     /// A persisted set of strings under `key`. Best-effort — used for
     /// bookkeeping (e.g. which reappeared senders have already been notified).
     public func stringSet(forKey key: String) -> Set<String> {

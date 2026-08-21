@@ -91,7 +91,7 @@ optional.
 
 `README.md` is authoritative for current behaviour. `PLAN.md` is kept for
 rationale, not status. `RELEASE.md` (DMG/Sparkle) and `MAS-RELEASE.md` (App
-Store) are the release runbooks. `UI_SPEC.md` describes the four collections
+Store) are the release runbooks. `UI_SPEC.md` describes the sidebar collections
 and the keyboard model. `PRIVACY.md` backs the App Store privacy label.
 
 <!-- BACKLOG.MD MCP GUIDELINES START -->

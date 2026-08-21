@@ -61,6 +61,11 @@ public enum MCPRoutes {
     public static let defaultLimit = 50
     public static let maxLimit = 200
 
+    /// The collections this surface can serve, which is every collection backed
+    /// by the store. Proposed is not: it is a review queue held by the running
+    /// app (TASK-45), and it is what the catalog's `collection` enum lists.
+    public static let readable = SenderCollection.allCases.filter { $0 != .proposed }
+
     /// Every path this surface serves. The tool catalog is checked against this
     /// list in the tests, so a tool can't point at a route that doesn't exist.
     public static let paths: Set<String> = [
@@ -120,7 +125,17 @@ public enum MCPRoutes {
             guard let parsed = parseCollection(raw) else {
                 return .error(
                     "Unknown collection '\(raw)'. Use one of: "
-                        + SenderCollection.allCases.map(\.rawValue).joined(separator: ", "),
+                        + readable.map(\.rawValue).joined(separator: ", "),
+                    code: 400)
+            }
+            // A proposal lives in the running app, not in this database, so a
+            // snapshot has nothing to say about it. Refusing is the honest
+            // answer: served from here it would always be an empty list, which
+            // an agent would read as "the human cleared it".
+            guard parsed != .proposed else {
+                return .error(
+                    "'proposed' is not a readable collection. It holds a proposal awaiting "
+                        + "human review in the app, which this read-only surface cannot see.",
                     code: 400)
             }
             collection = parsed
