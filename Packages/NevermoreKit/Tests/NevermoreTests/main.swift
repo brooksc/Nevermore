@@ -2746,9 +2746,9 @@ Harness.suite("MCP server dispatch") {
 }
 
 Harness.suite("MCP tool catalog") {
-    Harness.test("the surface is nine read tools and eleven narrow writes, and nothing else") {
+    Harness.test("the surface is nine read tools and thirteen narrow writes, and nothing else") {
         let names = Set(MCPToolCatalog.tools.map(\.name))
-        eq(MCPToolCatalog.tools.count, 20, "and no tool is defined twice")
+        eq(MCPToolCatalog.tools.count, 22, "and no tool is defined twice")
         eq(
             names,
             [
@@ -2760,6 +2760,9 @@ Harness.suite("MCP tool catalog") {
                 "propose_selection", "get_proposal_status", "unsubscribe", "ignore", "unignore",
                 "set_classification", "trash_sender_messages", "start_sync", "set_grouping",
                 "forget_unsubscribe_record", "get_policy",
+                // The browser queue (TASK-47): fill it and read it. There is no
+                // third verb, and the absence is the feature.
+                "queue_for_browser", "get_browser_queue",
             ])
         // TASK-39/TASK-41: the agent proposes, the human actuates. `unsubscribe`
         // is one sender through the app's own confirmation; a verb that took a
@@ -3438,6 +3441,41 @@ actor StubActions: MCPActions {
                 detail: "asking the user"))
     }
 
+    /// The browser queue this stub pretends to hold (TASK-47). Real enough to
+    /// prove the thing that matters: routes can fill it and read it, and nothing
+    /// on the surface can work it.
+    private var browserQueue = BrowserQueue()
+
+    func queue() -> BrowserQueue { browserQueue }
+
+    func queueForBrowser(senderIds: [String]) async -> AgentActionOutcome {
+        note("queue_for_browser", senderIds.joined(separator: ","))
+        var results: [AgentSenderResult] = []
+        for senderId in senderIds {
+            let queued = browserQueue.queue(
+                BrowserQueue.Entry(
+                    groupKey: senderId, senderName: senderId, senderEmail: "x@\(senderId)",
+                    reason: .noPublishedTarget))
+            results.append(
+                AgentSenderResult(
+                    senderId: senderId, senderName: senderId, applied: queued,
+                    detail: queued ? "queued" : "already waiting"))
+        }
+        return .browserQueue(
+            AgentBrowserQueueStatus(queue: browserQueue, results: results, note: "queued."))
+    }
+
+    func browserQueueStatus() async -> AgentActionOutcome {
+        note("browser_queue_status")
+        return .browserQueue(AgentBrowserQueueStatus(queue: browserQueue))
+    }
+
+    /// Only a test may do this — it stands in for the human working the sheet,
+    /// which is the one thing no route can reach.
+    func humanRecords(_ outcome: BrowserQueue.Outcome, for senderId: String) {
+        browserQueue.record(outcome, for: senderId)
+    }
+
     func setIgnored(_ ignored: Bool, senderIds: [String]) async -> AgentActionOutcome {
         note(ignored ? "ignore" : "unignore", senderIds.joined(separator: ","))
         return .result(
@@ -3855,6 +3893,337 @@ Harness.suite("The write surface is guarded like the read surface") {
         eq(await actions.details(of: "ignore"), ["domain:a"])
         // And it needed no snapshot: the write surface acts on the live app, so
         // a server with actions and no mailbox context still serves it.
+    }
+}
+
+// MARK: - TASK-47: the browser queue
+
+/// A group with one message, so `BrowserQueue.reason` has something to read.
+func queueGroup(
+    _ key: String = "acme.com", unsub: String? = "<https://ex.com/u>", oneClick: Bool = false
+) -> SenderGroup {
+    SenderGroup(
+        id: GroupID(kind: .domain, key: key),
+        messages: [mcpMessage(1, from: "A <a@\(key)>", unsub: unsub, oneClick: oneClick)])
+}
+
+func queueEntry(_ key: String, reason: BrowserReason = .noPublishedTarget) -> BrowserQueue.Entry {
+    BrowserQueue.Entry(
+        groupKey: "domain:\(key)", senderName: key, senderEmail: "hello@\(key)", reason: reason,
+        queuedAt: Date(timeIntervalSince1970: 1_700_000_000))
+}
+
+Harness.suite("Browser queue") {
+    Harness.test("the queue is worked in the order it was filled") {
+        var queue = BrowserQueue()
+        queue.queue([queueEntry("a"), queueEntry("b"), queueEntry("c")])
+        eq(queue.next?.groupKey, "domain:a")
+        eq(queue.pendingCount, 3)
+        queue.record(.confirmed, for: "domain:a")
+        eq(queue.next?.groupKey, "domain:b", "the next one, not a re-run of the first")
+        eq(queue.position(of: "domain:b"), 2, "positions count the whole queue, worked included")
+        eq(queue.count, 3, "the total doesn't shrink under the user as they go")
+    }
+
+    Harness.test("queueing the same sender twice is one row") {
+        // A duplicate is a page the user would be sent to twice for no reason.
+        var queue = BrowserQueue()
+        eq(queue.queue([queueEntry("a"), queueEntry("a"), queueEntry("b")]), ["domain:a", "domain:b"])
+        eq(queue.count, 2)
+    }
+
+    Harness.test("re-queueing a sender that was already worked asks to redo it") {
+        var queue = BrowserQueue()
+        queue.queue([queueEntry("a"), queueEntry("b")])
+        queue.record(.abandoned, for: "domain:a")
+        expect(queue.queue(queueEntry("a")), "an answered sender can be put back")
+        eq(queue.entries.map(\.groupKey), ["domain:b", "domain:a"], "at the end, not in place")
+        eq(queue.next?.groupKey, "domain:b", "and it doesn't jump the rest of the sitting")
+        eq(queue.pendingCount, 2)
+    }
+
+    Harness.test("an answer is terminal") {
+        // A stale sheet answering twice must not rewrite what happened.
+        var queue = BrowserQueue()
+        queue.queue(queueEntry("a"))
+        expect(queue.record(.confirmed, for: "domain:a"))
+        expect(!queue.record(.abandoned, for: "domain:a"), "the second answer is refused")
+        eq(queue.entry(for: "domain:a")?.outcome, .confirmed)
+        expect(!queue.record(.confirmed, for: "domain:nobody"), "and an unqueued sender is refused")
+    }
+
+    Harness.test("a confirmed unsubscribe is not the same fact as an abandoned one") {
+        // AC #3. Three outcomes and not a Bool: "I did it", "their page wouldn't
+        // let me", and "I gave up" are different, and only the first is the
+        // sender being unsubscribed from.
+        var queue = BrowserQueue()
+        queue.queue([queueEntry("a"), queueEntry("b"), queueEntry("c")])
+        queue.record(.confirmed, for: "domain:a")
+        queue.record(.couldNotUnsubscribe, for: "domain:b")
+        queue.record(.abandoned, for: "domain:c")
+        eq(queue.confirmedCount, 1, "worked is not the same as unsubscribed")
+        eq(queue.worked.count, 3)
+        eq(queue.pendingCount, 0)
+        expect(BrowserQueue.Outcome.confirmed.isUnsubscribed)
+        expect(!BrowserQueue.Outcome.abandoned.isUnsubscribed)
+        expect(!BrowserQueue.Outcome.couldNotUnsubscribe.isUnsubscribed)
+    }
+
+    Harness.test("leaving part-way keeps the rest") {
+        // AC #5, as a value: stopping is simply not recording anything more.
+        var queue = BrowserQueue()
+        queue.queue((0 ..< 5).map { queueEntry("s\($0)") })
+        queue.record(.confirmed, for: "domain:s0")
+        queue.record(.abandoned, for: "domain:s1")
+        eq(queue.pending.map(\.groupKey), ["domain:s2", "domain:s3", "domain:s4"])
+        eq(queue.next?.groupKey, "domain:s2")
+    }
+
+    Harness.test("the queue survives being written down and read back") {
+        var queue = BrowserQueue()
+        queue.queue([queueEntry("a", reason: .ignoredAnUnsubscribe), queueEntry("b")])
+        queue.record(.couldNotUnsubscribe, for: "domain:a", at: Date(timeIntervalSince1970: 1))
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let read = try! decoder.decode(BrowserQueue.self, from: try! encoder.encode(queue))
+        eq(read.entries.map(\.groupKey), ["domain:a", "domain:b"])
+        eq(read.entry(for: "domain:a")?.outcome, .couldNotUnsubscribe)
+        eq(read.entry(for: "domain:a")?.reason, .ignoredAnUnsubscribe)
+        eq(read.next?.groupKey, "domain:b")
+    }
+
+    Harness.test("removing takes a sender out without working them") {
+        var queue = BrowserQueue()
+        queue.queue([queueEntry("a"), queueEntry("b")])
+        expect(queue.remove("domain:a"))
+        eq(queue.entries.map(\.groupKey), ["domain:b"])
+        expect(!queue.remove("domain:a"), "and removing it again changes nothing")
+        queue.clear()
+        expect(queue.isEmpty)
+    }
+}
+
+Harness.suite("Who needs a browser") {
+    // AC #1's other half: the set is decided from stored headers and the
+    // unsubscribe record, so it is knowable before anything is attempted.
+    Harness.test("a sender with no published target needs a browser") {
+        eq(
+            BrowserQueue.reason(for: queueGroup(unsub: nil), hasReappeared: false),
+            .noPublishedTarget)
+    }
+
+    Harness.test("a sender who ignored an unsubscribe needs a browser") {
+        eq(
+            BrowserQueue.reason(for: queueGroup(), hasReappeared: true),
+            .ignoredAnUnsubscribe)
+    }
+
+    Harness.test("a bare mailto to an alias we can't send as needs a browser") {
+        // The case the engine already refuses to guess at: sending from the
+        // wrong identity is a request that quietly goes nowhere.
+        let group = queueGroup(unsub: "<mailto:unsub@ex.com>")
+        eq(
+            BrowserQueue.reason(
+                for: group, hasReappeared: false, canSendAsDeliveredAddress: false),
+            .wrongDeliveryAddress)
+        expect(
+            BrowserQueue.reason(for: group, hasReappeared: false) == nil,
+            "and not when the account can send as that address")
+        // A mailto carrying a per-recipient token identifies you without the
+        // From address, so it is not this case.
+        expect(
+            BrowserQueue.reason(
+                for: queueGroup(unsub: "<mailto:unsub@ex.com?subject=stop-a1b2>"),
+                hasReappeared: false, canSendAsDeliveredAddress: false) == nil)
+    }
+
+    Harness.test("a sender something automated can still finish does not") {
+        expect(BrowserQueue.reason(for: queueGroup(), hasReappeared: false) == nil)
+        expect(
+            BrowserQueue.reason(for: queueGroup(oneClick: true), hasReappeared: false) == nil)
+    }
+
+    Harness.test("no target beats every other reason") {
+        // Whatever else is true of them, there is nothing to send.
+        eq(
+            BrowserQueue.reason(
+                for: queueGroup(unsub: nil), hasReappeared: true,
+                canSendAsDeliveredAddress: false),
+            .noPublishedTarget)
+    }
+
+    Harness.test("the needs_browser filter and the queue agree about who qualifies") {
+        // One definition, so an agent cannot select a set with list_senders that
+        // queue_for_browser then declines.
+        let store = try! MessageStore.inMemory()
+        try! store.upsert([
+            mcpMessage(1, from: "None <a@none.com>", unsub: nil),
+            mcpMessage(2, from: "Fine <b@fine.com>"),
+        ])
+        let snapshot = try! mcpSnapshot(store)
+        let rows = mcpRows(mcpCall("/mcp/senders/list", snapshot, ["needs_browser": true]))
+        eq(rows.map { $0["id"] as? String }, ["domain:none.com"])
+        for group in snapshot.groups {
+            eq(
+                BrowserQueue.reason(for: group, hasReappeared: snapshot.hasReappeared(group)) != nil,
+                rows.contains { $0["id"] as? String == group.id.storageKey },
+                group.id.storageKey)
+        }
+    }
+}
+
+Harness.suite("The browser queue survives a relaunch") {
+    func temporaryPath() -> String {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("nevermore-queue-\(UUID().uuidString).sqlite").path
+    }
+
+    Harness.test("a half-worked sitting is still there after the store is reopened") {
+        // AC #5 end to end: the user stops, quits, and comes back to the rest.
+        let path = temporaryPath()
+        var queue = BrowserQueue()
+        queue.queue([queueEntry("a"), queueEntry("b"), queueEntry("c")])
+        queue.record(.confirmed, for: "domain:a")
+        do {
+            let store = try! MessageStore(path: path)
+            try! store.setBrowserQueue(queue)
+        }
+        let reopened = try! MessageStore(path: path)
+        let read = reopened.browserQueue()
+        eq(read.count, 3)
+        eq(read.pending.map(\.groupKey), ["domain:b", "domain:c"])
+        eq(read.entry(for: "domain:a")?.outcome, .confirmed)
+        eq(read.entry(for: "domain:b")?.reason, .noPublishedTarget)
+    }
+
+    Harness.test("a fresh mailbox has an empty queue") {
+        expect(try! MessageStore.inMemory().browserQueue().isEmpty)
+    }
+
+    Harness.test("clearing the queue acts on nothing") {
+        let store = try! MessageStore.inMemory()
+        try! store.upsert([mcpMessage(1, from: "A <a@acme.com>")])
+        try! store.setBrowserQueue(BrowserQueue(entries: [queueEntry("acme.com")]))
+        try! store.clearBrowserQueue()
+        expect(store.browserQueue().isEmpty)
+        eq(try! store.count(), 1, "their messages are untouched")
+        eq(try! store.unsubscribeHistory().count, 0, "and nothing was recorded against them")
+    }
+}
+
+Harness.suite("Browser queue over MCP") {
+    asyncTest("an agent can queue senders without attempting an unsubscribe") {
+        // AC #1. The route's whole job: collect, and touch nothing.
+        let actions = StubActions()
+        let response = await mcpWrite(
+            "/mcp/browser-queue/add", ["sender_ids": ["domain:a", "domain:b"]], actions: actions)
+        eq(response.statusCode, 200)
+        let json = mcpJSON(response)
+        eq(json["total"] as? Int, 2)
+        eq(json["pending"] as? Int, 2)
+        eq(json["confirmed"] as? Int, 0)
+        eq(await actions.verbs(), ["queue_for_browser"], "and nothing else was called")
+        expect(
+            !(await actions.verbs()).contains("unsubscribe"),
+            "queueing is not an unsubscribe")
+    }
+
+    asyncTest("queueing reports per sender, including the ones already waiting") {
+        let actions = StubActions()
+        _ = await mcpWrite("/mcp/browser-queue/add", ["sender_id": "domain:a"], actions: actions)
+        let again = await mcpWrite(
+            "/mcp/browser-queue/add", ["sender_ids": ["domain:a", "domain:b"]], actions: actions)
+        let results = mcpRows(again, "results")
+        eq(results.count, 2)
+        eq(results.first?["applied"] as? Bool, false)
+        eq(results.last?["applied"] as? Bool, true)
+        eq(mcpJSON(again)["total"] as? Int, 2, "and no duplicate row was added")
+    }
+
+    asyncTest("queueing nothing is refused with a pointer to the filter") {
+        let actions = StubActions()
+        let response = await mcpWrite("/mcp/browser-queue/add", [:], actions: actions)
+        eq(response.statusCode, 400)
+        expect(
+            String(decoding: response.body, as: UTF8.self).contains("needs_browser"),
+            "the refusal says where the set comes from")
+        eq(await actions.verbs(), [], "and never reached the app")
+    }
+
+    asyncTest("an agent can read progress but cannot make any") {
+        // AC #4, and the point of the whole feature. The human's answers arrive
+        // through the sheet; every route on the surface is driven here and the
+        // queue is unchanged by all of them.
+        let actions = StubActions()
+        _ = await mcpWrite(
+            "/mcp/browser-queue/add", ["sender_ids": ["domain:a", "domain:b"]], actions: actions)
+        await actions.humanRecords(.confirmed, for: "domain:a")
+
+        let status = mcpJSON(await mcpWrite("/mcp/browser-queue/status", actions: actions))
+        eq(status["total"] as? Int, 2)
+        eq(status["pending"] as? Int, 1)
+        eq(status["confirmed"] as? Int, 1)
+        let entries = (status["entries"] as? [[String: Any]]) ?? []
+        eq(entries.first?["state"] as? String, "confirmed")
+        eq(entries.last?["state"] as? String, "pending")
+        eq(entries.last?["reason"] as? String, "no_published_target")
+
+        // Every write route, with every argument that might plausibly be read as
+        // "and mark it done".
+        for path in MCPWriteRoutes.paths.sorted() where path != "/mcp/browser-queue/add" {
+            _ = await mcpWrite(
+                path,
+                [
+                    "sender_id": "domain:b", "sender_ids": ["domain:b"], "outcome": "confirmed",
+                    "state": "confirmed", "confirmed": true, "classification": "x", "reason": "y",
+                    "mode": "keep_as_one", "senders": [["sender_id": "domain:b", "reason": "y"]],
+                ],
+                actions: actions)
+        }
+        eq(await actions.queue().pendingCount, 1, "nothing an agent can call worked an entry")
+        eq(await actions.queue().entry(for: "domain:b")?.outcome, nil)
+    }
+
+    Harness.test("there is no route that advances the queue") {
+        // Structural, not a policy: the only two paths are add and status.
+        eq(
+            MCPWriteRoutes.paths.filter { $0.hasPrefix("/mcp/browser-queue") }.sorted(),
+            ["/mcp/browser-queue/add", "/mcp/browser-queue/status"])
+        for tool in MCPToolCatalog.tools where tool.path.hasPrefix("/mcp/browser-queue") {
+            for forbidden in ["advance", "next", "complete", "record", "open", "confirm"] {
+                expect(
+                    !tool.name.contains(forbidden),
+                    "\(tool.name) reads as a verb that works the queue")
+            }
+        }
+        // And the tool descriptions say so, since a client may show only one.
+        for name in ["queue_for_browser", "get_browser_queue"] {
+            let tool = MCPToolCatalog.tool(named: name)
+            expect(tool != nil, name)
+            expect(
+                tool?.description.contains("no tool") ?? false,
+                "\(name) does not say that no tool advances the queue")
+        }
+    }
+
+    Harness.test("queueing is unattended, and is not a way to unsubscribe") {
+        expect(MCPWriteRoutes.unattendedTools.contains("queue_for_browser"))
+        expect(MCPWriteRoutes.unattendedTools.contains("get_browser_queue"))
+        expect(!MCPWriteRoutes.confirmedTools.contains("queue_for_browser"))
+        expect(!MCPWriteRoutes.policy.batchUnsubscribeAvailable)
+    }
+
+    Harness.test("every browser-queue answer says nothing was sent") {
+        let queue = BrowserQueue(entries: [queueEntry("a")])
+        for status in [
+            AgentBrowserQueueStatus(queue: queue),
+            AgentBrowserQueueStatus(queue: queue, note: "Queued 1 sender."),
+        ] {
+            expect(status.note.contains("Queueing sends nothing"), "the note is always there")
+            expect(status.note.contains("confirmed"), "and says which state means unsubscribed")
+        }
     }
 }
 

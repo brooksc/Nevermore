@@ -118,6 +118,20 @@ struct AppCommands: Commands {
                 .disabled(model.selection.isEmpty)
             }
             Divider()
+            // The browser queue (TASK-47). Filling it is ordinary triage — it
+            // sends nothing — and working it is a sitting, not a per-sender
+            // action, which is why it isn't tied to the selection.
+            Button("Add to Browser Queue") { model.queueSelectionForBrowser() }
+                .disabled(model.selection.isEmpty)
+                .help("Collect senders that need a browser, to work through later.")
+            Button("Work the Browser Queue…") { workBrowserQueue() }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+                .disabled(model.browserQueue.pendingCount == 0)
+                .help(
+                    model.browserQueue.pendingCount == 0
+                        ? "No senders are waiting for a browser."
+                        : "Open the \(model.browserQueue.pendingCount) senders waiting, one after another.")
+            Divider()
             Button("Forget Unsubscribe Record") { model.forget(model.selection) }
                 .disabled(!model.can(.forget))
                 .help(model.reason(.forget) ?? "")
@@ -163,10 +177,15 @@ struct AppCommands: Commands {
     private func unsubscribeAndDeleteSelected() {
         NotificationCenter.default.post(name: .unsubscribeAndDeleteSelected, object: nil)
     }
+
+    private func workBrowserQueue() {
+        NotificationCenter.default.post(name: .workBrowserQueue, object: nil)
+    }
 }
 
 extension Notification.Name {
     static let unsubscribeSelected = Notification.Name("nevermore.unsubscribeSelected")
     static let unsubscribeAndDeleteSelected = Notification.Name(
         "nevermore.unsubscribeAndDeleteSelected")
+    static let workBrowserQueue = Notification.Name("nevermore.workBrowserQueue")
 }

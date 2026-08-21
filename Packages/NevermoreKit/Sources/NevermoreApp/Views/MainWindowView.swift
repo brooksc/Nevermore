@@ -64,6 +64,12 @@ struct MainWindowView: View {
         .onReceive(NotificationCenter.default.publisher(for: .unsubscribeAndDeleteSelected)) { _ in
             beginUnsubscribeAndDelete(model.selection)
         }
+        // Start a browser-queue sitting (TASK-47). The same sheet, opened on the
+        // first sender waiting; it walks the rest itself rather than coming back
+        // here between each one.
+        .onReceive(NotificationCenter.default.publisher(for: .workBrowserQueue)) { _ in
+            manualTarget = model.nextBrowserTarget()
+        }
         // An agent asked to unsubscribe from one sender (TASK-46). It gets the
         // same confirm sheet a keystroke would, and the same chance to be told
         // no — the MCP route has already answered "awaiting confirmation" and

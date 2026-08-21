@@ -29,6 +29,27 @@ struct StatusBarView: View {
     }
 
     private var leading: some View {
+        HStack(spacing: 10) {
+            counts
+            // The browser queue is worked from here or from the Actions menu.
+            // A queue an agent filled while the user was elsewhere needs
+            // somewhere to be visible, and the status bar is where the app
+            // already says what is outstanding (TASK-47).
+            if model.browserQueue.pendingCount > 0 {
+                Button {
+                    NotificationCenter.default.post(name: .workBrowserQueue, object: nil)
+                } label: {
+                    Label(
+                        "\(model.browserQueue.pendingCount) need a browser",
+                        systemImage: "hand.raised")
+                }
+                .buttonStyle(.link)
+                .help("Work through the senders that need a browser, one after another.")
+            }
+        }
+    }
+
+    private var counts: some View {
         Group {
             // Counted against the visible list, not the raw selection: the count
             // used to describe rows from whichever collection they were clicked
