@@ -436,8 +436,12 @@ public enum MCPRoutes {
 
     /// A sender needs a human in a browser when nothing automated is left to
     /// try: no machine-readable target, or they already ignored one attempt.
+    ///
+    /// Answered by `BrowserQueue`, which is also what decides who goes into the
+    /// queue (TASK-47). One definition, so the filter an agent selects with and
+    /// the set it can queue cannot disagree.
     static func needsBrowser(_ group: SenderGroup, _ snapshot: MCPSnapshot) -> Bool {
-        UnsubscribeMethod.of(group).needsBrowser || snapshot.hasReappeared(group)
+        BrowserQueue.reason(for: group, hasReappeared: snapshot.hasReappeared(group)) != nil
     }
 
     static func contexts(_ snapshot: MCPSnapshot) -> [String] {

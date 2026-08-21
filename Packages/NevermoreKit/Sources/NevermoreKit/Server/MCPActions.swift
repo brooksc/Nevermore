@@ -289,6 +289,87 @@ public struct AgentProposalStatus: Sendable, Encodable, Equatable {
     }
 }
 
+/// One sender in the browser queue, as an agent sees it (TASK-47).
+public struct AgentBrowserQueueEntry: Sendable, Encodable, Equatable {
+    public let senderId: String
+    public let senderName: String
+    public let senderEmail: String
+    /// Why nothing automated can finish this sender.
+    public let reason: String
+    public let reasonDetail: String
+    /// `pending`, or the outcome the human recorded.
+    public let state: String
+    public let queuedAt: String
+    public let completedAt: String?
+
+    public init(entry: BrowserQueue.Entry) {
+        self.senderId = entry.groupKey
+        self.senderName = entry.senderName
+        self.senderEmail = entry.senderEmail
+        self.reason = entry.reason.rawValue
+        self.reasonDetail = entry.reason.explanation
+        self.state = entry.outcome?.rawValue ?? AgentBrowserQueueStatus.pending
+        self.queuedAt = MCPRoutes.iso(entry.queuedAt)
+        self.completedAt = entry.completedAt.map(MCPRoutes.iso)
+    }
+}
+
+/// The browser queue and how far through it the human is.
+///
+/// The answer to both queueing and asking, so an agent reads one shape either
+/// way. It is also the *only* thing an agent gets: there is no route that
+/// advances the queue, opens the sheet, or answers on the human's behalf, and
+/// that is the point of the feature rather than a gap in it (TASK-41). The web
+/// page belongs to a third party, the click is a person's, and an agent that
+/// could drive it would be unsubscribing on its own say-so through a different
+/// door than the one `ReviewToken` locks.
+public struct AgentBrowserQueueStatus: Sendable, Encodable, Equatable {
+    public static let pending = "pending"
+
+    public let total: Int
+    public let pending: Int
+    /// How many the human worked and confirmed. Never the same as `total -
+    /// pending`: an entry can be worked and still not be unsubscribed.
+    public let confirmed: Int
+    public let entries: [AgentBrowserQueueEntry]
+    /// What this call did, when it was a queueing call. Per sender, including
+    /// the ones that were skipped and why.
+    public let results: [AgentSenderResult]
+    public let note: String
+
+    public init(
+        total: Int, pending: Int, confirmed: Int, entries: [AgentBrowserQueueEntry],
+        results: [AgentSenderResult] = [], note: String
+    ) {
+        self.total = total
+        self.pending = pending
+        self.confirmed = confirmed
+        self.entries = entries
+        self.results = results
+        self.note = note
+    }
+
+    /// Every response says the same two things, because an agent may only ever
+    /// see one of them: nothing has been sent, and you cannot work this queue.
+    public static let humanOnlyNote =
+        "Queueing sends nothing and tells the sender nothing — these entries are a to-do list for "
+        + "the person at the keyboard, who opens each sender's page in Nevermore and says what "
+        + "happened. There is no tool that advances this queue, opens the browser or records an "
+        + "outcome, and there will not be one: the click is a human's. Poll this tool to see how "
+        + "far they have got. `confirmed` is the only state that means unsubscribed; "
+        + "`could_not_unsubscribe` and `abandoned` mean the sender is still mailing."
+
+    public init(queue: BrowserQueue, results: [AgentSenderResult] = [], note: String? = nil) {
+        self.init(
+            total: queue.count,
+            pending: queue.pendingCount,
+            confirmed: queue.confirmedCount,
+            entries: queue.entries.map(AgentBrowserQueueEntry.init),
+            results: results,
+            note: note.map { "\($0) \(Self.humanOnlyNote)" } ?? Self.humanOnlyNote)
+    }
+}
+
 /// A write's answer: a result to serialise, or a refusal with an HTTP status.
 ///
 /// The two are distinct because an agent reads them differently. A refusal is
@@ -299,6 +380,7 @@ public enum AgentActionOutcome: Sendable {
     case result(AgentActionResult)
     case proposal(AgentProposalResult)
     case status(AgentProposalStatus)
+    case browserQueue(AgentBrowserQueueStatus)
     case refusal(message: String, code: Int)
 }
 
@@ -340,6 +422,12 @@ public protocol MCPActions: Sendable {
     func requestUnsubscribe(senderId: String) async -> AgentActionOutcome
     /// Destructive, and so always confirmed by a human first.
     func requestTrash(senderId: String) async -> AgentActionOutcome
+    /// Put senders that need a browser on the human's list, without attempting
+    /// anything (TASK-47). A batch, unlike unsubscribing: queueing is inert.
+    func queueForBrowser(senderIds: [String]) async -> AgentActionOutcome
+    /// Read the queue and how far through it the human is. There is deliberately
+    /// no counterpart that advances it.
+    func browserQueueStatus() async -> AgentActionOutcome
     func setIgnored(_ ignored: Bool, senderIds: [String]) async -> AgentActionOutcome
     func setClassification(
         senderId: String, classification: String, reason: String, context: String?

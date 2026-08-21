@@ -295,6 +295,7 @@ Standard `Undo ⌘Z` / `Redo ⇧⌘Z` / Cut / Copy / Paste · `Select All ⌘A` 
 `Unsubscribe ⌘U` · `Unsubscribe and Delete… ⇧⌘U` ·
 `Ignore Sender ⌘I` · `Unignore ⇧⌘I` ·
 `Move Messages to Trash… ⌘⌫` ·
+`Add to Browser Queue` · `Work the Browser Queue… ⇧⌘B` ·
 `Forget Unsubscribe Record` ·
 `Merge with…` · `Split by Address` ·
 `View in Gmail ⌘G`
@@ -313,7 +314,8 @@ Enter Full Screen
 ### Shortcut summary
 
 `⌘R` sync · `⌘U` unsubscribe · `⇧⌘U` unsubscribe + delete · `⌘I` ignore ·
-`⌘⌫` trash · `⌘G` view in Gmail · `⌘F` search · `⌘1`–`⌘5` collections ·
+`⌘⌫` trash · `⇧⌘B` work the browser queue · `⌘G` view in Gmail · `⌘F` search ·
+`⌘1`–`⌘5` collections ·
 `⌘Z` undo · `⌥⌘S` sidebar · `⌥⌘I` inspector · `⌘,` settings
 
 Never override standard shortcuts. `⌘⌫` for trash matches Finder.
@@ -395,6 +397,29 @@ and offer to mark the result **Confirmed**.
 
 Privacy: use a non-persistent data store so unsubscribe pages can't read or
 write cookies belonging to the user's real browser session.
+
+Every exit that records a confirmed unsubscribe ends in an in-sheet result step
+naming the backlog — `Delete N Messages` / `Keep Messages`, or `Trash and
+Ignore` when the sender is one that already ignored an unsubscribe. The offer
+used to degrade to a twelve-second status-bar toast on the path people actually
+take (the auto-detected confirmation banner), which is the path where they are
+least likely to see it.
+
+### 9.5.1 The browser queue
+
+Senders that nothing automated can finish are collected into a queue and worked
+in one sitting: the sheet records each answer and loads the next sender instead
+of closing. Who belongs is decided from the stored headers, the unsubscribe
+record and the account's send-as addresses — never by trying and seeing what
+fails — so a queue of thirty can be built before anything is attempted.
+
+Filled by `Actions ▸ Add to Browser Queue`, or by an agent over MCP; worked from
+`Actions ▸ Work the Browser Queue… ⇧⌘B` or the status bar's *"N need a browser"*.
+Each sender ends as **confirmed**, **couldn't unsubscribe** or **abandoned** —
+`Skip This One` is answering about that sender, `Stop for Now` leaves the rest
+pending for a later sitting. An agent can fill the queue and read how far
+through it the user has got; it cannot open a page, advance the queue or record
+an outcome, and there is no tool that does.
 
 ### 9.6 Trash confirmation
 

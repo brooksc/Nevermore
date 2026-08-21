@@ -662,6 +662,52 @@ public final class MessageStore: Sendable {
         }
     }
 
+    // MARK: - Browser queue
+
+    private static let browserQueueKey = "browserQueue"
+
+    /// The senders waiting for a human in a browser (TASK-47).
+    ///
+    /// Persisted for the same reason the proposal is, and in the same place: a
+    /// queue that a relaunch emptied would fail the one thing it promises —
+    /// that stopping part-way keeps the rest for later. Per-account, and it dies
+    /// with the account, because it names that mailbox's senders.
+    public func browserQueue() -> BrowserQueue {
+        let raw = try? pool.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT value FROM syncState WHERE key = ?",
+                arguments: [Self.browserQueueKey])
+        }
+        guard let value = raw ?? nil, let data = value.data(using: .utf8) else {
+            return BrowserQueue()
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        return (try? decoder.decode(BrowserQueue.self, from: data)) ?? BrowserQueue()
+    }
+
+    public func setBrowserQueue(_ queue: BrowserQueue) throws {
+        guard !queue.isEmpty else { return try clearBrowserQueue() }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let json = String(decoding: try encoder.encode(queue), as: UTF8.self)
+        try pool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO syncState (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                arguments: [Self.browserQueueKey, json])
+        }
+    }
+
+    public func clearBrowserQueue() throws {
+        try pool.write { db in
+            try db.execute(
+                sql: "DELETE FROM syncState WHERE key = ?", arguments: [Self.browserQueueKey])
+        }
+    }
+
     /// A persisted set of strings under `key`. Best-effort — used for
     /// bookkeeping (e.g. which reappeared senders have already been notified).
     public func stringSet(forKey key: String) -> Set<String> {

@@ -58,6 +58,11 @@ final class AppModel {
     /// agent's session and the review session are naturally hours apart.
     private(set) var proposal: SenderProposal?
 
+    /// The senders waiting for a human in a browser (TASK-47). Read from the
+    /// account's store on every reload, like the proposal: a sitting that was
+    /// left half-finished has to still be there tomorrow.
+    private(set) var browserQueue = BrowserQueue()
+
     // MARK: - UI state
 
     /// Switching collections clears the selection. Every collection shows the
@@ -197,6 +202,7 @@ final class AppModel {
         reauthAccount = nil
         groups = []
         proposal = nil
+        browserQueue = BrowserQueue()
         selection = []
         do {
             store = try MessageStore(path: registry.demoDatabasePath)
@@ -224,6 +230,7 @@ final class AppModel {
         backend = nil
         groups = []
         proposal = nil
+        browserQueue = BrowserQueue()
         selection = []
         syncState = .idle
         lastSyncedAt = nil
@@ -361,6 +368,7 @@ final class AppModel {
 
         groups = []
         proposal = nil
+        browserQueue = BrowserQueue()
         selection = []
         ignoredKeys = []
         history = [:]
@@ -708,6 +716,7 @@ final class AppModel {
         backend = nil
         groups = []
         proposal = nil
+        browserQueue = BrowserQueue()
         selection = []
         currentAccount = email
         await publishMCPContext()
@@ -725,6 +734,7 @@ final class AppModel {
             backend = nil
             groups = []
             proposal = nil
+            browserQueue = BrowserQueue()
             await publishMCPContext()
             if let next = currentAccount { await open(account: next) }
         }
@@ -747,6 +757,7 @@ final class AppModel {
             ignoredKeys = try store.ignoredGroupKeys()
             history = try store.unsubscribeHistory()
             proposal = store.proposal()
+            browserQueue = store.browserQueue()
             hasLoadedOnce = true
             pruneSelection()
         } catch {
@@ -1737,11 +1748,33 @@ final class AppModel {
         let url: URL
         /// True when this is an escalation after an automated attempt failed to stick.
         let isEscalation: Bool
+        /// How many of this sender's messages are still in the mailbox — the
+        /// backlog the delete offer names once the unsubscribe is confirmed
+        /// (TASK-23). Zero means there is nothing to offer.
+        let messageCount: Int
+        /// Where this sender sits in the browser queue, when it came from one.
+        /// Nil for a one-off manual unsubscribe started from the sender list.
+        let queue: QueuePosition?
+    }
+
+    /// One sender's place in a browser-queue sitting.
+    struct QueuePosition: Equatable {
+        /// One-based, counted over the whole queue so the total doesn't shrink
+        /// as the user works through it.
+        let index: Int
+        let total: Int
+        /// How many are still waiting once this one is answered.
+        let remaining: Int
+        let reason: BrowserReason
     }
 
     /// Build a manual-unsubscribe target for a sender, or nil if there's no web
     /// page to open (e.g. a mailto:-only sender, which can't be done in a browser).
-    func manualTarget(for id: GroupID) -> ManualUnsubscribe? {
+    ///
+    /// `queue` is the queue this target's position should be read from, which is
+    /// the stored one except while `nextBrowserTarget` is working past entries
+    /// it has just retired.
+    func manualTarget(for id: GroupID, in queue: BrowserQueue? = nil) -> ManualUnsubscribe? {
         // The manual flow loads a sender-published URL in a real web view. The
         // demo's senders are invented, so their URLs point at domains we don't
         // own — loading one would send a live request somewhere arbitrary.
@@ -1751,9 +1784,13 @@ final class AppModel {
                 undoLabel: nil, undo: nil)
             return nil
         }
-        guard let group = self.group(for: id), let source = group.unsubscribeSource else {
-            return nil
-        }
+        guard let group = self.group(for: id) else { return nil }
+        // The message carrying the unsubscribe header when there is one, and the
+        // newest message otherwise. Senders who published no header at all are
+        // the largest cohort in the browser queue — this used to return nil for
+        // exactly them, so the one flow that could have finished them refused to
+        // open.
+        guard let source = group.unsubscribeSource ?? group.latest else { return nil }
         // Prefer the published web link; fall back to the provider's webmail
         // search so "manual" always has somewhere to go.
         let url = source.unsubscribe?.webTargets.first
@@ -1765,7 +1802,21 @@ final class AppModel {
             name: group.displayName,
             deliveredTo: source.deliveredTo,
             url: url,
-            isEscalation: hasPriorAttempt(id))
+            isEscalation: hasPriorAttempt(id),
+            messageCount: group.messages.count,
+            queue: queuePosition(of: id, in: queue ?? browserQueue))
+    }
+
+    private func queuePosition(of id: GroupID, in queue: BrowserQueue) -> QueuePosition? {
+        let key = id.storageKey
+        guard let entry = queue.entry(for: key), entry.isPending,
+            let index = queue.position(of: key)
+        else { return nil }
+        return QueuePosition(
+            index: index,
+            total: queue.count,
+            remaining: queue.pendingCount - 1,
+            reason: entry.reason)
     }
 
     /// Record the result of a manual browser unsubscribe and drop the sender.
@@ -1804,6 +1855,125 @@ final class AppModel {
         // Suppress the "Delete N Messages" offer: the user just chose it.
         recordManual(id, confirmed: true, offerDelete: false)
         Task { await trash([id]) }
+    }
+
+    // MARK: - Browser queue (TASK-47)
+
+    /// Why this sender needs a person in a browser, or nil when something
+    /// automated can still be tried.
+    ///
+    /// The send-as knowledge lives here rather than in the group, which is why
+    /// this wrapper exists: a bare `mailto:` delivered to an alias this account
+    /// cannot send from is a browser job, and only the model knows that.
+    func browserReason(for id: GroupID) -> BrowserReason? {
+        guard let group = self.group(for: id) else { return nil }
+        let deliveredTo = group.unsubscribeSource?.deliveredTo ?? ""
+        let canSendAs =
+            deliveredTo.isEmpty || deliveredTo == currentAccount
+            || sendAsFrom(for: deliveredTo) != nil
+        return BrowserQueue.reason(
+            for: group, hasReappeared: isReappeared(group), canSendAsDeliveredAddress: canSendAs)
+    }
+
+    /// Put a sender on the browser queue. Returns false when they don't need a
+    /// browser, aren't in the mailbox, or are already waiting.
+    ///
+    /// Queueing attempts nothing. That is the whole point: the set is decided
+    /// from stored headers and the unsubscribe record, so thirty senders can be
+    /// collected up front rather than discovered one failure at a time.
+    @discardableResult
+    func queueForBrowser(_ id: GroupID) -> Bool {
+        guard let group = self.group(for: id), let reason = browserReason(for: id) else {
+            return false
+        }
+        var queue = browserQueue
+        let queued = queue.queue(
+            BrowserQueue.Entry(
+                groupKey: id.storageKey,
+                senderName: group.displayName,
+                senderEmail: group.latest?.sender.address ?? id.key,
+                reason: reason))
+        guard queued else { return false }
+        setBrowserQueue(queue)
+        Log.app.event("queued \(id.key) for the browser: \(reason.rawValue)")
+        return true
+    }
+
+    /// The next sender to put in front of the user, or nil when the sitting is
+    /// done. Skips entries whose sender has since left the mailbox — a queue
+    /// built yesterday can name senders that were trashed this morning.
+    func nextBrowserTarget() -> ManualUnsubscribe? {
+        guard !isDemoMode else { return nil }
+        var queue = browserQueue
+        var target: ManualUnsubscribe?
+        while let entry = queue.next {
+            if let id = GroupID(storageKey: entry.groupKey),
+                let found = manualTarget(for: id, in: queue)
+            {
+                target = found
+                break
+            }
+            // Nothing left to open for this one — the sender's mail is gone, or
+            // there is no page to send anyone to. Record it rather than dropping
+            // it silently: an entry that vanished with no outcome would read as
+            // one the user had dealt with.
+            queue.record(.couldNotUnsubscribe, for: entry.groupKey)
+        }
+        if queue != browserQueue { setBrowserQueue(queue) }
+        return target
+    }
+
+    /// Record what the user said about a queued sender.
+    ///
+    /// Only `confirmed` and `couldNotUnsubscribe` write an unsubscribe record —
+    /// `abandoned` means they looked and moved on, and inventing an attempt from
+    /// that would put a sender into Unsubscribed nobody unsubscribed from.
+    func recordBrowserOutcome(_ id: GroupID, _ outcome: BrowserQueue.Outcome) {
+        var queue = browserQueue
+        guard queue.record(outcome, for: id.storageKey) else { return }
+        setBrowserQueue(queue)
+        Log.app.event("browser queue: \(id.key) — \(outcome.rawValue)")
+    }
+
+    /// Queue everything in the selection that needs a browser, and say what that
+    /// did — including the senders it skipped, which is the answer to "why is my
+    /// queue shorter than my selection".
+    func queueSelectionForBrowser() {
+        let queued = selection.filter { queueForBrowser($0) }.count
+        let skipped = selection.count - queued
+        guard queued > 0 else {
+            showToast(
+                skipped == 1
+                    ? "That sender can still be unsubscribed automatically."
+                    : "None of those \(skipped) senders need a browser.",
+                undoLabel: nil, undo: nil)
+            return
+        }
+        showToast(
+            "Queued \(queued) sender\(queued == 1 ? "" : "s") for the browser"
+                + (skipped > 0 ? " · \(skipped) didn't need one" : ""),
+            undoLabel: nil, undo: nil)
+    }
+
+    /// Take a sender off the queue without working them.
+    func removeFromBrowserQueue(_ id: GroupID) {
+        var queue = browserQueue
+        guard queue.remove(id.storageKey) else { return }
+        setBrowserQueue(queue)
+    }
+
+    /// Throw the whole queue away. The user deciding they are finished with it —
+    /// it is a to-do list, and nothing about a sender changes.
+    func clearBrowserQueue() {
+        guard !browserQueue.isEmpty else { return }
+        browserQueue = BrowserQueue()
+        try? store?.clearBrowserQueue()
+        Log.app.event("cleared the browser queue; no sender was acted on")
+    }
+
+    private func setBrowserQueue(_ queue: BrowserQueue) {
+        browserQueue = queue
+        try? store?.setBrowserQueue(queue)
     }
 
     // MARK: - Toast

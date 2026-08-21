@@ -321,6 +321,49 @@ public enum MCPToolCatalog {
                 """,
             path: "/mcp/senders/unsubscribe"),
 
+        // MARK: - The browser queue (TASK-47)
+
+        MCPToolDefinition(
+            name: "queue_for_browser",
+            description: """
+                Put senders that nothing automated can finish onto the human's \
+                browser queue, which they work through in one sitting. Use \
+                list_senders(needs_browser: true) to find them: the set is knowable \
+                from stored headers before anything is attempted, so there is no \
+                reason to unsubscribe first and queue the failures. Queueing sends \
+                nothing and tells the sender nothing. A sender that does not need a \
+                browser is skipped and said so, per sender. Several at once is fine \
+                here — a queue is a to-do list, not an action. There is no tool that \
+                works the queue: the person opens each page and says what happened, \
+                and get_browser_queue is how you find out.
+                """,
+            schemaJSON: """
+                {
+                  "type": "object",
+                  "properties": {
+                    "sender_ids": {"type": "array", "items": {"type": "string"}, "description": "Ids from list_senders. Senders already waiting are left where they are."},
+                    "sender_id": {"type": "string", "description": "Convenience for a single sender."}
+                  }
+                }
+                """,
+            path: "/mcp/browser-queue/add"),
+
+        MCPToolDefinition(
+            name: "get_browser_queue",
+            description: """
+                The browser queue and how far through it the human has got, per \
+                sender. There is no tool that advances the queue, opens a page or \
+                records an outcome — that click belongs to the person at the \
+                keyboard, by design and permanently. 'confirmed' is the only state \
+                that means the sender was unsubscribed from; 'could_not_unsubscribe' \
+                and 'abandoned' mean they are still mailing, and 'pending' means \
+                nobody has looked yet.
+                """,
+            schemaJSON: """
+                {"type": "object", "properties": {}}
+                """,
+            path: "/mcp/browser-queue/status"),
+
         MCPToolDefinition(
             name: "ignore",
             description: """

@@ -190,6 +190,70 @@ final class AgentActions: MCPActions {
                     + "threshold applies to their own keystrokes, not to yours."))
     }
 
+    // MARK: - The browser queue (TASK-47)
+
+    /// Collect the senders nothing automated can finish, for the human to work
+    /// through in one sitting.
+    ///
+    /// Unattended, and a batch, because it attempts nothing: no request goes
+    /// anywhere, no sender is told anything, and the queue is a list the person
+    /// at the keyboard can ignore entirely. What an agent cannot do is work it —
+    /// there is no verb here that opens the sheet, advances it or records an
+    /// outcome, and the sheet is the only thing that can. That is the same rule
+    /// `ReviewToken` makes for the batch path, made structurally for this one:
+    /// the click on a third party's page belongs to a human.
+    ///
+    /// It does not bring the window forward. A proposal does, because a review
+    /// nobody sees is not a safety mechanism; a to-do list interrupting whatever
+    /// the user was doing is just an interruption.
+    func queueForBrowser(senderIds: [String]) async -> AgentActionOutcome {
+        guard let model else { return Self.gone }
+        var results: [AgentSenderResult] = []
+        var found = 0
+        for senderId in senderIds {
+            guard let id = GroupID(storageKey: senderId), let group = model.group(for: id) else {
+                results.append(
+                    AgentSenderResult(
+                        senderId: senderId, senderName: nil, applied: false,
+                        detail: "No sender with this id in the open mailbox."))
+                continue
+            }
+            found += 1
+            guard let reason = model.browserReason(for: id) else {
+                results.append(
+                    AgentSenderResult(
+                        senderId: id.storageKey, senderName: group.displayName, applied: false,
+                        detail:
+                            "Skipped: this sender can still be unsubscribed from without a browser "
+                            + "(\(NevermoreKit.UnsubscribeMethod.of(group).rawValue)). Queueing "
+                            + "them would send a person to a page for no reason."))
+                continue
+            }
+            let queued = model.queueForBrowser(id)
+            results.append(
+                AgentSenderResult(
+                    senderId: id.storageKey, senderName: group.displayName, applied: queued,
+                    detail: queued
+                        ? reason.explanation
+                        : "Already waiting in the queue; left where it is."))
+        }
+        guard found > 0 else {
+            return .refusal(
+                message: "None of those senders are in the open mailbox.", code: 404)
+        }
+        let added = results.filter(\.applied).count
+        return .browserQueue(
+            AgentBrowserQueueStatus(
+                queue: model.browserQueue,
+                results: results,
+                note: "Queued \(added) sender\(added == 1 ? "" : "s")."))
+    }
+
+    func browserQueueStatus() async -> AgentActionOutcome {
+        guard let model else { return Self.gone }
+        return .browserQueue(AgentBrowserQueueStatus(queue: model.browserQueue))
+    }
+
     // MARK: - Unattended writes
 
     func setIgnored(_ ignored: Bool, senderIds: [String]) async -> AgentActionOutcome {

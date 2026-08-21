@@ -63,6 +63,8 @@ public enum MCPWriteRoutes {
         "/mcp/proposal/create",
         "/mcp/proposal/status",
         "/mcp/senders/unsubscribe",
+        "/mcp/browser-queue/add",
+        "/mcp/browser-queue/status",
         "/mcp/senders/trash",
         "/mcp/senders/ignore",
         "/mcp/senders/unignore",
@@ -79,8 +81,9 @@ public enum MCPWriteRoutes {
     public static let policyPath = "/mcp/policy"
 
     public static let unattendedTools = [
-        "propose_selection", "get_proposal_status", "ignore", "unignore", "set_classification",
-        "start_sync", "set_grouping", "forget_unsubscribe_record", "get_policy",
+        "propose_selection", "get_proposal_status", "queue_for_browser", "get_browser_queue",
+        "ignore", "unignore", "set_classification", "start_sync", "set_grouping",
+        "forget_unsubscribe_record", "get_policy",
     ]
 
     public static let confirmedTools = ["unsubscribe", "trash_sender_messages"]
@@ -131,6 +134,8 @@ public enum MCPWriteRoutes {
         case "/mcp/proposal/create": return respond(await propose(args, actions))
         case "/mcp/proposal/status": return respond(await actions.proposalStatus())
         case "/mcp/senders/unsubscribe": return respond(await unsubscribe(args, actions))
+        case "/mcp/browser-queue/add": return respond(await queueForBrowser(args, actions))
+        case "/mcp/browser-queue/status": return respond(await actions.browserQueueStatus())
         case "/mcp/senders/trash": return respond(await trash(args, actions))
         case "/mcp/senders/ignore": return respond(await setIgnored(true, args, actions))
         case "/mcp/senders/unignore": return respond(await setIgnored(false, args, actions))
@@ -154,6 +159,7 @@ public enum MCPWriteRoutes {
         case let .result(result): MCPRoutes.json(result)
         case let .proposal(result): MCPRoutes.json(result)
         case let .status(status): MCPRoutes.json(status)
+        case let .browserQueue(status): MCPRoutes.json(status)
         case let .refusal(message, code): .error(message, code: code)
         }
     }
@@ -210,6 +216,24 @@ public enum MCPWriteRoutes {
                 message: "unsubscribe needs one sender_id, as returned by list_senders.", code: 400)
         }
         return await actions.requestUnsubscribe(senderId: id)
+    }
+
+    /// A list is allowed here, and that is not an inconsistency with
+    /// `unsubscribe` refusing one. Queueing sends nothing, tells no sender
+    /// anything, and is undone by the human ignoring the list — the thing bulk
+    /// unsubscribe would buy an agent is exactly what this does not do.
+    static func queueForBrowser(_ args: MCPWriteRequest, _ actions: any MCPActions) async
+        -> AgentActionOutcome
+    {
+        let ids = senderList(args)
+        guard !ids.isEmpty else {
+            return .refusal(
+                message:
+                    "queue_for_browser needs sender_ids (or a single sender_id), as returned by "
+                    + "list_senders. list_senders(needs_browser: true) is the set this is for.",
+                code: 400)
+        }
+        return await actions.queueForBrowser(senderIds: ids)
     }
 
     static func trash(_ args: MCPWriteRequest, _ actions: any MCPActions) async

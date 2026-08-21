@@ -287,13 +287,16 @@ POST, plain link, `mailto:`, or nothing machine-readable — which is known from
 the stored headers, so an agent can tell you which senders will need a browser
 without attempting anything.
 
-Eleven write tools, all of them narrow. `propose_selection` is the main one: it
+Thirteen write tools, all of them narrow. `propose_selection` is the main one: it
 fills a **Proposed** collection with up to 25 senders and the agent's one-line
 reason for each, and brings the window forward so you can go through them with
 the same keyboard triage as any other list. `get_proposal_status` tells the
 agent what you did with it. `ignore` / `unignore`, `set_classification`,
 `start_sync`, `set_grouping` and `forget_unsubscribe_record` are local to your
-Mac and run without asking. `unsubscribe` (one sender) and
+Mac and run without asking. `queue_for_browser` collects the senders nothing
+automated can finish into a queue you work through in one sitting, and
+`get_browser_queue` reports how far you have got — the agent fills it and reads
+it; opening a sender's page and saying what happened there is yours. `unsubscribe` (one sender) and
 `trash_sender_messages` put Nevermore's own confirmation in front of you and do
 nothing until you answer. `get_policy` tells the agent all of this up front.
 
