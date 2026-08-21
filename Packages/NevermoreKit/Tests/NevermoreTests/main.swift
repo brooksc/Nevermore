@@ -1135,4 +1135,229 @@ Harness.suite("Mailing list detection") {
     }
 }
 
+// MARK: - Agent decisions about senders
+
+/// The decision records for whichever group in `groups` has this id, as a set of
+/// "address/classification" strings — enough to prove nothing was lost, without
+/// depending on ordering.
+func decisionSummary(
+    _ store: MessageStore, _ groups: [SenderGroup], _ id: GroupID
+) throws -> Set<String> {
+    guard let group = groups.first(where: { $0.id == id }) else { return [] }
+    return Set(try store.decisions(for: group).map { "\($0.address)/\($0.classification)" })
+}
+
+Harness.suite("Sender decisions") {
+    Harness.test("stores classification, reason and context verbatim") {
+        do {
+            let store = try MessageStore.inMemory()
+            let when = Date(timeIntervalSince1970: 1_700_000_000)
+            try store.recordDecision(
+                address: "jobs@recruiter.com",
+                classification: "  Keep While Searching  ",
+                reason: "Sends the only listings worth reading; noisy but useful.",
+                context: "job-search-2026",
+                decidedAt: when)
+            let d = try store.decision(forAddress: "jobs@recruiter.com")
+            // Whitespace and case are the agent's, not ours to tidy.
+            eq(d?.classification, "  Keep While Searching  ")
+            eq(d?.reason, "Sends the only listings worth reading; noisy but useful.")
+            eq(d?.context, "job-search-2026")
+            eq(d?.decidedAt.timeIntervalSince1970, when.timeIntervalSince1970)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("a later decision supersedes the earlier one for that sender") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.recordDecision(
+                address: "a@x.com", classification: "keep", reason: "useful",
+                context: "job-search-2026")
+            try store.recordDecision(
+                address: "a@x.com", classification: "drop", reason: "changed my mind",
+                context: nil)
+            eq(try store.allDecisions().count, 1)
+            eq(try store.decision(forAddress: "a@x.com")?.classification, "drop")
+            expect(try store.decision(forAddress: "a@x.com")?.context == nil, "context cleared")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("addresses match case-insensitively, unlike the agent's text") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.recordDecision(
+                address: "News@Acme.COM", classification: "Keep", reason: "r", context: "C")
+            eq(try store.decision(forAddress: "news@acme.com")?.classification, "Keep")
+            // The context is an opaque label: "C" and "c" are different labels.
+            eq(try store.decisions(inContext: "C").count, 1)
+            eq(try store.decisions(inContext: "c").count, 0)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("query by context is an exact match, not a search") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.recordDecision(
+                address: "a@x.com", classification: "keep", reason: "r1",
+                context: "job-search-2026")
+            try store.recordDecision(
+                address: "b@x.com", classification: "keep", reason: "r2",
+                context: "job-search-2026")
+            try store.recordDecision(
+                address: "c@x.com", classification: "drop", reason: "r3", context: "house-move")
+            try store.recordDecision(
+                address: "d@x.com", classification: "keep", reason: "r4", context: nil)
+
+            eq(
+                Set(try store.decisions(inContext: "job-search-2026").map(\.address)),
+                Set(["a@x.com", "b@x.com"]))
+            eq(try store.decisions(inContext: "house-move").map(\.address), ["c@x.com"])
+            // No prefix, substring or fuzzy matching — the app does not read the
+            // words, it matches the label the agent wrote.
+            eq(try store.decisions(inContext: "job-search").count, 0)
+            eq(try store.decisions(inContext: "job").count, 0)
+            // An unconditional decision belongs to no cohort.
+            eq(try store.decisions(inContext: "").count, 0)
+            eq(try store.decisionContexts(), ["house-move", "job-search-2026"])
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("a decision survives sync deleting and re-adding the messages") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([makeMessage(1, from: "Acme <news@acme.com>")])
+            try store.recordDecision(
+                address: "news@acme.com", classification: "keep", reason: "r",
+                context: "job-search-2026")
+            // A full re-sync: drop the local cache, fetch it again.
+            try store.deleteAllMessages()
+            try store.upsert([makeMessage(2, from: "Acme <news@acme.com>")])
+            eq(try store.decision(forAddress: "news@acme.com")?.classification, "keep")
+            eq(try store.decisions(inContext: "job-search-2026").count, 1)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("decisions persist across reopening the same database") {
+        do {
+            let path = FileManager.default.temporaryDirectory
+                .appendingPathComponent("nm-decisions-\(UUID().uuidString).sqlite").path
+            do {
+                let store = try MessageStore(path: path)
+                try store.recordDecision(
+                    address: "a@x.com", classification: "keep", reason: "r", context: "ctx")
+            }
+            let reopened = try MessageStore(path: path)
+            eq(try reopened.decision(forAddress: "a@x.com")?.reason, "r")
+            // ...and die with the file, which is what account removal and
+            // resetAllState delete. A different account starts with none.
+            let other = try MessageStore.inMemory()
+            expect(try other.allDecisions().isEmpty, "not shared between accounts")
+            for suffix in ["", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(atPath: path + suffix)
+            }
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("forgetting removes one decision, or all of them") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.recordDecision(
+                address: "a@x.com", classification: "keep", reason: "r", context: "ctx")
+            try store.recordDecision(
+                address: "b@x.com", classification: "drop", reason: "r", context: "ctx")
+            try store.forgetDecision(forAddress: "A@X.com")
+            eq(try store.allDecisions().count, 1)
+            try store.forgetAllDecisions()
+            expect(try store.allDecisions().isEmpty, "all forgotten")
+            expect(try store.decisionContexts().isEmpty, "no contexts left")
+        } catch { expect(false, "threw: \(error)") }
+    }
+}
+
+// MARK: - Decisions survive regrouping
+
+// The reason records key on address rather than GroupID: splitByAddress and
+// keepAsOneGroup move a sender between a `domain:` group and an `address:` one,
+// so a GroupID key would silently discard the agent's judgement every time the
+// user regrouped a domain.
+Harness.suite("Decisions survive regrouping") {
+    // Two senders on one registrable domain, with distinct display names so the
+    // automatic grouping has an opinion that the user's rule then overrides.
+    let messages = [
+        makeMessage(1, from: "Acme Deals <deals@acme.com>"),
+        makeMessage(2, from: "Acme Deals <deals@acme.com>"),
+        makeMessage(3, from: "Acme Status <status@acme.com>"),
+    ]
+    let merged = GroupID(kind: .domain, key: "acme.com")
+    let deals = GroupID(kind: .address, key: "deals@acme.com")
+    let status = GroupID(kind: .address, key: "status@acme.com")
+
+    func seeded() throws -> MessageStore {
+        let store = try MessageStore.inMemory()
+        try store.upsert(messages)
+        try store.recordDecision(
+            address: "deals@acme.com", classification: "unsubscribe-later",
+            reason: "Only worth it during the sale.", context: "job-search-2026")
+        try store.recordDecision(
+            address: "status@acme.com", classification: "keep",
+            reason: "Outage notices.", context: nil)
+        return store
+    }
+
+    Harness.test("merged, then split by address") {
+        do {
+            let store = try seeded()
+            // As the user sees it merged: the group rolls up both decisions.
+            let mergedGroups = Grouping(rules: ["acme.com": .merge]).group(messages)
+            eq(
+                try decisionSummary(store, mergedGroups, merged),
+                Set(["deals@acme.com/unsubscribe-later", "status@acme.com/keep"]))
+
+            // splitByAddress: each address group carries away exactly its own.
+            let splitGroups = Grouping(rules: ["acme.com": .split]).group(messages)
+            eq(try decisionSummary(store, splitGroups, deals), Set(["deals@acme.com/unsubscribe-later"]))
+            eq(try decisionSummary(store, splitGroups, status), Set(["status@acme.com/keep"]))
+            eq(try store.allDecisions().count, 2)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("split, then kept as one group") {
+        do {
+            let store = try seeded()
+            let splitGroups = Grouping(rules: ["acme.com": .split]).group(messages)
+            eq(try decisionSummary(store, splitGroups, deals), Set(["deals@acme.com/unsubscribe-later"]))
+
+            // keepAsOneGroup: both decisions roll back up under the domain.
+            let mergedGroups = Grouping(rules: ["acme.com": .merge]).group(messages)
+            eq(
+                try decisionSummary(store, mergedGroups, merged),
+                Set(["deals@acme.com/unsubscribe-later", "status@acme.com/keep"]))
+            eq(try store.allDecisions().count, 2)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("regrouping back and forth loses nothing, including the context") {
+        do {
+            let store = try seeded()
+            for rule in [Grouping.Rule.merge, .split, .merge, .split, .merge] {
+                _ = Grouping(rules: ["acme.com": rule]).group(messages)
+            }
+            eq(try store.allDecisions().count, 2)
+            eq(try store.decisions(inContext: "job-search-2026").map(\.address), ["deals@acme.com"])
+            eq(try store.decision(forAddress: "deals@acme.com")?.reason,
+               "Only worth it during the sale.")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("a group with no decided senders reports none") {
+        do {
+            let store = try seeded()
+            let group = SenderGroup(
+                id: GroupID(kind: .domain, key: "other.com"),
+                messages: [makeMessage(9, from: "Other <hi@other.com>")])
+            expect(try store.decisions(for: group).isEmpty, "nothing decided here")
+        } catch { expect(false, "threw: \(error)") }
+    }
+}
+
 exit(Harness.finish())
