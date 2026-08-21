@@ -69,37 +69,15 @@ struct SenderTableView: View {
         } primaryAction: { ids in
             if let id = ids.first { onDoubleClick(id) }
         }
-        // Single-key triage while the list is focused. j/k move; u/i/d act on the
-        // selection; ? opens the shortcut list. (⌘-shortcuts also work via menus.)
-        .onKeyPress("j") { model.moveSelection(by: 1); return .handled }
-        .onKeyPress("k") { model.moveSelection(by: -1); return .handled }
-        // u unsubscribes; ⇧U unsubscribes *and* trashes with no confirmation —
-        // the full-speed triage stroke. Recoverable via the provider's Trash
-        // and ⌘Z, which is what makes skipping the confirm defensible.
-        //
-        // One handler taking both cases: the plain `onKeyPress(KeyEquivalent)`
-        // overload doesn't match a shifted key at all, so ⇧U silently did
-        // nothing. This form gets the modifiers. Both cases are listed because
-        // the reported key is "U" or "u" depending on the shift state.
-        .onKeyPress(keys: ["u", "U"]) { press in
-            guard !model.selection.isEmpty else { return .handled }
-            if press.modifiers.contains(.shift) {
-                onUnsubscribeAndDelete(model.selection)
-            } else {
-                onUnsubscribe(model.selection)
-            }
-            return .handled
-        }
-        // Ignore/trash advance to the next row so triage keeps flowing.
-        // v opens the newest message in the browser — read it, then decide.
-        .onKeyPress("v") { model.viewLatestMessage(); return .handled }
-        .onKeyPress("i") { model.ignoreAndAdvance(); return .handled }
-        .onKeyPress("d") { model.trashAndAdvance(); return .handled }
-        .onKeyPress(.init("?")) { model.showShortcuts = true; return .handled }
+        // The one triage keyboard, shared with the other collections.
+        .selectionKeyboard(
+            model: model,
+            onUnsubscribe: onUnsubscribe,
+            onUnsubscribeAndDelete: onUnsubscribeAndDelete)
     }
 
     private var rows: [SenderRow] {
-        model.sortedRows
+        model.visibleRows
     }
 
     @ViewBuilder

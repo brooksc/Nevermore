@@ -9,10 +9,13 @@ import NevermoreKit
 /// published one — a link to their preferences page for re-subscribing.
 struct HistoryView: View {
     @Bindable var model: AppModel
+    var onUnsubscribe: (Set<GroupID>) -> Void
+    var onUnsubscribeAndDelete: (Set<GroupID>) -> Void
+    @FocusState.Binding var isFocused: Bool
 
     var body: some View {
-        let records = model.unsubscribedRecords
-        if records.isEmpty {
+        let rows = model.unsubscribedRows
+        if rows.isEmpty {
             EmptyStateView(
                 systemImage: "checkmark.circle",
                 title: "No unsubscribes yet",
@@ -24,9 +27,20 @@ struct HistoryView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
                     .background(.quaternary.opacity(0.4))
-                List(records) { record in
-                    row(record)
+                // Selection is keyed by the record's GroupID, not the record, so
+                // an Unsubscribed row selects like a sender row anywhere else —
+                // even after the sender's messages are gone and only the record
+                // is left.
+                List(selection: $model.selection) {
+                    ForEach(rows) { entry in
+                        row(entry.record)
+                    }
                 }
+                .focused($isFocused)
+                .selectionKeyboard(
+                    model: model,
+                    onUnsubscribe: onUnsubscribe,
+                    onUnsubscribeAndDelete: onUnsubscribeAndDelete)
             }
         }
     }

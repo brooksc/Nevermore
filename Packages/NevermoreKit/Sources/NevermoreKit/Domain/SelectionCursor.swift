@@ -35,6 +35,21 @@ public enum SelectionCursor {
         return nil
     }
 
+    /// What is left of a selection once the list under it changes.
+    ///
+    /// `collectionChanged` drops everything. A sender that appears in two
+    /// collections is a different decision in each, and carrying the selection
+    /// over is what left the inspector describing a row that wasn't on screen —
+    /// and the status bar counting it. Within one collection the selection is
+    /// kept, minus whatever has since left the list (unsubscribed, ignored,
+    /// trashed, or filtered out by a search).
+    public static func surviving(
+        _ selected: Set<GroupID>, in visible: [GroupID], collectionChanged: Bool
+    ) -> Set<GroupID> {
+        guard !collectionChanged else { return [] }
+        return selected.intersection(visible)
+    }
+
     /// The row j/k should move to.
     ///
     /// Anchors on the edge of the selection you're moving away from — down from

@@ -149,6 +149,18 @@ current selection.
 The selection count drives the toolbar and status bar: *"3 senders selected ·
 214 messages"*.
 
+**One selection model, not one per collection.** Reappeared, Unsubscribed and
+Ignored are lists rather than tables, but they select, navigate and triage
+exactly like this one — same click and `⇧`/`⌘`-click, same `j`/`k`, same
+inspector, same status-bar count. A selection does **not** survive a collection
+switch: a sender means something different in each list, and carrying it over
+left the inspector describing a row that wasn't on screen. Actions that don't
+apply where you are (unsubscribing from Ignored, trashing mail that no longer
+exists) are disabled with the reason as their tooltip rather than silently
+acting on a stale sender. Membership and availability are decided in
+`NevermoreKit`'s `Collection` / `SelectionAction`, so a new collection inherits
+the whole model.
+
 ### Columns
 
 | Column | Default | Content | Sortable |

@@ -4,6 +4,9 @@ import NevermoreKit
 /// Ignored senders (design 1k). A local-only list; nothing is touched on the server.
 struct IgnoredCollectionView: View {
     @Bindable var model: AppModel
+    var onUnsubscribe: (Set<GroupID>) -> Void
+    var onUnsubscribeAndDelete: (Set<GroupID>) -> Void
+    @FocusState.Binding var isFocused: Bool
 
     var body: some View {
         if model.rows.isEmpty {
@@ -25,8 +28,10 @@ struct IgnoredCollectionView: View {
         } else {
             VStack(spacing: 0) {
                 banner("Hidden from your lists on this Mac only — nothing is changed on the server. Right-click to unignore (⇧⌘I).")
-                List {
-                    ForEach(model.rows) { row in
+                // Selectable, like every other collection: same click, same
+                // keyboard, same shared inspector.
+                List(selection: $model.selection) {
+                    ForEach(model.visibleRows) { row in
                         HStack(spacing: 12) {
                             Monogram(text: row.name, diameter: 30)
                             VStack(alignment: .leading, spacing: 1) {
@@ -35,6 +40,8 @@ struct IgnoredCollectionView: View {
                             }
                             Spacer()
                             Text("\(row.count) msgs").font(.callout).foregroundStyle(.secondary)
+                            // Per-row, and deliberately still per-row: it acts on
+                            // the sender you clicked next to, not on the selection.
                             Button("Unignore") { model.unignore([row.id]) }
                                 .controlSize(.small)
                         }
@@ -44,6 +51,11 @@ struct IgnoredCollectionView: View {
                         }
                     }
                 }
+                .focused($isFocused)
+                .selectionKeyboard(
+                    model: model,
+                    onUnsubscribe: onUnsubscribe,
+                    onUnsubscribeAndDelete: onUnsubscribeAndDelete)
             }
         }
     }
@@ -61,7 +73,9 @@ struct IgnoredCollectionView: View {
 struct ReappearedCollectionView: View {
     @Bindable var model: AppModel
     var onUnsubscribe: (Set<GroupID>) -> Void
+    var onUnsubscribeAndDelete: (Set<GroupID>) -> Void
     var onManual: (GroupID) -> Void
+    @FocusState.Binding var isFocused: Bool
 
     var body: some View {
         if model.rows.isEmpty {
@@ -89,11 +103,16 @@ struct ReappearedCollectionView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(Color.orange.opacity(0.08))
 
-                List {
-                    ForEach(model.rows) { sender in
+                List(selection: $model.selection) {
+                    ForEach(model.visibleRows) { sender in
                         row(sender)
                     }
                 }
+                .focused($isFocused)
+                .selectionKeyboard(
+                    model: model,
+                    onUnsubscribe: onUnsubscribe,
+                    onUnsubscribeAndDelete: onUnsubscribeAndDelete)
             }
         }
     }
@@ -119,6 +138,11 @@ struct ReappearedCollectionView: View {
                 Text("\(since) new since unsubscribing")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack(spacing: 8) {
+                    // Read it before deciding: escalate or trash is the hardest
+                    // call in the app, and this was the one list with nothing to
+                    // decide with. Acts on its own row, like the buttons beside it.
+                    Button("View") { model.viewLatestMessage(sender.id) }
+                        .help("Open the latest message from this sender")
                     // Escalate to the browser — retrying the same automated
                     // method that already failed is pointless.
                     Button("Unsubscribe in Browser") { onManual(sender.id) }

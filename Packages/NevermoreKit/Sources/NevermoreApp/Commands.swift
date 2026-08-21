@@ -68,27 +68,37 @@ struct AppCommands: Commands {
         }
 
         // Actions — the app's verbs
+        // Every item disables through the same rule the toolbar and the
+        // single-key shortcuts use, with the reason as its tooltip — an item
+        // that stays live in a collection it can't act in is how ⌘U used to
+        // unsubscribe a sender that wasn't on screen.
         CommandMenu("Actions") {
             Button("Unsubscribe") { unsubscribeSelected() }
                 .keyboardShortcut("u")
-                .disabled(model.selection.isEmpty)
+                .disabled(!model.can(.unsubscribe))
+                .help(model.reason(.unsubscribe) ?? "")
             Button("Unsubscribe and Delete Messages") { unsubscribeAndDeleteSelected() }
                 .keyboardShortcut("u", modifiers: [.command, .shift])
-                .disabled(model.selection.isEmpty)
+                .disabled(!model.can(.unsubscribeAndDelete))
+                .help(model.reason(.unsubscribeAndDelete) ?? "")
             Divider()
             Button("View Latest Message") { model.viewLatestMessage() }
                 .keyboardShortcut("v", modifiers: [.command, .shift])
-                .disabled(model.selection.isEmpty)
+                .disabled(!model.can(.viewLatestMessage))
+                .help(model.reason(.viewLatestMessage) ?? "")
             Divider()
             Button("Ignore Sender") { model.ignore(model.selection) }
                 .keyboardShortcut("i")
-                .disabled(model.selection.isEmpty)
+                .disabled(!model.can(.ignore))
+                .help(model.reason(.ignore) ?? "")
             Button("Unignore") { model.unignore(model.selection) }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
-                .disabled(model.selection.isEmpty)
+                .disabled(!model.can(.unignore))
+                .help(model.reason(.unignore) ?? "")
             Button("Move Messages to Trash…") { model.requestTrash(model.selection) }
                 .keyboardShortcut(.delete, modifiers: .command)
-                .disabled(model.selection.isEmpty)
+                .disabled(!model.can(.trash))
+                .help(model.reason(.trash) ?? "")
             if model.canOpenInWebmail {
                 Button("View in \(model.currentProvider.displayName)") {
                     model.openSelectionInWebmail()
@@ -98,7 +108,8 @@ struct AppCommands: Commands {
             }
             Divider()
             Button("Forget Unsubscribe Record") { model.forget(model.selection) }
-                .disabled(model.selection.isEmpty)
+                .disabled(!model.can(.forget))
+                .help(model.reason(.forget) ?? "")
         }
     }
 

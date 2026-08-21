@@ -1769,4 +1769,171 @@ Harness.suite("MCP token file") {
     }
 }
 
+// MARK: - One selection model for every collection (TASK-27)
+
+Harness.suite("Collection membership") {
+    func state(
+        ignored: Bool = false, unsubscribed: Bool = false,
+        reappeared: Bool = false, messages: Bool = true
+    ) -> SenderState {
+        SenderState(
+            isIgnored: ignored, isUnsubscribed: unsubscribed,
+            hasReappeared: reappeared, hasMessages: messages)
+    }
+
+    Harness.test("a plain sender is in All Senders and nowhere else") {
+        let s = state()
+        eq(Collection.allCases.filter { $0.contains(s) }, [.allSenders])
+    }
+
+    Harness.test("unsubscribing takes a sender out of the working list") {
+        let s = state(unsubscribed: true)
+        expect(!Collection.allSenders.contains(s), "gone from All Senders")
+        expect(Collection.unsubscribed.contains(s), "listed under Unsubscribed")
+        expect(!Collection.reappeared.contains(s), "they haven't mailed again")
+    }
+
+    Harness.test("mailing again moves a sender from Unsubscribed to Reappeared") {
+        let s = state(unsubscribed: true, reappeared: true)
+        expect(Collection.reappeared.contains(s), "Reappeared")
+        expect(!Collection.unsubscribed.contains(s), "and only there — not both")
+    }
+
+    Harness.test("ignoring hides a sender from All Senders and Reappeared") {
+        expect(!Collection.allSenders.contains(state(ignored: true)))
+        expect(!Collection.reappeared.contains(state(ignored: true, unsubscribed: true, reappeared: true)))
+        expect(Collection.ignored.contains(state(ignored: true)))
+    }
+
+    // Inherited behaviour, pinned rather than endorsed: Unsubscribed doesn't
+    // exclude ignored senders, so one that is both is listed twice. Changing it
+    // is a product decision, not part of unifying the selection model.
+    Harness.test("an ignored sender with a record is listed in both archives") {
+        let s = state(ignored: true, unsubscribed: true)
+        eq(Collection.allCases.filter { $0.contains(s) }, [.unsubscribed, .ignored])
+    }
+
+    Harness.test("losing their messages doesn't remove a record from Unsubscribed") {
+        // The point of the durable log: the record outlives the mail.
+        expect(Collection.unsubscribed.contains(state(unsubscribed: true, messages: false)))
+    }
+}
+
+Harness.suite("Selection across collections") {
+    func ids(_ names: [String]) -> [GroupID] { names.map { GroupID(kind: .domain, key: $0) } }
+    func set(_ names: [String]) -> Set<GroupID> { Set(ids(names)) }
+    let list = ids(["a", "b", "c"])
+
+    // The decision recorded for this task: a selection does not survive a
+    // collection switch. It is what fixes the inspector describing a sender the
+    // visible list doesn't contain.
+    Harness.test("switching collections clears the selection outright") {
+        eq(SelectionCursor.surviving(set(["a", "b"]), in: list, collectionChanged: true), [])
+    }
+
+    Harness.test("a sender present in both collections is still dropped") {
+        // "a" is on screen in the new collection too. It still goes: the same
+        // sender is a different decision in each list.
+        eq(SelectionCursor.surviving(set(["a"]), in: list, collectionChanged: true), [])
+    }
+
+    Harness.test("within one collection the selection survives, minus what left") {
+        eq(
+            SelectionCursor.surviving(set(["a", "z"]), in: list, collectionChanged: false),
+            set(["a"]))
+    }
+
+    Harness.test("nothing visible means nothing selected") {
+        eq(SelectionCursor.surviving(set(["a"]), in: [], collectionChanged: false), [])
+    }
+}
+
+Harness.suite("Selection action availability") {
+    func context(_ collection: Collection, count: Int, withMessages: Int? = nil)
+        -> SelectionContext
+    {
+        SelectionContext(
+            collection: collection, count: count, withMessages: withMessages ?? count)
+    }
+    func can(_ action: SelectionAction, _ context: SelectionContext) -> Bool {
+        action.unavailability(in: context) == nil
+    }
+
+    Harness.test("with nothing selected every action says so") {
+        for action in SelectionAction.allCases {
+            eq(
+                action.unavailability(in: context(.allSenders, count: 0)),
+                "Select a sender first.", action.rawValue)
+        }
+    }
+
+    Harness.test("All Senders can do everything except unignore and forget") {
+        let c = context(.allSenders, count: 1)
+        expect(can(.unsubscribe, c))
+        expect(can(.unsubscribeAndDelete, c))
+        expect(can(.viewLatestMessage, c))
+        expect(can(.ignore, c))
+        expect(can(.trash, c))
+        expect(!can(.unignore, c), "they aren't ignored")
+        expect(!can(.forget, c), "there's no record to forget")
+    }
+
+    Harness.test("Ignored offers unignore, and refuses to unsubscribe with a reason") {
+        let c = context(.ignored, count: 2)
+        expect(can(.unignore, c))
+        expect(!can(.ignore, c))
+        eq(
+            SelectionAction.unsubscribe.unavailability(in: c),
+            "Ignored senders are hidden, not unsubscribed. Unignore them first.")
+    }
+
+    Harness.test("Unsubscribed refuses a second unsubscribe and says what to do") {
+        let c = context(.unsubscribed, count: 1)
+        eq(
+            SelectionAction.unsubscribe.unavailability(in: c),
+            "Already unsubscribed. Forget the record to unsubscribe again.")
+        expect(can(.forget, c), "forgetting is the way back")
+    }
+
+    Harness.test("a record whose messages are gone can't be opened or trashed") {
+        // The Unsubscribed row that outlived its mail. These used to be live
+        // controls acting on a sender the app no longer had.
+        let c = context(.unsubscribed, count: 1, withMessages: 0)
+        expect(!can(.trash, c))
+        expect(!can(.viewLatestMessage, c))
+        expect(can(.forget, c), "the record itself is still there")
+    }
+
+    Harness.test("Reappeared can unsubscribe again — that's what it's for") {
+        let c = context(.reappeared, count: 1)
+        expect(can(.unsubscribe, c))
+        expect(can(.unsubscribeAndDelete, c))
+        expect(can(.viewLatestMessage, c), "read it before deciding")
+        expect(can(.trash, c))
+        expect(can(.forget, c))
+    }
+
+    Harness.test("viewing the latest message needs exactly one sender") {
+        eq(
+            SelectionAction.viewLatestMessage.unavailability(
+                in: context(.allSenders, count: 3)),
+            "Select a single sender.")
+    }
+
+    Harness.test("every refusal is a sentence, not an empty string") {
+        // The reason becomes the disabled control's tooltip; a blank one is no
+        // better than the silent no-op this replaced.
+        for collection in Collection.allCases {
+            for action in SelectionAction.allCases {
+                for c in [context(collection, count: 1), context(collection, count: 2, withMessages: 0)] {
+                    guard let reason = action.unavailability(in: c) else { continue }
+                    expect(
+                        reason.count > 10 && reason.hasSuffix("."),
+                        "\(collection.rawValue)/\(action.rawValue): \(reason)")
+                }
+            }
+        }
+    }
+}
+
 exit(Harness.finish())

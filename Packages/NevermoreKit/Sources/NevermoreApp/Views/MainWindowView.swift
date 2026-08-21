@@ -102,12 +102,24 @@ struct MainWindowView: View {
         Group {
             switch model.collection {
             case .ignored:
-                IgnoredCollectionView(model: model)
+                IgnoredCollectionView(
+                    model: model,
+                    onUnsubscribe: beginUnsubscribe,
+                    onUnsubscribeAndDelete: beginUnsubscribeAndDelete,
+                    isFocused: $listFocused)
             case .unsubscribed:
-                HistoryView(model: model)
+                HistoryView(
+                    model: model,
+                    onUnsubscribe: beginUnsubscribe,
+                    onUnsubscribeAndDelete: beginUnsubscribeAndDelete,
+                    isFocused: $listFocused)
             case .reappeared:
                 ReappearedCollectionView(
-                    model: model, onUnsubscribe: beginUnsubscribe, onManual: beginManual)
+                    model: model,
+                    onUnsubscribe: beginUnsubscribe,
+                    onUnsubscribeAndDelete: beginUnsubscribeAndDelete,
+                    onManual: beginManual,
+                    isFocused: $listFocused)
             default:
                 if model.rows.isEmpty {
                     emptyState
@@ -216,25 +228,28 @@ struct MainWindowView: View {
             Button {
                 beginUnsubscribe(model.selection)
             } label: { Image(systemName: "envelope.open") }
-            .help("Unsubscribe from selected")
+            // The tooltip carries the reason when the button is disabled: in the
+            // other collections these buttons used to stay live and act on a
+            // sender that wasn't on screen.
+            .help(model.reason(.unsubscribe) ?? "Unsubscribe from selected")
             .accessibilityLabel("Unsubscribe from Selected Senders")
-            .disabled(model.selection.isEmpty)
+            .disabled(!model.can(.unsubscribe))
         }
         ToolbarItem(placement: .primaryAction) {
             Button { model.ignore(model.selection) } label: {
                 Image(systemName: "eye.slash")
             }
-            .help("Ignore selected")
+            .help(model.reason(.ignore) ?? "Ignore selected")
             .accessibilityLabel("Ignore Selected Senders")
-            .disabled(model.selection.isEmpty)
+            .disabled(!model.can(.ignore))
         }
         ToolbarItem(placement: .primaryAction) {
             Button { model.requestTrash(model.selection) } label: {
                 Image(systemName: "trash")
             }
-            .help("Trash messages from selected")
+            .help(model.reason(.trash) ?? "Trash messages from selected")
             .accessibilityLabel("Move Messages to Trash")
-            .disabled(model.selection.isEmpty)
+            .disabled(!model.can(.trash))
         }
         ToolbarItem(placement: .primaryAction) {
             Button { model.showInspector.toggle() } label: {

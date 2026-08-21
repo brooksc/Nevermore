@@ -13,6 +13,12 @@ struct InspectorView: View {
             if model.selection.count == 1, let id = model.selection.first,
                 let group = model.group(for: id) {
                 single(group)
+            } else if model.selection.count == 1, let id = model.selection.first,
+                let record = model.unsubscribeRecord(for: id) {
+                // An Unsubscribed row can outlive the sender's mail — the record
+                // is all that's left. Without this the inspector claimed nothing
+                // was selected while a row sat highlighted next to it.
+                recordOnly(record)
             } else if model.selection.count > 1 {
                 aggregate
             } else {
@@ -179,7 +185,11 @@ struct InspectorView: View {
                 Text("Unsubscribe").frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(!group.canUnsubscribe)
+            // Both conditions: this sender may have nothing to unsubscribe
+            // with, and the collection may be one where unsubscribing is the
+            // wrong verb. Same rule as the toolbar and the Actions menu.
+            .disabled(!group.canUnsubscribe || !model.can(.unsubscribe))
+            .help(model.reason(.unsubscribe) ?? "")
 
             // …AndAdvance, matching i and d. Plain `ignore`/`requestTrash` empty
             // the selection, so clicking a button here left the inspector
@@ -187,10 +197,46 @@ struct InspectorView: View {
             HStack(spacing: 8) {
                 Button("Ignore") { model.ignoreAndAdvance() }
                     .frame(maxWidth: .infinity)
+                    .disabled(!model.can(.ignore))
+                    .help(model.reason(.ignore) ?? "")
                 Button("Trash Messages") { model.trashAndAdvance() }
                     .frame(maxWidth: .infinity)
+                    .disabled(!model.can(.trash))
+                    .help(model.reason(.trash) ?? "")
             }
         }
+    }
+
+    // MARK: - Record only (an unsubscribe whose messages are gone)
+
+    private func recordOnly(_ record: MessageStore.UnsubscribeRecord) -> some View {
+        let name = record.senderName.isEmpty ? record.senderEmail : record.senderName
+        return VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Monogram(text: name)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name).font(.title3.weight(.semibold)).lineLimit(1)
+                    if !record.senderEmail.isEmpty {
+                        Text(record.senderEmail).font(.caption).foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Unsubscribed").font(.callout.weight(.semibold))
+                Text("\(record.outcome.rawValue.capitalized) · \(dateString(record.attemptedAt))")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            // Say why this panel offers less than the one for a live sender,
+            // rather than leaving the missing buttons to be read as a bug.
+            Text("Their messages are no longer in this mailbox, so there's nothing left to unsubscribe from or trash. The record is kept so you know it happened.")
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Button("Forget Record") { model.forgetRecord(record.groupKey) }
+                .frame(maxWidth: .infinity)
+        }
+        .padding(16)
     }
 
     // MARK: - Aggregate
@@ -211,11 +257,17 @@ struct InspectorView: View {
                 Text("Unsubscribe").frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
+            .disabled(!model.can(.unsubscribe))
+            .help(model.reason(.unsubscribe) ?? "")
             HStack(spacing: 8) {
                 Button("Ignore") { model.ignoreAndAdvance() }
                     .frame(maxWidth: .infinity)
+                    .disabled(!model.can(.ignore))
+                    .help(model.reason(.ignore) ?? "")
                 Button("Trash Messages") { model.trashAndAdvance() }
                     .frame(maxWidth: .infinity)
+                    .disabled(!model.can(.trash))
+                    .help(model.reason(.trash) ?? "")
             }
         }
         .padding(16)

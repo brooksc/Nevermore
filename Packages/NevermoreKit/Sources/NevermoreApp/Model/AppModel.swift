@@ -55,9 +55,27 @@ final class AppModel {
 
     // MARK: - UI state
 
-    var collection: Collection = .allSenders
+    /// Switching collections clears the selection. Every collection shows the
+    /// same kind of row, but a sender means a different thing in each, and
+    /// carrying a selection over is what left the inspector describing a sender
+    /// the visible list didn't contain and the status bar counting it.
+    var collection: Collection = .allSenders {
+        didSet {
+            guard oldValue != collection else { return }
+            selection = SelectionCursor.surviving(
+                selection, in: visibleIDs, collectionChanged: true)
+        }
+    }
     var selection: Set<GroupID> = []
-    var searchText: String = ""
+    /// Narrowing the search can hide a selected row. Drop it rather than keep a
+    /// selection the list no longer shows — the same rule a collection switch
+    /// follows, and what stops "N selected" counting rows that aren't there.
+    var searchText: String = "" {
+        didSet {
+            guard oldValue != searchText else { return }
+            pruneSelection()
+        }
+    }
     var showInspector = false
 
     enum SyncState: Equatable {
@@ -429,15 +447,29 @@ final class AppModel {
     /// to a search for the sender — stated in a toast rather than silently
     /// landing somewhere other than asked for.
     func viewLatestMessage() {
-        Task { await viewLatestMessageAsync() }
+        // Says why rather than doing nothing: v and ⇧⌘V were silent no-ops in
+        // every collection but All Senders, which read as the key being dead.
+        if let reason = reason(.viewLatestMessage) {
+            showToast(reason, undoLabel: nil, undo: nil)
+            return
+        }
+        guard let id = selection.first else { return }
+        viewLatestMessage(id)
     }
 
-    private func viewLatestMessageAsync() async {
+    /// Open one sender's newest message, whatever is selected. The Reappeared
+    /// row's View button needs this: reading the mail is how you decide between
+    /// escalating and trashing, and it must act on its own row.
+    func viewLatestMessage(_ id: GroupID) {
+        Task { await viewLatestMessageAsync(id) }
+    }
+
+    private func viewLatestMessageAsync(_ id: GroupID) async {
         guard !isDemoMode else {
             showToast("Demo mode — there's no real message to open.", undoLabel: nil, undo: nil)
             return
         }
-        guard let id = selection.first, let group = group(for: id), let message = group.latest
+        guard let group = group(for: id), let message = group.latest
         else { return }
 
         // Prefer Gmail's own conversation link. Costs one round trip on an
@@ -589,6 +621,7 @@ final class AppModel {
             ignoredKeys = try store.ignoredGroupKeys()
             history = try store.unsubscribeHistory()
             hasLoadedOnce = true
+            pruneSelection()
         } catch {
             syncState = .failed(error.localizedDescription)
         }
@@ -727,11 +760,50 @@ final class AppModel {
     /// Whether the how-it-works sheet is showing (Help menu).
     var showHowItWorks = false
 
+    /// Every row on screen, in display order, whichever collection that is.
+    ///
+    /// The one answer to "what can be selected right now": keyboard navigation,
+    /// the cursor after an action, selection pruning and the status bar all read
+    /// it, so a new collection joins the selection model by appearing here.
+    /// Unsubscribed is the odd one — it lists durable records, which outlive the
+    /// messages they were recorded for, so its rows can't come from `groups`.
+    var visibleIDs: [GroupID] {
+        collection == .unsubscribed
+            ? unsubscribedRows.map(\.id)
+            : visibleRows.map(\.id)
+    }
+
+    /// The sender rows on screen, in display order — All Senders, Reappeared and
+    /// Ignored all list the same thing, filtered differently.
+    var visibleRows: [SenderRow] { sortedRows }
+
+    /// One Unsubscribed row: the durable record, plus the id the selection model
+    /// identifies it by. Paired here so the list and `visibleIDs` can't disagree
+    /// about which rows exist.
+    struct HistoryRow: Identifiable {
+        let id: GroupID
+        let record: MessageStore.UnsubscribeRecord
+    }
+
+    var unsubscribedRows: [HistoryRow] {
+        unsubscribedRecords.compactMap { record in
+            GroupID(storageKey: record.groupKey).map { HistoryRow(id: $0, record: record) }
+        }
+    }
+
+    /// Drop anything that has left the visible list (unsubscribed, ignored,
+    /// trashed, or filtered out by a search) so the selection always describes
+    /// rows the user can see.
+    private func pruneSelection() {
+        let kept = SelectionCursor.surviving(selection, in: visibleIDs, collectionChanged: false)
+        if kept != selection { selection = kept }
+    }
+
     /// Move the single selection up (-1) or down (+1) through the visible list.
     func moveSelection(by delta: Int) {
         guard
             let next = SelectionCursor.move(
-                from: selection, by: delta, in: sortedRows.map(\.id))
+                from: selection, by: delta, in: visibleIDs)
         else { return }
         selection = [next]
         showInspector = true
@@ -740,14 +812,14 @@ final class AppModel {
     /// The row to select after the current one is removed — the next one down,
     /// or the previous if it was last. Keeps keyboard triage flowing.
     private func rowAfterSelection() -> GroupID? {
-        SelectionCursor.rowAfterRemoving(selection, from: sortedRows.map(\.id))
+        SelectionCursor.rowAfterRemoving(selection, from: visibleIDs)
     }
 
     private func advance(to id: GroupID?) {
-        // Only land on a row that still exists. Selecting a departed row leaves
-        // the table with an invisible selection and the inspector on nothing —
-        // which is what a multi-row action used to do every time.
-        if let id, group(for: id) != nil {
+        // Only land on a row that is still on screen. Selecting a departed row
+        // leaves the list with an invisible selection and the inspector on
+        // nothing — which is what a multi-row action used to do every time.
+        if let id, visibleIDs.contains(id) {
             selection = [id]
             showInspector = true
         } else {
@@ -842,6 +914,7 @@ final class AppModel {
         guard let store, let id = GroupID(storageKey: groupKey) else { return }
         try? store.forgetUnsubscribe(id)
         history = (try? store.unsubscribeHistory()) ?? history
+        pruneSelection()
     }
 
     private func matchesCollection(_ g: SenderGroup) -> Bool {
@@ -853,18 +926,17 @@ final class AppModel {
     /// evaluation triggers an observation-graph mutation mid-render, which on
     /// macOS escalates to an AppKit constraint-update exception and aborts.
     private func matches(_ g: SenderGroup, in collection: Collection) -> Bool {
-        let ignored = ignoredKeys.contains(g.id.storageKey)
-        let unsubscribed = history[g.id.storageKey] != nil
-        switch collection {
-        // Once a sender has been unsubscribed it leaves the working list — it
-        // lives in Unsubscribed, or in Reappeared if it starts mailing again.
-        // (`unsubscribed` already implies not-reappeared, since reappearance
-        // requires a history record.)
-        case .allSenders: return !ignored && !unsubscribed
-        case .ignored: return ignored
-        case .unsubscribed: return unsubscribed && !isReappeared(g)
-        case .reappeared: return !ignored && isReappeared(g)
-        }
+        collection.contains(state(of: g))
+    }
+
+    /// What the app knows about a sender, in the form the membership and
+    /// action-availability rules are written against.
+    private func state(of g: SenderGroup) -> SenderState {
+        SenderState(
+            isIgnored: ignoredKeys.contains(g.id.storageKey),
+            isUnsubscribed: history[g.id.storageKey] != nil,
+            hasReappeared: isReappeared(g),
+            hasMessages: !g.messages.isEmpty)
     }
 
     /// True once this sender has any recorded unsubscribe attempt — meaning the
@@ -946,6 +1018,33 @@ final class AppModel {
 
     func group(for id: GroupID) -> SenderGroup? {
         groups.first { $0.id == id }
+    }
+
+    /// How many rows of the collection on screen are selected. The status bar's
+    /// "N selected" must never count a row the user can't see, so it is
+    /// measured against the visible list rather than trusting the raw set.
+    var selectedCount: Int {
+        selection.intersection(visibleIDs).count
+    }
+
+    private var selectionContext: SelectionContext {
+        let visible = selection.intersection(visibleIDs)
+        return SelectionContext(
+            collection: collection,
+            count: visible.count,
+            // An Unsubscribed row whose messages have been deleted has a record
+            // and nothing to act on.
+            withMessages: visible.filter { group(for: $0) != nil }.count)
+    }
+
+    /// Whether an action can run on the current selection.
+    func can(_ action: SelectionAction) -> Bool {
+        action.unavailability(in: selectionContext) == nil
+    }
+
+    /// Why it can't, for the disabled control's tooltip — nil when it can.
+    func reason(_ action: SelectionAction) -> String? {
+        action.unavailability(in: selectionContext)
     }
 
     // MARK: - Actions: ignore / trash / forget
@@ -1088,6 +1187,9 @@ final class AppModel {
         let removed = ids.compactMap { history[$0.storageKey] }
         try? ids.forEach { try store.forgetUnsubscribe($0) }
         history = (try? store.unsubscribeHistory()) ?? history
+        // Forgetting moves a sender back to All Senders, so the rows just acted
+        // on have left whichever list this was invoked from.
+        pruneSelection()
         guard !removed.isEmpty else { return }
         let n = removed.count
         showToast(

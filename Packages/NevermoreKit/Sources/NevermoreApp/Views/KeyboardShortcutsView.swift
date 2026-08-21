@@ -76,7 +76,7 @@ struct KeyboardShortcutsView: View {
                             }
                         }
                     }
-                    Text("Single-key shortcuts (j, k, u, ⇧U, i, d, ?) work while the sender list is focused. The ⌘ versions work anywhere.")
+                    Text("Single-key shortcuts (j, k, v, u, ⇧U, i, d, ?) work while the list is focused, in every collection. The ⌘ versions work anywhere. An action that doesn't apply to the collection you're in is greyed out in the Actions menu, with the reason as its tooltip.")
                         .font(.caption).foregroundStyle(.secondary)
                         .padding(.top, 4)
                 }
