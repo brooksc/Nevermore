@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import NevermoreKit
 
 // Thin forwarders: binding these as `let` loses both the generic parameter and
@@ -1132,6 +1133,414 @@ Harness.suite("Mailing list detection") {
             id: GroupID(kind: .domain, key: "shop.com"),
             messages: [makeMessage(1, from: "Shop <a@shop.com>")])
         expect(!group.isMailingList, "no List-ID means not a list")
+    }
+}
+
+// MARK: - Loopback HTTP server
+
+// The harness runs each test synchronously, and everything below is actor-isolated
+// or built on NWListener. Run the async body on the cooperative pool and block until
+// it finishes — nothing here needs the main thread, so there is no deadlock to hit.
+private final class ResultBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: T?
+    var value: T? {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
+    }
+}
+
+func runAsync<T: Sendable>(_ body: @escaping @Sendable () async -> T) -> T {
+    let box = ResultBox<T>()
+    let done = DispatchSemaphore(value: 0)
+    Task {
+        box.value = await body()
+        done.signal()
+    }
+    done.wait()
+    return box.value!
+}
+
+/// A real listener occupying a contract port, so the server has to deal with it the way it would in
+/// the field. Uses the server's own parameters, so "taken" means taken the same way.
+final class HeldPort {
+    private let listener: NWListener
+    fileprivate init(_ listener: NWListener) { self.listener = listener }
+
+    /// Wait for `.cancelled` before returning. `NWListener.cancel()` returns before the OS has
+    /// released the port, so a test that merely cancels leaves the next one binding a port that is
+    /// still occupied — which shows up as an unrelated test failing intermittently.
+    func release() {
+        let done = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { state in
+            if case .cancelled = state { done.signal() }
+        }
+        listener.cancel()
+        _ = done.wait(timeout: .now() + 3)
+    }
+}
+
+func holdPort(_ port: UInt16) -> HeldPort? {
+    guard let nwPort = NWEndpoint.Port(rawValue: port),
+          let listener = try? NWListener(using: NevermoreServer.listenerParameters(), on: nwPort)
+    else { return nil }
+    let ready = DispatchSemaphore(value: 0)
+    listener.stateUpdateHandler = { state in
+        if case .ready = state { ready.signal() }
+    }
+    listener.newConnectionHandler = { $0.cancel() }
+    listener.start(queue: .global())
+    guard ready.wait(timeout: .now() + 3) == .success else {
+        listener.cancel()
+        return nil
+    }
+    return HeldPort(listener)
+}
+
+Harness.suite("Server port contract") {
+    Harness.test("is 8775-8779, and does not collide with jobhunt's range") {
+        eq(ServerPortContract.firstPort, 8775)
+        eq(ServerPortContract.lastPort, 8779)
+        eq(ServerPortContract.discoveryPorts, [8775, 8776, 8777, 8778, 8779])
+        // jobhunt owns 8765-8769 and 8770-8774 is its growth gap. Two apps, one Mac.
+        expect(!ServerPortContract.discoveryPorts.contains(where: { $0 < 8775 }), "no overlap below")
+    }
+
+    Harness.test("the listener is restricted to loopback") {
+        // This restriction IS the security boundary — a non-loopback peer is refused by the OS and
+        // never reaches route handling. Asserted here so it can't be dropped without a red test.
+        eq(NevermoreServer.listenerParameters().requiredInterfaceType, .loopback)
+    }
+}
+
+Harness.suite("Server port binding") {
+    Harness.test("falls back to the next contract port when the first is taken") {
+        guard let held = holdPort(ServerPortContract.firstPort) else {
+            expect(false, "could not occupy \(ServerPortContract.firstPort) to set up the test")
+            return
+        }
+        defer { held.release() }
+
+        let bound: UInt16 = runAsync {
+            let server = NevermoreServer()
+            try? await server.start()
+            let p = await server.port
+            await server.stop()
+            return p
+        }
+        eq(bound, ServerPortContract.firstPort + 1, "skipped the occupied port")
+    }
+
+    Harness.test("fails closed when every contract port is taken") {
+        var held: [HeldPort] = []
+        for p in ServerPortContract.discoveryPorts {
+            guard let l = holdPort(p) else { break }
+            held.append(l)
+        }
+        guard held.count == ServerPortContract.discoveryPorts.count else {
+            held.forEach { $0.release() }
+            expect(false, "could not occupy all \(ServerPortContract.discoveryPorts.count) ports")
+            return
+        }
+        defer { held.forEach { $0.release() } }
+
+        struct Outcome: Sendable {
+            let error: ServerError?
+            let port: UInt16
+            let listening: Bool
+        }
+        let outcome: Outcome = runAsync {
+            let server = NevermoreServer()
+            var caught: ServerError?
+            do { try await server.start() } catch let e as ServerError { caught = e } catch {}
+            let boundPort = await server.port
+            let listening = await server.isListening
+            await server.stop()
+            return Outcome(error: caught, port: boundPort, listening: listening)
+        }
+        // No ephemeral fallback: a port the bridge can't guess is worse than no server at all,
+        // because "running" and "unreachable" look identical from the client side.
+        eq(outcome.error, ServerError.noPortAvailable)
+        eq(outcome.port, 0, "did not bind anything")
+        expect(!outcome.listening, "no listener left behind")
+        expect(outcome.error?.localizedDescription.contains("8775") == true, "failure names the range")
+    }
+}
+
+Harness.suite("Server over a real socket") {
+    Harness.test("a loopback client gets the health route off the wire") {
+        // The routing tests call routeRequest directly; this is the only one that proves the
+        // listener accepts, the parser frames, and the response serialises as real HTTP.
+        struct Result: Sendable {
+            let status: Int
+            let body: String
+            let port: UInt16
+        }
+        let result: Result? = runAsync {
+            let server = NevermoreServer(appVersion: "9.9.9")
+            // An ephemeral port: this test is about the wire, not about port discovery, and the
+            // contract ports may legitimately be busy on a developer's Mac.
+            try? await server.startOnAnyPort()
+            let port = await server.port
+            defer { Task { await server.stop() } }
+            guard port != 0,
+                  let url = URL(string: "http://127.0.0.1:\(port)/health") else { return nil }
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 5
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                  let http = response as? HTTPURLResponse else { return nil }
+            return Result(
+                status: http.statusCode,
+                body: String(data: data, encoding: .utf8) ?? "",
+                port: port)
+        }
+        guard let result else {
+            expect(false, "no response from the loopback server")
+            return
+        }
+        eq(result.status, 200)
+        eq(result.body, "{\"ok\":true}")
+    }
+}
+
+Harness.suite("Server routing") {
+    func get(_ path: String, headers: [String: String] = [:]) -> HTTPRequest {
+        HTTPRequest(method: "GET", path: path, headers: headers)
+    }
+    func route(_ request: HTTPRequest, token: String = "") -> HTTPResponse {
+        runAsync {
+            await NevermoreServer(appVersion: "9.9.9", mcpToken: token).routeRequest(request)
+        }
+    }
+    func bodyText(_ response: HTTPResponse) -> String {
+        String(data: response.body, encoding: .utf8) ?? ""
+    }
+
+    Harness.test("health and ping answer, so a client can find the port") {
+        eq(route(get("/health")).statusCode, 200)
+        expect(bodyText(route(get("/health"))).contains("\"ok\":true"), "reports ok")
+
+        let ping = route(get("/api/ping"))
+        eq(ping.statusCode, 200)
+        expect(bodyText(ping).contains("\"app\":\"nevermore\""), "identifies the app")
+        expect(bodyText(ping).contains("9.9.9"), "reports its version")
+    }
+
+    Harness.test("an unknown path is 404") {
+        eq(route(get("/nope")).statusCode, 404)
+    }
+
+    Harness.test("Transfer-Encoding is refused rather than parsed as an empty body") {
+        eq(route(get("/health", headers: ["transfer-encoding": "chunked"])).statusCode, 400)
+    }
+
+    Harness.test("MCP routes are 503 until a token is configured") {
+        // Fail closed: no token must never mean "no token required".
+        let r = route(HTTPRequest(method: "POST", path: "/mcp/senders/list"), token: "")
+        eq(r.statusCode, 503)
+    }
+
+    Harness.test("MCP routes reject a missing or wrong token with 401") {
+        let secret = "s3cret-token"
+        let mcp = { (headers: [String: String]) in
+            route(HTTPRequest(method: "POST", path: "/mcp/senders/list", headers: headers), token: secret)
+        }
+        eq(mcp([:]).statusCode, 401, "no Authorization header")
+        eq(mcp(["authorization": "Bearer wrong"]).statusCode, 401, "wrong token")
+        eq(mcp(["authorization": "Bearer "]).statusCode, 401, "empty token")
+        eq(mcp(["authorization": secret]).statusCode, 401, "token without the Bearer scheme")
+        eq(mcp(["authorization": "Basic \(secret)"]).statusCode, 401, "wrong scheme")
+        // Near-misses must not pass: the compare is constant-time, not a prefix match.
+        eq(mcp(["authorization": "Bearer s3cret"]).statusCode, 401, "prefix of the token")
+        eq(mcp(["authorization": "Bearer s3cret-tokenX"]).statusCode, 401, "token plus a suffix")
+    }
+
+    Harness.test("the right token gets past auth, and the scheme is case-insensitive") {
+        let secret = "s3cret-token"
+        let authed = route(
+            HTTPRequest(method: "POST", path: "/mcp/senders/list",
+                        headers: ["authorization": "bearer \(secret)"]),
+            token: secret)
+        // The tool routes are TASK-44; what matters here is that auth passed and the 404 is about
+        // the route, not the credential.
+        eq(authed.statusCode, 404)
+        expect(bodyText(authed).contains("MCP route not found"), "404 is about the route")
+    }
+
+    Harness.test("a non-POST MCP request is 405, but only after it authenticates") {
+        let secret = "s3cret-token"
+        eq(route(get("/mcp/senders/list", headers: ["authorization": "Bearer \(secret)"]),
+                 token: secret).statusCode, 405)
+        // Unauthenticated, the method never gets a say — 401 comes first.
+        eq(route(get("/mcp/senders/list"), token: secret).statusCode, 401)
+    }
+
+    Harness.test("MCP bodies get a larger budget than the discovery routes") {
+        eq(NevermoreServer.maxBodySize(forPath: "/mcp/senders/list"), 1_048_576)
+        eq(NevermoreServer.maxBodySize(forPath: "/health"), 64 * 1024)
+    }
+}
+
+Harness.suite("HTTP framing") {
+    func framing(_ raw: String, cap: Int = NevermoreServer.maxHeaderBytes) -> RequestFraming {
+        inspectRequestFraming(Data(raw.utf8), maxHeaderBytes: cap)
+    }
+
+    Harness.test("a complete GET frames with no body") {
+        eq(framing("GET /health HTTP/1.1\r\nHost: x\r\n\r\n"),
+           .valid(method: "GET", path: "/health", contentLength: 0))
+    }
+
+    Harness.test("headers without a terminator are incomplete, not invalid") {
+        eq(framing("GET /health HTTP/1.1\r\nHost: x"), .incomplete)
+    }
+
+    Harness.test("headers past the cap are rejected rather than accumulated") {
+        let long = "GET /health HTTP/1.1\r\nX: " + String(repeating: "a", count: 200) + "\r\n\r\n"
+        eq(framing(long, cap: 64), .invalid(reason: "Request header fields too large", statusCode: 431))
+    }
+
+    Harness.test("conflicting or malformed Content-Length is refused") {
+        eq(framing("POST /x HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabc"),
+           .invalid(reason: "Conflicting Content-Length headers", statusCode: 400))
+        eq(framing("POST /x HTTP/1.1\r\nContent-Length: -1\r\n\r\n"),
+           .invalid(reason: "Malformed Content-Length", statusCode: 400))
+        eq(framing("POST /x HTTP/1.1\r\nContent-Length: abc\r\n\r\n"),
+           .invalid(reason: "Malformed Content-Length", statusCode: 400))
+    }
+
+    Harness.test("a POST with no Content-Length is unframable, not empty") {
+        eq(framing("POST /x HTTP/1.1\r\nHost: x\r\n\r\n"),
+           .invalid(reason: "Missing Content-Length on POST", statusCode: 400))
+    }
+
+    Harness.test("the parser lowercases header names and splits the query") {
+        let raw = "GET /api/ping?a=1&b=two HTTP/1.1\r\nAuthorization: Bearer t\r\n\r\n"
+        let request = parseHTTPRequest(Data(raw.utf8))
+        eq(request?.path, "/api/ping")
+        eq(request?.queryValue(for: "b"), "two")
+        eq(request?.headers["authorization"], "Bearer t")
+        eq(NevermoreServer.bearerToken(from: request!), "t")
+    }
+
+    Harness.test("a UTF-8 body is sliced by bytes, not characters") {
+        // "Café" is 5 bytes and 4 characters — slicing by character count truncates the JSON.
+        let json = "{\"n\":\"Café\"}"
+        let bytes = Data(json.utf8)
+        let raw = Data("POST /mcp/x HTTP/1.1\r\nContent-Length: \(bytes.count)\r\n\r\n".utf8) + bytes
+        eq(parseHTTPRequest(raw)?.body, bytes)
+    }
+
+    Harness.test("a body that hasn't fully arrived parses as nil so the server reads more") {
+        let raw = "POST /mcp/x HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc"
+        expect(parseHTTPRequest(Data(raw.utf8)) == nil, "incomplete body")
+    }
+
+    Harness.test("every status the server emits has a real reason phrase") {
+        for code in [200, 204, 400, 401, 403, 404, 405, 413, 431, 500, 503] {
+            expect(HTTPResponse.statusText(for: code) != "Unknown", "reason phrase for \(code)")
+        }
+    }
+}
+
+Harness.suite("MCP token file") {
+    /// A scratch directory so the lifecycle is exercised without touching the real
+    /// ~/.nevermore-mcp-token, which a running app may own.
+    func withScratchToken(_ body: (URL) -> Void) {
+        let dir = URL.temporaryDirectory.appending(path: "nevermore-token-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        body(dir.appending(path: ".nevermore-mcp-token"))
+    }
+
+    Harness.test("the real token path is ~/.nevermore-mcp-token") {
+        eq(MCPTokenManager.tokenURL.lastPathComponent, ".nevermore-mcp-token")
+        eq(MCPTokenManager.tokenURL.deletingLastPathComponent().path,
+           URL.homeDirectory.path)
+    }
+
+    Harness.test("a written token is 0600 and reads back") {
+        withScratchToken { url in
+            guard let written = try? MCPTokenManager.generateAndWrite(at: url) else {
+                expect(false, "write failed")
+                return
+            }
+            let perms = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int
+            eq(perms, 0o600)
+            eq(MCPTokenManager.read(at: url), written)
+            expect(UUID(uuidString: written) != nil, "a fresh UUID, not a fixed secret")
+        }
+    }
+
+    Harness.test("each launch gets a different token") {
+        withScratchToken { url in
+            let first = try? MCPTokenManager.generateAndWrite(at: url)
+            let second = try? MCPTokenManager.generateAndWrite(at: url)
+            expect(first != second, "transient credential, not a stored one")
+        }
+    }
+
+    Harness.test("a token with broader permissions is refused on read") {
+        // Group- or world-readable means another account could already have taken a copy, so the
+        // secret is spent — refuse it rather than authenticate against it.
+        for mode in [0o644, 0o640, 0o604, 0o666] {
+            withScratchToken { url in
+                _ = try? MCPTokenManager.generateAndWrite(at: url)
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: mode], ofItemAtPath: url.path)
+                expect(MCPTokenManager.read(at: url) == nil, "refused mode \(String(mode, radix: 8))")
+            }
+        }
+        // 0400 is narrower than 0600, so it is still acceptable.
+        withScratchToken { url in
+            _ = try? MCPTokenManager.generateAndWrite(at: url)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: url.path)
+            expect(MCPTokenManager.read(at: url) != nil, "0400 is not broader than 0600")
+        }
+    }
+
+    Harness.test("a missing token reads as nil, and delete is what makes it missing") {
+        withScratchToken { url in
+            expect(MCPTokenManager.read(at: url) == nil, "nothing written yet")
+            _ = try? MCPTokenManager.generateAndWrite(at: url)
+            expect(MCPTokenManager.read(at: url) != nil, "present after write")
+            MCPTokenManager.delete(at: url)
+            expect(!FileManager.default.fileExists(atPath: url.path), "removed on shutdown")
+            expect(MCPTokenManager.read(at: url) == nil, "gone")
+        }
+    }
+
+    Harness.test("a client whose token file went over-permissive is refused, not admitted") {
+        // The two halves of the policy composed: the bridge reads the file to get its credential,
+        // a widened file reads as nil, so it has nothing to present — and the server answers 401
+        // rather than treating an absent credential as "no credential required".
+        withScratchToken { url in
+            let secret = (try? MCPTokenManager.generateAndWrite(at: url)) ?? ""
+            expect(!secret.isEmpty, "a token was written")
+            try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+
+            let presented = MCPTokenManager.read(at: url) ?? ""
+            expect(presented.isEmpty, "an over-permissive file yields no credential")
+
+            let response = runAsync {
+                await NevermoreServer(mcpToken: secret).routeRequest(
+                    HTTPRequest(method: "POST", path: "/mcp/senders/list",
+                                headers: ["authorization": "Bearer \(presented)"]))
+            }
+            eq(response.statusCode, 401)
+        }
+    }
+
+    Harness.test("a token that fails to be written leaves nothing behind") {
+        // A directory that doesn't exist makes the write fail; the point is that no partial or
+        // over-permissive file survives the failure.
+        let url = URL.temporaryDirectory
+            .appending(path: "nevermore-missing-\(UUID().uuidString)")
+            .appending(path: ".nevermore-mcp-token")
+        var threw = false
+        do { _ = try MCPTokenManager.generateAndWrite(at: url) } catch { threw = true }
+        expect(threw, "the write failure is reported, not swallowed")
+        expect(!FileManager.default.fileExists(atPath: url.path), "no leftover file")
     }
 }
 
