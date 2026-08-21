@@ -1769,4 +1769,124 @@ Harness.suite("MCP token file") {
     }
 }
 
+// MARK: - Local server lifecycle (TASK-48)
+
+Harness.suite("Local server lifecycle") {
+    /// A scratch token path, so starting and stopping a server here never disturbs the real
+    /// ~/.nevermore-mcp-token that a running Nevermore may own.
+    func withScratchTokenPath(_ body: (URL) -> Void) {
+        let dir = URL.temporaryDirectory.appending(path: "nevermore-lifecycle-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        body(dir.appending(path: ".nevermore-mcp-token"))
+    }
+
+    /// The status code for a POST to an /mcp/ route with whatever credential the token file holds.
+    /// 401 means the file and the running server disagree; 404 means they match and the route
+    /// simply doesn't exist yet (TASK-44).
+    @Sendable func mcpStatus(port: UInt16, token: String?) async -> Int? {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/mcp/senders/list") else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 5
+        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization") }
+        guard let (_, response) = try? await URLSession.shared.data(for: request) else { return nil }
+        return (response as? HTTPURLResponse)?.statusCode
+    }
+
+    Harness.test("starting binds a contract port and writes the token the server will accept") {
+        withScratchTokenPath { tokenURL in
+            let controller = LocalServerController(tokenURL: tokenURL, appVersion: "9.9.9")
+            let status = runAsync { await controller.start(isDemo: false) }
+            defer { runAsync { await controller.stop() } }
+
+            guard case let .running(port) = status else {
+                expect(false, "expected a running server, got \(status)")
+                return
+            }
+            expect(ServerPortContract.discoveryPorts.contains(port), "bound a discoverable port")
+
+            // The token file is the only channel to the bridge, so "started" has to mean the file
+            // on disk authenticates against the server that is actually listening.
+            let token = MCPTokenManager.read(at: tokenURL)
+            expect(token != nil, "a 0600 token exists while the server runs")
+            eq(runAsync { await mcpStatus(port: port, token: token) }, 404,
+               "the written token is accepted (404 is the route, not the credential)")
+            eq(runAsync { await mcpStatus(port: port, token: nil) }, 401,
+               "and the gate is still closed without it")
+        }
+    }
+
+    Harness.test("stopping releases the port and removes the token file") {
+        withScratchTokenPath { tokenURL in
+            let controller = LocalServerController(tokenURL: tokenURL)
+            let started = runAsync { await controller.start(isDemo: false) }
+            guard case let .running(port) = started else {
+                expect(false, "expected a running server, got \(started)")
+                return
+            }
+            eq(runAsync { await controller.stop() }, LocalServerStatus.off)
+            expect(!FileManager.default.fileExists(atPath: tokenURL.path),
+                   "the credential does not outlive the server")
+            // Re-binding the port is the only honest proof the OS actually got it back.
+            guard let held = holdPort(port) else {
+                expect(false, "port \(port) was not released")
+                return
+            }
+            held.release()
+        }
+    }
+
+    Harness.test("stopping a server that never started is not an error") {
+        withScratchTokenPath { tokenURL in
+            let controller = LocalServerController(tokenURL: tokenURL)
+            eq(runAsync { await controller.stop() }, LocalServerStatus.off)
+        }
+    }
+
+    Harness.test("a bind failure is reported with the port range, and Retry works once it frees up") {
+        withScratchTokenPath { tokenURL in
+            var held: [HeldPort] = []
+            for p in ServerPortContract.discoveryPorts {
+                guard let l = holdPort(p) else { break }
+                held.append(l)
+            }
+            guard held.count == ServerPortContract.discoveryPorts.count else {
+                held.forEach { $0.release() }
+                expect(false, "could not occupy all \(ServerPortContract.discoveryPorts.count) ports")
+                return
+            }
+
+            let controller = LocalServerController(tokenURL: tokenURL)
+            let failed = runAsync { await controller.start(isDemo: false) }
+            guard case let .failed(message) = failed else {
+                held.forEach { $0.release() }
+                runAsync { await controller.stop() }
+                expect(false, "expected a reported failure, got \(failed)")
+                return
+            }
+            // The message is what Settings shows; naming the range is what makes it actionable.
+            expect(message.contains("8775"), "the failure names the port range: \(message)")
+            expect(message.contains("8779"), "the failure names the port range: \(message)")
+            expect(!FileManager.default.fileExists(atPath: tokenURL.path),
+                   "a failed start leaves no token behind")
+
+            // Whatever held the ports quits — which is exactly the case Retry exists for.
+            held.forEach { $0.release() }
+            let retried = runAsync { await controller.start(isDemo: false) }
+            defer { runAsync { await controller.stop() } }
+            expect(retried.isRunning, "retry succeeded after the ports freed up, got \(retried)")
+        }
+    }
+
+    Harness.test("the token path is shown before the server has ever run") {
+        withScratchTokenPath { tokenURL in
+            let controller = LocalServerController(tokenURL: tokenURL)
+            eq(controller.tokenPath, tokenURL.path)
+        }
+        // And the default is the real per-user path, not the scratch one.
+        eq(LocalServerController().tokenPath, MCPTokenManager.tokenURL.path)
+    }
+}
+
 exit(Harness.finish())

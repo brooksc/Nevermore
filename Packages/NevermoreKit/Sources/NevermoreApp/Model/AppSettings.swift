@@ -23,6 +23,11 @@ enum AppSettings {
     static var backgroundInterval: String {
         UserDefaults.standard.string(forKey: "backgroundInterval") ?? "hourly"
     }
+    /// Off by default: the local server exists for MCP clients, which most
+    /// users will never connect, so it stays unbound until asked for.
+    static var localServerEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "localServerEnabled")
+    }
     static var backgroundIntervalSeconds: TimeInterval? {
         switch backgroundInterval {
         case "15m": 15 * 60

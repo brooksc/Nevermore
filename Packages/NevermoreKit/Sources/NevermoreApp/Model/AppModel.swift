@@ -143,6 +143,8 @@ final class AppModel {
     // MARK: - Session lifecycle
 
     func start() async {
+        observeTerminationForTokenCleanup()
+        startLocalServerIfEnabled()
         if isDemoMode {
             await openDemo()
             return
@@ -164,6 +166,7 @@ final class AppModel {
         isDemoMode = true
         UserDefaults.standard.set(true, forKey: Self.demoModeKey)
         Log.app.event("entering demo mode")
+        await refreshLocalServerDemoMode()
         await openDemo()
     }
 
@@ -199,6 +202,7 @@ final class AppModel {
         syncState = .idle
         lastSyncedAt = nil
         Log.app.event("leaving demo mode")
+        await refreshLocalServerDemoMode()
         if let account = currentAccount { await open(account: account) }
     }
 
@@ -383,6 +387,63 @@ final class AppModel {
     private func stopBackgroundSync() {
         backgroundSyncTask?.cancel()
         backgroundSyncTask = nil
+    }
+
+    // MARK: - Local server
+
+    private let localServer = LocalServerController()
+
+    /// What Settings shows. Mirrored here rather than read from the actor so the
+    /// UI has a value it can render synchronously.
+    private(set) var localServerStatus: LocalServerStatus = .off
+
+    /// Where an MCP client reads its credential from, shown whether or not the
+    /// server is running so it can be configured ahead of time.
+    var localServerTokenPath: String { localServer.tokenPath }
+
+    private var terminationObserver: (any NSObjectProtocol)?
+
+    /// Bring the server up at launch if the user left it on. Deliberately not
+    /// awaited by `start()`: a bind that has to fail through all five contract
+    /// ports takes seconds, and opening the mailbox must not wait for a feature
+    /// most users never turn on.
+    private func startLocalServerIfEnabled() {
+        guard AppSettings.localServerEnabled else { return }
+        Task { await setLocalServer(enabled: true) }
+    }
+
+    /// Turn the server on or off. Off releases the port *and* removes the token
+    /// file — a credential that outlives the server it authenticates for is one
+    /// a client would keep presenting to nothing.
+    func setLocalServer(enabled: Bool) async {
+        if enabled {
+            localServerStatus = .starting
+            localServerStatus = await localServer.start(isDemo: isDemoMode)
+        } else {
+            localServerStatus = await localServer.stop()
+        }
+    }
+
+    /// Try again after a bind failure. Worth offering because the usual cause —
+    /// another app holding 8775–8779 — goes away on its own when that app quits.
+    func retryLocalServer() async {
+        await setLocalServer(enabled: true)
+    }
+
+    /// Restart a running server so `/api/ping` reports the mode the app is
+    /// actually in; the server reads `isDemo` once, at construction.
+    private func refreshLocalServerDemoMode() async {
+        localServerStatus = await localServer.restartIfRunning(isDemo: isDemoMode)
+    }
+
+    /// Remove the token file when the app quits. The port goes away with the
+    /// process; the file on disk would not.
+    private func observeTerminationForTokenCleanup() {
+        guard terminationObserver == nil else { return }
+        let controller = localServer
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in controller.deleteTokenFile() }
     }
 
     // MARK: - Onboarding

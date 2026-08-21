@@ -16,6 +16,7 @@ struct SettingsView: View {
     @AppStorage("backgroundInterval") private var backgroundInterval = "hourly"
     // Advanced
     @AppStorage("verboseLogging") private var verboseLogging = false
+    @AppStorage("localServerEnabled") private var localServerEnabled = false
     @State private var showResetConfirm = false
     @State private var showResyncConfirm = false
 
@@ -142,6 +143,7 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            localServer
             Section("Diagnostics") {
                 Toggle("Verbose logging", isOn: $verboseLogging)
                 Text("When on, detailed events are recorded to the system log and shown in Console. Sender addresses are logged; message contents and your password never are.")
@@ -167,6 +169,48 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(AppModel.resetDescription)
+        }
+    }
+
+    /// The local HTTP server an MCP client connects through. Off by default,
+    /// and the section is where a bind failure becomes visible: the server binds
+    /// only 8775–8779 and refuses to fall back to a port no client would probe,
+    /// so with all five taken there is nothing to see anywhere else.
+    private var localServer: some View {
+        Section("Local server") {
+            Toggle("Allow AI assistants to connect", isOn: $localServerEnabled)
+                .onChange(of: localServerEnabled) { _, enabled in
+                    Task { await model.setLocalServer(enabled: enabled) }
+                }
+            switch model.localServerStatus {
+            case .off:
+                Text("Off. When on, Nevermore listens on 127.0.0.1 so an AI assistant can read your senders and act on them. Only this Mac can reach it, and only with the token below.")
+                    .font(.caption).foregroundStyle(.secondary)
+            case .starting:
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Starting…").foregroundStyle(.secondary)
+                }
+            case .running(let port):
+                LabeledContent("Address") {
+                    Text(verbatim: "127.0.0.1:\(port)").monospaced().textSelection(.enabled)
+                }
+                LabeledContent("Token file") {
+                    Text(verbatim: model.localServerTokenPath)
+                        .monospaced()
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Text("Point your MCP client at that address; it reads the token from that file. The token is new each time the server starts and is deleted when it stops.")
+                    .font(.caption).foregroundStyle(.secondary)
+            case .failed(let message):
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                Button("Retry") { Task { await model.retryLocalServer() } }
+                Text("Nevermore only binds ports 8775–8779, so a client always knows where to look. Quit whatever is holding them and try again.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 
