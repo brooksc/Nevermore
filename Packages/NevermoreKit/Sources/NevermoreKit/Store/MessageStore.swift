@@ -124,6 +124,28 @@ public final class MessageStore: Sendable {
                 t.add(column: "listId", .text)
             }
         }
+
+        // What an external agent decided about a sender, and why.
+        //
+        // Keyed by ADDRESS, not GroupID, and deliberately so: `Grouping.Rule`
+        // moves a sender between a domain group and an address group whenever
+        // the user splits or merges, so a GroupID key would throw the agent's
+        // judgement away every time the table was regrouped. Addresses don't
+        // move. The roll-up to whatever group is current happens at read time.
+        m.registerMigration("v5-sender-decisions") { db in
+            try db.create(table: "senderDecision") { t in
+                t.primaryKey("address", .text)
+                // classification, reason and context are opaque agent text.
+                // Nothing in this app parses, matches or branches on them.
+                t.column("classification", .text).notNull()
+                t.column("reason", .text).notNull()
+                // NULL when the decision isn't contingent on any situation.
+                // Indexed because "what did I decide during job-search-2026"
+                // is the query that lets a whole cohort be re-opened at once.
+                t.column("context", .text).indexed()
+                t.column("decidedAt", .double).notNull()
+            }
+        }
         return m
     }
 
@@ -342,6 +364,190 @@ public final class MessageStore: Sendable {
                 sql: "DELETE FROM unsubscribeHistory WHERE groupKey = ?",
                 arguments: [id.storageKey])
         }
+    }
+
+    // MARK: - Agent decisions
+
+    /// What an external agent decided about one sender, and why.
+    ///
+    /// `classification`, `reason` and `context` are opaque text written by the
+    /// agent and stored verbatim. Nevermore never parses them, never matches on
+    /// them, and never branches on their content — that is what keeps an LLM out
+    /// of this app while still letting the agent's judgement be durable. The
+    /// only thing the store compares is `address`, which is an identifier.
+    ///
+    /// Lifetime: a decision lives in the account's own database, alongside its
+    /// unsubscribe history and ignore list. It survives sync, quit, regrouping
+    /// and re-sync, and it dies with the account — `resetAllState` and removing
+    /// an account both delete that file. See `forgetAllDecisions()`.
+    public struct SenderDecision: Sendable, Hashable, Identifiable {
+        /// The sender address the judgement is about, lowercased. Never a
+        /// `GroupID`: grouping is mutable and would take the record with it.
+        public let address: String
+        public let classification: String
+        public let reason: String
+        /// The situation this decision was contingent on (e.g. `job-search-2026`),
+        /// or nil when the decision stands on its own. A label to match exactly,
+        /// not a phrase to interpret.
+        public let context: String?
+        public let decidedAt: Date
+
+        public var id: String { address }
+
+        public init(
+            address: String, classification: String, reason: String, context: String?,
+            decidedAt: Date
+        ) {
+            self.address = address
+            self.classification = classification
+            self.reason = reason
+            self.context = context
+            self.decidedAt = decidedAt
+        }
+    }
+
+    /// Record (or replace) the agent's decision about one sender.
+    ///
+    /// One decision per address: a later call supersedes the earlier judgement
+    /// rather than accumulating a history nothing would ever read back.
+    public func recordDecision(
+        address: String,
+        classification: String,
+        reason: String,
+        context: String? = nil,
+        decidedAt: Date = Date()
+    ) throws {
+        try pool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO senderDecision
+                      (address, classification, reason, context, decidedAt)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(address) DO UPDATE SET
+                      classification = excluded.classification, reason = excluded.reason,
+                      context = excluded.context, decidedAt = excluded.decidedAt
+                    """,
+                arguments: [
+                    Self.addressKey(address), classification, reason, context,
+                    decidedAt.timeIntervalSince1970,
+                ])
+        }
+    }
+
+    public func decision(forAddress address: String) throws -> SenderDecision? {
+        try pool.read { db in
+            try Row.fetchOne(
+                db, sql: "SELECT * FROM senderDecision WHERE address = ?",
+                arguments: [Self.addressKey(address)]
+            ).flatMap(Self.decodeDecision)
+        }
+    }
+
+    /// Every decision, keyed by sender address.
+    public func allDecisions() throws -> [String: SenderDecision] {
+        try pool.read { db in
+            var out: [String: SenderDecision] = [:]
+            for row in try Row.fetchAll(db, sql: "SELECT * FROM senderDecision") {
+                guard let d = Self.decodeDecision(row) else { continue }
+                out[d.address] = d
+            }
+            return out
+        }
+    }
+
+    /// Decisions carrying exactly this context label, newest first.
+    ///
+    /// An exact match on a stored field, deliberately not a search: "I'm done
+    /// job hunting, what can go now" is answerable because the agent wrote the
+    /// label, not because Nevermore understands the words in it.
+    public func decisions(inContext context: String) throws -> [SenderDecision] {
+        try pool.read { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT * FROM senderDecision WHERE context = ? ORDER BY decidedAt DESC",
+                arguments: [context]
+            ).compactMap(Self.decodeDecision)
+        }
+    }
+
+    /// The distinct context labels in use, so a caller can offer the cohorts
+    /// that exist without having to invent or guess at a label.
+    public func decisionContexts() throws -> [String] {
+        try pool.read { db in
+            try String.fetchAll(
+                db,
+                sql: """
+                    SELECT DISTINCT context FROM senderDecision
+                    WHERE context IS NOT NULL ORDER BY context
+                    """)
+        }
+    }
+
+    /// The decisions attached to the senders in `group`, as grouping stands now.
+    ///
+    /// This is the whole point of keying on address: a merged `amazon.com` group
+    /// rolls up every decided address beneath it, and after a split each address
+    /// group carries away exactly its own — in either direction, and back again,
+    /// without losing a record.
+    public func decisions(for group: SenderGroup) throws -> [SenderDecision] {
+        try decisions(forAddresses: group.messages.map(\.sender.address))
+    }
+
+    /// The decisions for a set of sender addresses, newest first. Addresses with
+    /// no decision are simply absent.
+    public func decisions(forAddresses addresses: [String]) throws -> [SenderDecision] {
+        let keys = Array(Set(addresses.map(Self.addressKey)))
+        guard !keys.isEmpty else { return [] }
+        return try pool.read { db in
+            var out: [SenderDecision] = []
+            for chunk in stride(from: 0, to: keys.count, by: 500).map({
+                Array(keys[$0..<min($0 + 500, keys.count)])
+            }) {
+                let placeholders = chunk.map { _ in "?" }.joined(separator: ",")
+                out += try Row.fetchAll(
+                    db,
+                    sql: "SELECT * FROM senderDecision WHERE address IN (\(placeholders))",
+                    arguments: StatementArguments(chunk)
+                ).compactMap(Self.decodeDecision)
+            }
+            return out.sorted { $0.decidedAt > $1.decidedAt }
+        }
+    }
+
+    public func forgetDecision(forAddress address: String) throws {
+        try pool.write { db in
+            try db.execute(
+                sql: "DELETE FROM senderDecision WHERE address = ?",
+                arguments: [Self.addressKey(address)])
+        }
+    }
+
+    /// Drop every decision in this account's database.
+    ///
+    /// Explicit rather than incidental: resetting the app and removing an
+    /// account both delete the database file, so decisions go with it either
+    /// way. They are judgements about *this* mailbox's senders, and their
+    /// free-text reasons describe the user's own situation, so keeping them
+    /// alive past "return Nevermore to its never-launched state" would be both
+    /// surprising and a small privacy leak.
+    public func forgetAllDecisions() throws {
+        try pool.write { db in try db.execute(sql: "DELETE FROM senderDecision") }
+    }
+
+    /// Addresses are identifiers, so they are matched case-insensitively —
+    /// unlike the agent's text, which is never touched.
+    private static func addressKey(_ address: String) -> String {
+        address.lowercased()
+    }
+
+    private static func decodeDecision(_ row: Row) -> SenderDecision? {
+        guard let address: String = row["address"] else { return nil }
+        return SenderDecision(
+            address: address,
+            classification: row["classification"] ?? "",
+            reason: row["reason"] ?? "",
+            context: row["context"],
+            decidedAt: Date(timeIntervalSince1970: row["decidedAt"] ?? 0))
     }
 
     // MARK: - Sync state
