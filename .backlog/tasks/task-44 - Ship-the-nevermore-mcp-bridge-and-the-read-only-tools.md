@@ -4,7 +4,7 @@ title: Ship the nevermore-mcp bridge and the read-only tools
 status: To Do
 assignee: []
 created_date: '2026-08-20 21:19'
-updated_date: '2026-08-20 21:19'
+updated_date: '2026-08-21 00:13'
 labels:
   - mcp
 dependencies:
@@ -58,3 +58,23 @@ PRIVACY.md gains its disclosure here, since this is the task that first sends se
 - [ ] #8 PRIVACY.md discloses the data sent to a connected AI model
 - [ ] #9 README documents connecting an MCP client, including that the app must be running
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: claude
+created: 2026-08-21 00:13
+---
+Integration constraints from TASK-42, which is now merged (main 2c5e085). Read these before porting jobhunt's MCP helper.
+
+1. HEADER NAME DIVERGES FROM JOBHUNT. The server authenticates `Authorization: Bearer <token>`, parsing the scheme case-insensitively. Jobhunt's bridge sends `X-MCP-Token` and will NOT authenticate against Nevermore unless changed. Match the server; do not change the server to match the ported bridge.
+
+2. Token path is ~/.nevermore-mcp-token (not ~/.jobhunt-mcp-token). Port range is 8775-8779 (not 8765-8769). Probe endpoint is /health, which returns 200 and exactly {"ok":true}.
+
+3. /mcp/* currently authenticates and then returns 404 "MCP route not found". The 404 is deliberately about the route, not the credential, so a bridge can distinguish "bad token" from "tool not implemented". Preserve that distinction when adding real routes.
+
+4. NevermoreServer has no reference to MessageStore or any service — its entire dependency surface is three init parameters (appVersion, isDemo, mcpToken). Wiring the store in is this task's work.
+
+5. The token protects against other accounts on the Mac, not against a process running as this user, which can read the 0600 file and drive every route. That is an accepted tradeoff for a localhost companion. It does mean the token is NOT what bounds the damage once these routes can act on mail — TASK-46's confirmed-selection requirement is. Do not let TASK-46 slip past this task on the assumption that the token is holding the line.
+---
+<!-- COMMENTS:END -->

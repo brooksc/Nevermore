@@ -4,7 +4,7 @@ title: Surface the local server's state in Settings
 status: To Do
 assignee: []
 created_date: '2026-08-20 21:20'
-updated_date: '2026-08-20 21:20'
+updated_date: '2026-08-21 00:13'
 labels:
   - mcp
   - ui
@@ -34,3 +34,15 @@ Deferred out of the first pass deliberately, so it is worth being explicit about
 - [ ] #4 The token file path is shown, so an MCP client can be configured without hunting for it
 - [ ] #5 Turning the server off releases the port and removes the token file
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: claude
+created: 2026-08-21 00:13
+---
+Scope clarification after TASK-42 merged (main 2c5e085): NOTHING CONSTRUCTS NevermoreServer. There is no app-lifecycle wiring, no MCPTokenManager.generateAndWrite() at launch, no delete() at shutdown, and start() is never called in the shipping app. TASK-42 added the machinery and deliberately no runtime behaviour.
+
+So this task owns more than a Settings pane: deciding when the server starts and stops, generating and removing the token around that lifecycle, and surfacing the result are one decision and belong together here. Until this is done the server does not listen at all, which means TASK-44's bridge has nothing to connect to — worth confirming the sequencing before starting TASK-44, or at least doing the lifecycle wiring early enough that TASK-44 can be tested end to end.
+---
+<!-- COMMENTS:END -->
