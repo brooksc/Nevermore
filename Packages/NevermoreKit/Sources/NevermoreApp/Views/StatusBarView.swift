@@ -30,12 +30,15 @@ struct StatusBarView: View {
 
     private var leading: some View {
         Group {
-            if model.selection.isEmpty {
-                Text("\(model.rows.count) senders · \(model.totalMessages) messages")
+            // Counted against the visible list, not the raw selection: the count
+            // used to describe rows from whichever collection they were clicked
+            // in, and to read "0 selected" for an Unsubscribed row whose
+            // messages are gone.
+            if model.selectedCount == 0 {
+                Text("\(model.visibleIDs.count) senders · \(model.totalMessages) messages")
             } else {
-                let groups = model.selectedGroups
-                let msgs = groups.reduce(0) { $0 + $1.total }
-                Text("\(groups.count) selected · \(msgs) messages")
+                let msgs = model.selectedGroups.reduce(0) { $0 + $1.total }
+                Text("\(model.selectedCount) selected · \(msgs) messages")
                     .foregroundStyle(.primary)
             }
         }

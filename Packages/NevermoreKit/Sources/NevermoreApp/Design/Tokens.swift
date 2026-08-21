@@ -1,3 +1,4 @@
+import NevermoreKit
 import SwiftUI
 
 /// Design tokens transcribed from `Nevermore UI.dc.html` (Claude Design).
@@ -33,19 +34,9 @@ enum Tokens {
     }
 }
 
-/// The sidebar collections.
-///
-/// "Unsubscribable" and "Manual only" were removed: every sender we discover is
-/// found *by* its List-Unsubscribe header, so "Unsubscribable" always equalled
-/// "All Senders" and "Manual only" was always empty. The remaining destinations
-/// are genuinely distinct sender *states*, not filters of one list.
-enum Collection: String, CaseIterable, Identifiable, Hashable {
-    case allSenders
-    case reappeared
-    case unsubscribed, ignored
-
-    var id: String { rawValue }
-
+/// How the collections defined in NevermoreKit are presented. The cases and
+/// their membership rules live there, where they can be tested without a UI.
+extension Collection {
     var title: String {
         switch self {
         case .allSenders: "All Senders"

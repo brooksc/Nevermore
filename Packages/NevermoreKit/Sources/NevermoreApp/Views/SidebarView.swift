@@ -1,3 +1,4 @@
+import NevermoreKit
 import SwiftUI
 
 struct SidebarView: View {
