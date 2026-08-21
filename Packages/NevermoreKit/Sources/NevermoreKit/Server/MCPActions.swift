@@ -252,10 +252,19 @@ public struct AgentProposalStatus: Sendable, Encodable, Equatable {
     /// `awaiting_review` — it is on screen, untouched.
     /// `edited` — the human took senders out of it and is still reviewing.
     /// `dismissed` — the human cleared it. Nothing was done to any sender.
+    /// `in_progress` — the human is working through it; some senders have been
+    /// acted on and left the queue, and some are still waiting.
+    /// `worked` — every sender was decided rather than the queue being cleared.
+    ///
+    /// `edited` and `in_progress` look alike from outside — a sender is missing
+    /// either way — and mean opposite things. Absence alone is not a rejection;
+    /// `outcomes` is what separates them.
     public static let none = "none"
     public static let awaitingReview = "awaiting_review"
     public static let edited = "edited"
     public static let dismissed = "dismissed"
+    public static let inProgress = "in_progress"
+    public static let worked = "worked"
 
     public let state: String
     public let proposalId: String?

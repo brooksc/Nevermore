@@ -91,20 +91,33 @@ final class AgentActions: MCPActions {
         let ours = live.flatMap { $0.id == sent?.id ? $0 : nil }
         let sentKeys = sent?.items.map(\.groupKey) ?? []
         let remaining = Set(ours?.items.map(\.groupKey) ?? [])
-        let removed = sent == nil ? [] : sentKeys.filter { !remaining.contains($0) }
+        let outcomes = await model.agentOutcomes.outcomes(for: Set(sentKeys))
+
+        // A row leaves the proposal for two opposite reasons, and telling them
+        // apart matters more than it looks: acted on is the agent being right,
+        // taken out is the agent being wrong. Reporting the first as the second
+        // would teach it the reverse of what happened. The outcome ledger is the
+        // discriminator — a sender that was acted on has one, a sender the human
+        // declined does not.
+        let actedKeys = model.proposalActedKeys
+        let gone = sent == nil ? [] : sentKeys.filter { !remaining.contains($0) }
+        let removed = gone.filter { !actedKeys.contains($0) }
+        let acted = gone.filter { actedKeys.contains($0) }
 
         let state: String
         if sent == nil {
             state = AgentProposalStatus.none
         } else if ours == nil {
-            state = AgentProposalStatus.dismissed
+            // Everything is gone. Whether that was a decline or a finished
+            // review is, again, the ledger's answer rather than a guess.
+            state = acted.isEmpty ? AgentProposalStatus.dismissed : AgentProposalStatus.worked
+        } else if !acted.isEmpty {
+            state = AgentProposalStatus.inProgress
         } else if removed.isEmpty {
             state = AgentProposalStatus.awaitingReview
         } else {
             state = AgentProposalStatus.edited
         }
-
-        let outcomes = await model.agentOutcomes.outcomes(for: Set(sentKeys))
         return .status(
             AgentProposalStatus(
                 state: state,
@@ -136,6 +149,15 @@ final class AgentActions: MCPActions {
                 + "that the judgement was wrong about those rows. " + outcomes
         case AgentProposalStatus.awaitingReview:
             return "Still waiting on the human. Nothing has happened yet. " + outcomes
+        case AgentProposalStatus.inProgress:
+            return "The human is working through the proposal. Senders that have been acted on "
+                + "have left the queue and appear in `outcomes`; `remaining_count` is what is "
+                + "still waiting on a decision. Do not read a sender's absence as a rejection "
+                + "here — check `outcomes` first. " + outcomes
+        case AgentProposalStatus.worked:
+            return "The human worked through the whole proposal; every sender was decided rather "
+                + "than the queue being cleared. What was actually done to each one is in "
+                + "`outcomes`, and `removed_by_human` names any the human declined. " + outcomes
         default:
             return "Nothing has been proposed in this run of Nevermore. " + outcomes
         }

@@ -202,6 +202,7 @@ final class AppModel {
         reauthAccount = nil
         groups = []
         proposal = nil
+        proposalActedKeys = []
         browserQueue = BrowserQueue()
         selection = []
         do {
@@ -230,6 +231,7 @@ final class AppModel {
         backend = nil
         groups = []
         proposal = nil
+        proposalActedKeys = []
         browserQueue = BrowserQueue()
         selection = []
         syncState = .idle
@@ -368,6 +370,7 @@ final class AppModel {
 
         groups = []
         proposal = nil
+        proposalActedKeys = []
         browserQueue = BrowserQueue()
         selection = []
         ignoredKeys = []
@@ -716,6 +719,7 @@ final class AppModel {
         backend = nil
         groups = []
         proposal = nil
+        proposalActedKeys = []
         browserQueue = BrowserQueue()
         selection = []
         currentAccount = email
@@ -734,6 +738,7 @@ final class AppModel {
             backend = nil
             groups = []
             proposal = nil
+        proposalActedKeys = []
             browserQueue = BrowserQueue()
             await publishMCPContext()
             if let next = currentAccount { await open(account: next) }
@@ -1133,6 +1138,7 @@ final class AppModel {
         guard let store, !isDemoMode else { return false }
         try? store.setProposal(incoming)
         proposal = incoming
+        proposalActedKeys = []
         Log.app.event("received an agent proposal of \(incoming.items.count) sender(s)")
         // Show it. A proposal that arrives behind three other windows has been
         // proposed into a void, and the review is the entire safety mechanism.
@@ -1152,6 +1158,7 @@ final class AppModel {
         guard proposal != nil else { return }
         try? store?.clearProposal()
         proposal = nil
+        proposalActedKeys = []
         Log.app.event("dismissed the agent proposal; no sender was acted on")
         leaveProposedIfGone()
     }
@@ -1159,6 +1166,37 @@ final class AppModel {
     /// Drop senders from the proposal — the human editing it, having decided
     /// the agent was wrong about those rows. Acts on the proposal only.
     func removeFromProposal(_ ids: Set<GroupID>) {
+        dropFromProposal(ids)
+    }
+
+    /// A sender that has been acted on leaves the review queue.
+    ///
+    /// Proposed is a worklist, not an archive: its whole job is to show what is
+    /// still waiting on a decision, and a row that stays after you have dealt
+    /// with it makes the list stop answering that question — you cannot see
+    /// what is left, and the obvious next keystroke acts on a sender you have
+    /// already unsubscribed from. The record of what happened is not lost; it
+    /// lives in the outcome ledger an agent reads back, and in the durable
+    /// unsubscribe history. What goes away is only the row asking you to decide
+    /// something you have decided.
+    private func retireFromProposal(_ ids: Set<GroupID>) {
+        guard let proposal, !ids.isEmpty else { return }
+        // Remember which rows left because they were acted on. Deriving this
+        // from the outcome ledger instead looked tempting and is wrong: only
+        // unsubscribe writes an outcome, so an ignored or trashed sender would
+        // be indistinguishable from one the human struck out — and the agent
+        // would be told its judgement was rejected on the rows it got right.
+        let acted = Set(ids.map(\.storageKey)).intersection(proposal.items.map(\.groupKey))
+        proposalActedKeys.formUnion(acted)
+        dropFromProposal(ids)
+    }
+
+    /// Keys from the live proposal that left it by being acted on rather than
+    /// declined. Reset whenever a new proposal arrives or the queue is cleared,
+    /// so it never describes a review that is already over.
+    private(set) var proposalActedKeys: Set<String> = []
+
+    private func dropFromProposal(_ ids: Set<GroupID>) {
         guard let proposal else { return }
         let keys = Set(ids.map(\.storageKey))
         let edited = proposal.removing(groupKeys: keys)
@@ -1405,6 +1443,7 @@ final class AppModel {
         try? targets.forEach { try store.ignore($0.id) }
         ignoredKeys = (try? store.ignoredGroupKeys()) ?? ignoredKeys
         selection.subtract(ids)
+        retireFromProposal(ids)
         Log.app.event("ignored \(targets.count) sender(s): \(targets.map(\.id.key).joined(separator: ", "))")
         guard !silently else { return }
         showToast(
@@ -1484,6 +1523,7 @@ final class AppModel {
             try store.delete(uids: movedUIDs)
             await reloadFromStore()
             selection.subtract(ids)
+            retireFromProposal(ids)
             let n = movedUIDs.count
             Log.app.event("trashed \(n) messages from \(targets.count) sender(s)")
 
@@ -1724,6 +1764,8 @@ final class AppModel {
                 }
             })
         selection.subtract(Set(targets.map(\.id)))
+        // These senders have been decided, so they leave the review queue.
+        retireFromProposal(Set(results.filter { $0.outcome != nil }.map(\.id)))
         // Keep triage flowing, the same way ignore and trash do. Without this
         // the selection is simply emptied and the next keystroke has nothing
         // to act on.
