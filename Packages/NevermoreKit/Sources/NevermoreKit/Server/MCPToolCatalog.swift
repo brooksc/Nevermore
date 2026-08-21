@@ -236,6 +236,243 @@ public enum MCPToolCatalog {
                 }
                 """,
             path: "/mcp/decisions/by-context"),
+
+        // MARK: - Writes (TASK-46)
+        //
+        // Narrow on purpose. The agent classifies and proposes; the human
+        // actuates. Every tool that reaches a sender's mailbox or a third party
+        // returns `awaiting_confirmation` and does nothing until a person says
+        // so, and there is no bulk unsubscribe here at all — see get_policy.
+
+        MCPToolDefinition(
+            name: "propose_selection",
+            description: """
+                Put a set of senders in front of the human for review, each with \
+                your reason for proposing it. This is the primary write path and the \
+                only route to acting on more than one sender: Nevermore shows them in \
+                a Proposed collection with your reasons in the rows, and the person \
+                decides. Capped at \(SenderProposal.maxItems) senders — send your best \
+                \(SenderProposal.maxItems) rather than everything, and read `dropped` \
+                and `truncated` in the response, because the human only ever sees what \
+                survived the cap. Nothing happens to any sender when you call this. A \
+                reason is required for every sender: a row nobody can see a reason for \
+                can only be rubber-stamped, which defeats the review.
+                """,
+            schemaJSON: """
+                {
+                  "type": "object",
+                  "required": ["senders"],
+                  "properties": {
+                    "summary": {"type": "string", "description": "One line saying what this proposal is, e.g. 'senders from the 2026 job search'. Shown above the list."},
+                    "senders": {
+                      "type": "array",
+                      "maxItems": \(SenderProposal.maxItems),
+                      "items": {
+                        "type": "object",
+                        "required": ["sender_id", "reason"],
+                        "properties": {
+                          "sender_id": {"type": "string", "description": "The id from list_senders."},
+                          "reason": {"type": "string", "description": "One line, in your own words, shown verbatim in the row. This is what makes your judgement checkable."}
+                        }
+                      }
+                    }
+                  }
+                }
+                """,
+            path: "/mcp/proposal/create"),
+
+        MCPToolDefinition(
+            name: "get_proposal_status",
+            description: """
+                What became of the proposal: still under review, edited (the human \
+                took senders out — the clearest signal your judgement was wrong about \
+                those rows), or dismissed. Reports per-sender outcomes for anything \
+                that has actually happened, each carrying Nevermore's own distinction \
+                between confirmed, requested, failed and needs_manual. 'requested' \
+                means the request was accepted, never that the sender honoured it — \
+                do not report it as unsubscribed. The ledger is per app run, so a \
+                relaunch empties it; the durable record is unsubscribe_history.
+                """,
+            schemaJSON: """
+                {"type": "object", "properties": {}}
+                """,
+            path: "/mcp/proposal/status"),
+
+        MCPToolDefinition(
+            name: "unsubscribe",
+            description: """
+                Ask Nevermore to unsubscribe from ONE sender. It opens the app's \
+                confirmation in front of the user and returns awaiting_confirmation \
+                having done nothing — no request has been sent when this call \
+                returns, and the answer may be no. Read `warnings`: unsubscribing \
+                tells the sender the address is live and read, which is worth \
+                nothing against a legitimate mailing list and worth something to a \
+                spammer. For several senders use propose_selection; there is no bulk \
+                unsubscribe and asking for one here is refused.
+                """,
+            schemaJSON: """
+                {
+                  "type": "object",
+                  "required": ["sender_id"],
+                  "properties": {
+                    "sender_id": {"type": "string", "description": "The id from list_senders. One sender; a list is refused."}
+                  }
+                }
+                """,
+            path: "/mcp/senders/unsubscribe"),
+
+        MCPToolDefinition(
+            name: "ignore",
+            description: """
+                Hide a sender from the working list without unsubscribing from \
+                anything. Local to this Mac, reversible with unignore, and invisible \
+                to the sender — which makes it the right answer whenever keeping the \
+                mail is fine and it is only the clutter that is the problem. Runs \
+                without asking the user. Per-sender results.
+                """,
+            schemaJSON: """
+                {
+                  "type": "object",
+                  "properties": {
+                    "sender_ids": {"type": "array", "items": {"type": "string"}},
+                    "sender_id": {"type": "string", "description": "Convenience for a single sender."}
+                  }
+                }
+                """,
+            path: "/mcp/senders/ignore"),
+
+        MCPToolDefinition(
+            name: "unignore",
+            description: """
+                Put ignored senders back in the working list. The exact reverse of \
+                ignore, and just as local. Per-sender results.
+                """,
+            schemaJSON: """
+                {
+                  "type": "object",
+                  "properties": {
+                    "sender_ids": {"type": "array", "items": {"type": "string"}},
+                    "sender_id": {"type": "string"}
+                  }
+                }
+                """,
+            path: "/mcp/senders/unignore"),
+
+        MCPToolDefinition(
+            name: "set_classification",
+            description: """
+                Record what you decided about a sender and why, so a later session \
+                does not have to re-derive it. The classification is your own label, \
+                stored verbatim and never interpreted by Nevermore; the context label \
+                is the situation the decision was contingent on (e.g. \
+                job-search-2026), which is what makes 'that is over, what can go now' \
+                answerable later through list_by_context. Recording a decision does \
+                nothing to the sender's mail. One decision per address — a later call \
+                supersedes the earlier judgement.
+                """,
+            schemaJSON: """
+                {
+                  "type": "object",
+                  "required": ["sender_id", "classification", "reason"],
+                  "properties": {
+                    "sender_id": {"type": "string"},
+                    "classification": {"type": "string", "description": "Your label, e.g. keep, expired-situation, marketing."},
+                    "reason": {"type": "string", "description": "Why, in one line. A later session reads this instead of guessing."},
+                    "context": {"type": "string", "description": "The situation this was contingent on, matched exactly later, e.g. job-search-2026."}
+                  }
+                }
+                """,
+            path: "/mcp/senders/classify"),
+
+        MCPToolDefinition(
+            name: "trash_sender_messages",
+            description: """
+                Ask to move one sender's messages to the mail provider's Trash. \
+                Destructive, so it ALWAYS puts a confirmation in front of the user \
+                and returns awaiting_confirmation having moved nothing — there is no \
+                argument, setting or policy that skips this, including the user's own \
+                trash-confirmation threshold. Trashing does not unsubscribe: the \
+                sender keeps mailing, and the new mail keeps arriving.
+                """,
+            schemaJSON: """
+                {
+                  "type": "object",
+                  "required": ["sender_id"],
+                  "properties": {
+                    "sender_id": {"type": "string"}
+                  }
+                }
+                """,
+            path: "/mcp/senders/trash"),
+
+        MCPToolDefinition(
+            name: "start_sync",
+            description: """
+                Ask Nevermore to fetch new message headers now. Returns as soon as \
+                the sync starts, not when it finishes — poll sync_status. A sync \
+                already in progress is left alone rather than restarted.
+                """,
+            schemaJSON: """
+                {"type": "object", "properties": {}}
+                """,
+            path: "/mcp/sync/start"),
+
+        MCPToolDefinition(
+            name: "set_grouping",
+            description: """
+                Correct how one sender's mail is grouped: split a domain into its \
+                separate addresses when they are really different senders, or keep \
+                the domain as one row. Affects display and what an unsubscribe acts \
+                on; it never touches the mail, and recorded decisions survive it \
+                because they are keyed by address rather than by group.
+                """,
+            schemaJSON: """
+                {
+                  "type": "object",
+                  "required": ["sender_id", "mode"],
+                  "properties": {
+                    "sender_id": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["split_by_address", "keep_as_one"]}
+                  }
+                }
+                """,
+            path: "/mcp/senders/grouping"),
+
+        MCPToolDefinition(
+            name: "forget_unsubscribe_record",
+            description: """
+                Drop Nevermore's record that a sender was unsubscribed from, moving \
+                them back into the working list. The record is the app's only memory \
+                that the unsubscribe happened, and forgetting it does not undo \
+                anything with the sender — the next unsubscribe is a real second \
+                request. Local and reversible in the app for a moment afterwards.
+                """,
+            schemaJSON: """
+                {
+                  "type": "object",
+                  "required": ["sender_id"],
+                  "properties": {
+                    "sender_id": {"type": "string"}
+                  }
+                }
+                """,
+            path: "/mcp/unsubscribe/forget"),
+
+        MCPToolDefinition(
+            name: "get_policy",
+            description: """
+                What you may do unattended and what needs the human, so you can plan \
+                a session instead of discovering the walls mid-batch. The short \
+                version: everything local and reversible runs on its own; anything \
+                that reaches the mailbox or a third party asks the user first; and \
+                there is no bulk unsubscribe over MCP and will not be one — bulk goes \
+                through propose_selection and a human confirming that exact set in \
+                the app. Answers whether or not a mailbox is open.
+                """,
+            schemaJSON: """
+                {"type": "object", "properties": {}}
+                """,
+            path: "/mcp/policy"),
     ]
 
     /// The description a client is shown: the tool's own text plus the two

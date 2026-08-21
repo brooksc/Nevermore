@@ -36,6 +36,10 @@ public actor LocalServerController {
     /// can be restarted (demo mode) while the account stays put. Whichever happens second has to
     /// find the other already recorded.
     private var mcpContext: MCPContext?
+    /// The app the write routes act through, held here for the same reason the context is: the
+    /// window exists across restarts of the server, and whichever is set second has to find the
+    /// other already recorded.
+    private var mcpActions: (any MCPActions)?
 
     public private(set) var status: LocalServerStatus = .off
 
@@ -66,6 +70,7 @@ public actor LocalServerController {
             let token = try MCPTokenManager.generateAndWrite(at: tokenURL)
             let fresh = NevermoreServer(appVersion: appVersion, isDemo: isDemo, mcpToken: token)
             await fresh.setMCPContext(mcpContext)
+            await fresh.setMCPActions(mcpActions)
             server = fresh
             try await fresh.start()
             status = .running(port: await fresh.listeningPort)
@@ -98,6 +103,15 @@ public actor LocalServerController {
     public func setMCPContext(_ context: MCPContext?) async {
         mcpContext = context
         await server?.setMCPContext(context)
+    }
+
+    /// Record which app the MCP write routes act through, and tell a running server about it.
+    ///
+    /// Nil while no mailbox is open, for the same reason the context is: a write that landed
+    /// nowhere but answered 200 would be reported to the user's agent as done.
+    public func setMCPActions(_ actions: (any MCPActions)?) async {
+        mcpActions = actions
+        await server?.setMCPActions(actions)
     }
 
     /// Stop and start again, so a running server picks up a changed `isDemo` — otherwise

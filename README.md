@@ -95,8 +95,9 @@ Nevermore is the opposite shape:
 - **Demo mode.** A built-in sample mailbox you can explore before handing over a
   password, and switch back to any time from Settings. It runs on a backend with
   no network code in it, so nothing in demo mode can reach a server.
-- **Read-only MCP server.** Optional, off by default: let an AI agent read and
-  classify your senders while you keep every action. See [Connecting an AI
+- **MCP server.** Optional, off by default: let an AI agent read and classify
+  your senders, and propose a set for you to review. Nothing reaches a sender
+  without you confirming it in the app. See [Connecting an AI
   agent](#connecting-an-ai-agent-mcp).
 
 ## Screenshots
@@ -140,7 +141,7 @@ drag Nevermore to Applications. Signed and notarized by Apple.
 ```bash
 cd Packages/NevermoreKit
 swift build                       # build everything
-swift run nevermore-tests         # run the test suite (250 tests)
+swift run nevermore-tests         # run the test suite (285 tests)
 ./make-app.sh release             # produce a signed Nevermore.app
 ./make-dmg.sh --notarize          # produce a notarized, stapled DMG
 ```
@@ -189,7 +190,7 @@ Packages/NevermoreKit/
 │   │   ├── Store/             # GRDB/SQLite header cache
 │   │   ├── Demo/              # fabricated mailbox + a backend with no network
 │   │   └── Credentials/       # Keychain, account registry
-│   │   └── Server/            # loopback HTTP server + the read-only MCP surface
+│   │   └── Server/            # loopback HTTP server + the MCP surface
 │   ├── NevermoreApp/          # SwiftUI app: views, sheets, AppModel
 │   ├── NevermoreMCP/          # nevermore-mcp: stdio->HTTP bridge for MCP clients
 │   └── Probe/                 # CLI harness for live-mailbox testing
@@ -233,8 +234,9 @@ Nevermore decides one sender at a time, which is the right shape when the answer
 is uncertain and useless when the question is *"which of these 400 senders
 belong to a life situation that is now over"*. That judgement is semantic and
 changes over time. Rather than build an LLM into a mail app, Nevermore can hand
-a **read-only** view of your senders to an agent you already use, and keep the
-acting to itself.
+a view of your senders to an agent you already use — and keep the acting for
+you. The agent classifies and **proposes**; you review the proposal in the app
+and decide.
 
 **Read this first: subject lines leave your Mac.** The agent sees sender names,
 addresses, domains, subject lines, dates and read rates — and sends them to
@@ -285,10 +287,30 @@ POST, plain link, `mailto:`, or nothing machine-readable — which is known from
 the stored headers, so an agent can tell you which senders will need a browser
 without attempting anything.
 
+Eleven write tools, all of them narrow. `propose_selection` is the main one: it
+fills a **Proposed** collection with up to 25 senders and the agent's one-line
+reason for each, and brings the window forward so you can go through them with
+the same keyboard triage as any other list. `get_proposal_status` tells the
+agent what you did with it. `ignore` / `unignore`, `set_classification`,
+`start_sync`, `set_grouping` and `forget_unsubscribe_record` are local to your
+Mac and run without asking. `unsubscribe` (one sender) and
+`trash_sender_messages` put Nevermore's own confirmation in front of you and do
+nothing until you answer. `get_policy` tells the agent all of this up front.
+
 ### What it can't do
 
-- **It cannot act.** There is no unsubscribe, ignore or trash tool. Bulk action
-  goes through a selection you review and confirm in the app.
+- **It cannot unsubscribe in bulk. Ever.** There is no batch tool, no setting
+  that enables one, and no token an agent can present. A set of senders is
+  unsubscribed only after you have reviewed *that exact set* in the app and
+  confirmed it — and the confirmation is bound to those senders, single-use, and
+  expires, so it can't be turned on a set you never saw.
+- **It cannot act quietly.** Unsubscribing or trashing through an agent raises
+  the same dialog your own keystroke would. Trash always asks, even below the
+  threshold that lets your own trash go through silently.
+- **It cannot claim more than the app would.** Outcomes come back per sender as
+  *confirmed*, *requested*, *failed* or *needs a browser* — the same four the
+  app shows you — so an agent can't report "unsubscribed" where Nevermore would
+  only say "requested".
 - **It cannot switch accounts.** Only the account currently open is served, and
   every response names it.
 - **It refuses in demo mode**, so an agent can't spend a context window

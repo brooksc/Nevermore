@@ -12,6 +12,10 @@ struct UnsubscribeFlow: View {
     /// standing preference, this is one deliberate keystroke that already said
     /// what it wanted.
     var immediateDelete = false
+    /// Who asked for this. An agent-initiated unsubscribe always shows the
+    /// confirm step, whatever the user's standing preference says about their
+    /// own keystrokes — see `UnsubscribeConfirmation`.
+    var origin: ActionOrigin = .user
     /// Escalate a sender to the in-app browser after the automated attempt failed.
     var onManualFallback: (GroupID) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -47,9 +51,16 @@ struct UnsubscribeFlow: View {
             // Honor "Ask before unsubscribing": when off, skip the confirm and
             // go straight to the action, deleting if that's the default.
             guard stage == .confirm else { return }
-            if immediateDelete {
+            // An agent-initiated unsubscribe stops here whatever the settings
+            // say. The MCP route has already told the agent a human is being
+            // asked, and that has to be true in every configuration of the app —
+            // including the one where the user turned confirmations off for
+            // their own keystrokes.
+            let mustAsk = UnsubscribeConfirmation.requiresPrompt(
+                origin: origin, askBeforeUnsubscribe: AppSettings.askBeforeUnsubscribe)
+            if immediateDelete, origin == .user {
                 start(delete: true)
-            } else if !AppSettings.askBeforeUnsubscribe {
+            } else if !mustAsk {
                 start(delete: AppSettings.deleteIsDefault)
             }
         }
@@ -314,7 +325,12 @@ struct UnsubscribeFlow: View {
         alsoDelete = delete
         stage = .progress
         task = Task {
-            let outcomes = await model.performUnsubscribe(targets) { index, _ in
+            // A person is looking at exactly these senders and has just said go
+            // — whether by pressing the button, or by the ⇧U keystroke that says
+            // it in one move. That is what a review token records, and the batch
+            // path below will not run without one. See `ReviewToken`.
+            let token = await model.confirmSelection(targets)
+            let outcomes = await model.performUnsubscribe(targets, token: token) { index, _ in
                 currentIndex = index
             }
             results = outcomes

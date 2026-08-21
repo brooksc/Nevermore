@@ -80,8 +80,8 @@ Nevermore never contacts the developer. There is no licence check and no
 
 ## Connecting an AI agent (MCP)
 
-Nevermore can expose a **read-only** view of your senders to an AI coding agent
-through a local MCP server. It is off unless you turn it on in Settings, and
+Nevermore can expose a view of your senders to an AI coding agent through a
+local MCP server, and let it propose senders for you to review. It is off unless you turn it on in Settings, and
 turning it on changes the app's privacy posture in a way nothing else here does
 — so this section states it plainly rather than burying it behind a prompt.
 
@@ -96,11 +96,16 @@ what it does with the text it is sent is governed by that provider's terms, not
 by this policy and not by the developer. If you would not paste your subject
 lines into that service, do not connect it here.
 
-**What the agent cannot do.** The MCP surface is read-only. It cannot
-unsubscribe, ignore, trash, or send anything, and it cannot switch accounts. It
-serves only the account currently open in the app, and it refuses entirely while
-the app is in demo mode. Acting on mail in bulk still requires a selection you
-have reviewed and confirmed in the app yourself.
+**What the agent cannot do.** It cannot unsubscribe from a set of senders. There
+is no bulk unsubscribe over MCP, no setting that turns one on, and nothing an
+agent can present to skip the review: a set of senders is unsubscribed only
+after you have reviewed *that exact set* in the app and confirmed it. A single
+unsubscribe, and trashing a sender's messages, raise the same dialog your own
+keystroke would and do nothing until you answer. What the agent can do on its
+own is local to your Mac and reversible — propose senders for you to look at,
+hide or unhide one, record a note about it, regroup it, or start a sync. It
+cannot switch accounts, it serves only the account currently open in the app,
+and it refuses entirely while the app is in demo mode.
 
 **How it is reached.** The server listens on the loopback interface only —
 127.0.0.1, on a port in 8775–8779 — so nothing outside your Mac can reach it.
