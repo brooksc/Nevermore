@@ -1,10 +1,10 @@
 ---
 id: TASK-46
 title: Let the agent act only on a selection the user has confirmed
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-20 21:19'
-updated_date: '2026-08-20 21:20'
+updated_date: '2026-08-21 02:16'
 labels:
   - mcp
 dependencies:
@@ -45,11 +45,31 @@ TASK-30 is relevant and unresolved: unsubscribing can confirm a live address to 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A batch unsubscribe cannot be performed without a review token minted by a human confirmation
-- [ ] #2 A review token is bound to the exact confirmed set and cannot be replayed against a different one
-- [ ] #3 Proposals larger than the cap are truncated and the truncation is reported to the agent
-- [ ] #4 Batch results report per-sender outcomes preserving the confirmed, requested, failed and needsManual distinction
-- [ ] #5 The agent cannot report an unsubscribe as confirmed where the app would say requested
-- [ ] #6 trash_sender_messages always requires explicit confirmation regardless of policy
-- [ ] #7 Tests cover token replay, a mismatched set, an expired token, and cap truncation
+- [x] #1 A batch unsubscribe cannot be performed without a review token minted by a human confirmation
+- [x] #2 A review token is bound to the exact confirmed set and cannot be replayed against a different one
+- [x] #3 Proposals larger than the cap are truncated and the truncation is reported to the agent
+- [x] #4 Batch results report per-sender outcomes preserving the confirmed, requested, failed and needsManual distinction
+- [x] #5 The agent cannot report an unsubscribe as confirmed where the app would say requested
+- [x] #6 trash_sender_messages always requires explicit confirmation regardless of policy
+- [x] #7 Tests cover token replay, a mismatched set, an expired token, and cap truncation
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: claude
+created: 2026-08-21 02:16
+---
+Criteria ticked during integration review, against a suite run by the integrator rather than on the implementer's word. Every one is covered by a named passing test:
+
+#1 — "a confirmed selection can be acted on, once" and "unsubscribe takes one sender, and says why when asked for more"
+#2 — "a token cannot be replayed", "a token is worthless against a set the user never saw"
+#3 — "a proposal over the cap is truncated and the agent is told"
+#4 — "the four outcomes reach the agent as four outcomes"
+#5 — "a success flag would have hidden three of the four", "the engine's own words survive the trip"
+#6 — "an agent's trash prompts however low the user's threshold is"
+#7 — replay, mismatched set, expiry and cap truncation all have their own cases
+
+The implementing agent left all seven unchecked, which was over-conservative rather than wrong: these are model-level guarantees it had genuinely proven. Noted because the reverse error — ticking what was never run — happened repeatedly in this epic, and the correction should not swing so far that real evidence goes unrecorded.
+---
+<!-- COMMENTS:END -->

@@ -1,7 +1,7 @@
 ---
 id: TASK-45
 title: Show agent proposals in a Proposed collection the user reviews
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-20 21:19'
 updated_date: '2026-08-20 22:40'

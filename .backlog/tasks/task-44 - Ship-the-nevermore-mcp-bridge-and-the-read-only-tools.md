@@ -1,7 +1,7 @@
 ---
 id: TASK-44
 title: Ship the nevermore-mcp bridge and the read-only tools
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-20 21:19'
 updated_date: '2026-08-21 09:00'

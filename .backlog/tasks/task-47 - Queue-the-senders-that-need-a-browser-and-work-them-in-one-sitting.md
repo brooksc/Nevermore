@@ -1,7 +1,7 @@
 ---
 id: TASK-47
 title: 'Queue the senders that need a browser, and work them in one sitting'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-20 21:20'
 updated_date: '2026-08-20 21:20'

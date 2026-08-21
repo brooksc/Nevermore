@@ -1,7 +1,7 @@
 ---
 id: TASK-48
 title: Surface the local server's state in Settings
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-20 21:20'
 updated_date: '2026-08-21 00:13'

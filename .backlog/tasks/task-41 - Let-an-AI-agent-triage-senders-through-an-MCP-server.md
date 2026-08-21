@@ -1,7 +1,7 @@
 ---
 id: TASK-41
 title: Let an AI agent triage senders through an MCP server
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-20 21:17'
 updated_date: '2026-08-20 21:18'
