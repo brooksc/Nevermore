@@ -143,7 +143,9 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            localServer
+            #if !NEVERMORE_MAS
+                localServer
+            #endif
             Section("Diagnostics") {
                 Toggle("Verbose logging", isOn: $verboseLogging)
                 Text("When on, detailed events are recorded to the system log and shown in Console. Sender addresses are logged; message contents and your password never are.")
@@ -176,6 +178,13 @@ struct SettingsView: View {
     /// and the section is where a bind failure becomes visible: the server binds
     /// only 8775–8779 and refuses to fall back to a port no client would probe,
     /// so with all five taken there is nothing to see anywhere else.
+    ///
+    /// Absent from the Mac App Store build. The store target is sandboxed with
+    /// `network.client` only — no `network.server` — so it could not bind the
+    /// listener even if asked, and the bridge that would talk to it ships in the
+    /// DMG alone. A toggle for a feature that cannot work is worse than no
+    /// toggle. See TASK-40 for whether the store build could ever carry this.
+    #if !NEVERMORE_MAS
     private var localServer: some View {
         Section("Local server") {
             Toggle("Allow AI assistants to connect", isOn: $localServerEnabled)
@@ -217,6 +226,7 @@ struct SettingsView: View {
             }
         }
     }
+    #endif
 
     /// Double-clicking the version reveals the debug tools. Hidden rather than
     /// absent: resetting to a fresh install is exactly the wrong button for a

@@ -108,7 +108,20 @@ let project = Project(
             dependencies: [
                 .package(product: "NevermoreKit")
             ],
-            settings: .settings(base: signingSettings)
+            // NEVERMORE_MAS compiles out anything the sandbox cannot run. Today
+            // that is the local HTTP server and its Settings section: the
+            // entitlements grant `network.client` but not `network.server`, so
+            // the listener could not bind, and the stdio bridge that would talk
+            // to it is not in this target's sources anyway. SwiftPM never
+            // defines this, so the DMG build keeps the feature.
+            //
+            // (Naming the bridge's product here, even in a comment, trips the
+            // test that pins this target to the app's sources alone.)
+            settings: .settings(
+                base: signingSettings.merging([
+                    "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "$(inherited) NEVERMORE_MAS"
+                ]) { _, new in new }
+            )
         )
     ],
     schemes: [

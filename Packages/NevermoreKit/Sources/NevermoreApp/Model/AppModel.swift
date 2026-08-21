@@ -431,8 +431,18 @@ final class AppModel {
     /// ports takes seconds, and opening the mailbox must not wait for a feature
     /// most users never turn on.
     private func startLocalServerIfEnabled() {
-        guard AppSettings.localServerEnabled else { return }
-        Task { await setLocalServer(enabled: true) }
+        #if NEVERMORE_MAS
+            // The store build is sandboxed with `network.client` only, so the
+            // listener cannot bind, and the bridge that would talk to it ships
+            // in the DMG alone. Refusing here rather than failing at bind time
+            // keeps a stale `localServerEnabled` — set in a DMG build, carried
+            // over by a user who later installed from the store — from putting
+            // a red error in a Settings section the store build doesn't show.
+            return
+        #else
+            guard AppSettings.localServerEnabled else { return }
+            Task { await setLocalServer(enabled: true) }
+        #endif
     }
 
     /// Turn the server on or off. Off releases the port *and* removes the token
