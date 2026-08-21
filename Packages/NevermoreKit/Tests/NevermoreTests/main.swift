@@ -1583,11 +1583,11 @@ Harness.suite("Server routing") {
     Harness.test("the right token gets past auth, and the scheme is case-insensitive") {
         let secret = "s3cret-token"
         let authed = route(
-            HTTPRequest(method: "POST", path: "/mcp/senders/list",
+            HTTPRequest(method: "POST", path: "/mcp/not-a-tool",
                         headers: ["authorization": "bearer \(secret)"]),
             token: secret)
-        // The tool routes are TASK-44; what matters here is that auth passed and the 404 is about
-        // the route, not the credential.
+        // Auth passed, so the 404 is about the route rather than the credential. A real tool route
+        // is used for that distinction in the TASK-44 suites, where a mailbox exists to serve it.
         eq(authed.statusCode, 404)
         expect(bodyText(authed).contains("MCP route not found"), "404 is about the route")
     }
@@ -1782,8 +1782,9 @@ Harness.suite("Local server lifecycle") {
     }
 
     /// The status code for a POST to an /mcp/ route with whatever credential the token file holds.
-    /// 401 means the file and the running server disagree; 404 means they match and the route
-    /// simply doesn't exist yet (TASK-44).
+    /// 401 means the file and the running server disagree; 503 means they match and the request
+    /// got all the way to "no mailbox is open", which is as far as a controller started without an
+    /// account can go.
     @Sendable func mcpStatus(port: UInt16, token: String?) async -> Int? {
         guard let url = URL(string: "http://127.0.0.1:\(port)/mcp/senders/list") else { return nil }
         var request = URLRequest(url: url)
@@ -1810,8 +1811,8 @@ Harness.suite("Local server lifecycle") {
             // on disk authenticates against the server that is actually listening.
             let token = MCPTokenManager.read(at: tokenURL)
             expect(token != nil, "a 0600 token exists while the server runs")
-            eq(runAsync { await mcpStatus(port: port, token: token) }, 404,
-               "the written token is accepted (404 is the route, not the credential)")
+            eq(runAsync { await mcpStatus(port: port, token: token) }, 503,
+               "the written token is accepted (503 is the absent mailbox, not the credential)")
             eq(runAsync { await mcpStatus(port: port, token: nil) }, 401,
                "and the gate is still closed without it")
         }
@@ -2053,6 +2054,900 @@ Harness.suite("Selection action availability") {
                 }
             }
         }
+    }
+}
+
+
+// MARK: - MCP read surface (TASK-44)
+
+/// One header row, with everything the MCP surface reads off it under control.
+func mcpMessage(
+    _ uid: UInt32,
+    from: String,
+    subject: String = "Subject",
+    daysAgo: Double = 0,
+    unread: Bool = false,
+    unsub: String? = "<https://ex.com/u>",
+    oneClick: Bool = false,
+    listID: String? = nil
+) -> EmailMessage {
+    EmailMessage(
+        uid: MessageUID(uid),
+        sender: EmailSender(header: from),
+        subject: subject,
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_000 - daysAgo * 86400),
+        isUnread: unread,
+        unsubscribe: ListUnsubscribe(
+            header: unsub, postHeader: oneClick ? "List-Unsubscribe=One-Click" : nil),
+        listID: listID)
+}
+
+/// A snapshot built the way the server builds one: through a real store, so the
+/// round-trip that reconstitutes `ListUnsubscribe` from the stored header is
+/// part of every route test rather than something the tests fake past.
+func mcpSnapshot(_ store: MessageStore, account: String = "me@example.com") throws -> MCPSnapshot {
+    try MCPSnapshot.load(MCPContext(account: account, store: store))
+}
+
+func mcpCall(_ path: String, _ snapshot: MCPSnapshot, _ arguments: [String: Any] = [:])
+    -> HTTPResponse
+{
+    let body = try? JSONSerialization.data(withJSONObject: arguments)
+    let request = HTTPRequest(
+        method: "POST", path: path, headers: ["content-type": "application/json"], body: body)
+    return MCPRoutes.handle(path: path, request: request, snapshot: snapshot)
+        ?? .error("no such route", code: 404)
+}
+
+func mcpJSON(_ response: HTTPResponse) -> [String: Any] {
+    (try? JSONSerialization.jsonObject(with: response.body)) as? [String: Any] ?? [:]
+}
+
+func mcpRows(_ response: HTTPResponse, _ key: String = "senders") -> [[String: Any]] {
+    mcpJSON(response)[key] as? [[String: Any]] ?? []
+}
+
+Harness.suite("Unsubscribe method partition") {
+    func method(_ header: String?, oneClick: Bool = false) -> UnsubscribeMethod {
+        UnsubscribeMethod.of(
+            SenderGroup(
+                id: GroupID(kind: .domain, key: "x.com"),
+                messages: [mcpMessage(1, from: "A <a@x.com>", unsub: header, oneClick: oneClick)]))
+    }
+
+    Harness.test("an RFC 8058 sender is one-click, the same link without it is web") {
+        eq(method("<https://ex.com/u>", oneClick: true), .oneClick)
+        eq(method("<https://ex.com/u>"), .web)
+    }
+
+    Harness.test("a mailto-only sender is mailto, and no header at all is none") {
+        eq(method("<mailto:stop@ex.com?subject=off>"), .mailto)
+        eq(method(nil), UnsubscribeMethod.none)
+    }
+
+    Harness.test("a web target wins over a mailto, matching what the engine would do") {
+        // UnsubscribeEngine tries the web target first, so reporting `mailto`
+        // here would tell an agent about an attempt the app would never make.
+        eq(method("<https://ex.com/u>, <mailto:stop@ex.com>"), .web)
+    }
+
+    Harness.test("only 'none' needs a browser — every other method has an automated path") {
+        for method in UnsubscribeMethod.allCases {
+            eq(method.needsBrowser, method == .none, method.rawValue)
+        }
+    }
+
+    Harness.test("the method is taken from the newest message that has a target") {
+        // Senders drop the header from the odd message; falling back to "none"
+        // because the newest one happens to lack it would wrongly queue a sender
+        // for the browser.
+        let group = SenderGroup(
+            id: GroupID(kind: .domain, key: "x.com"),
+            messages: [
+                mcpMessage(2, from: "A <a@x.com>", daysAgo: 0, unsub: nil),
+                mcpMessage(1, from: "A <a@x.com>", daysAgo: 5, oneClick: true),
+            ])
+        eq(UnsubscribeMethod.of(group), .oneClick)
+    }
+}
+
+Harness.suite("MCP snapshot") {
+    Harness.test("rebuilds the app's collections from the store alone") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([
+                mcpMessage(1, from: "Working <a@working.com>"),
+                mcpMessage(2, from: "Hidden <b@hidden.com>"),
+                mcpMessage(3, from: "Gone <c@gone.com>", daysAgo: 10),
+                mcpMessage(4, from: "Back <d@back.com>", daysAgo: 0),
+            ])
+            try store.ignore(GroupID(kind: .domain, key: "hidden.com"))
+            try store.recordUnsubscribe(
+                GroupID(kind: .domain, key: "gone.com"), senderName: "Gone",
+                senderEmail: "c@gone.com", senderDomain: "gone.com", url: nil,
+                outcome: .requested, attemptedAt: Date(timeIntervalSince1970: 1_700_000_000))
+            // Recorded *before* their most recent message: that is what reappeared means.
+            try store.recordUnsubscribe(
+                GroupID(kind: .domain, key: "back.com"), senderName: "Back",
+                senderEmail: "d@back.com", senderDomain: "back.com", url: nil,
+                outcome: .requested,
+                attemptedAt: Date(timeIntervalSince1970: 1_700_000_000 - 86400))
+
+            let snapshot = try mcpSnapshot(store)
+            eq(snapshot.groups(in: .allSenders).count, 1, "all senders")
+            eq(snapshot.groups(in: .ignored).count, 1, "ignored")
+            eq(snapshot.groups(in: .unsubscribed).count, 1, "unsubscribed")
+            eq(snapshot.groups(in: .reappeared).count, 1, "reappeared")
+            eq(snapshot.messagesSinceUnsubscribe(snapshot.groups(in: .reappeared)[0]), 1)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("a decision on any address in a merged group rolls up to the row") {
+        // The whole reason TASK-43 keys decisions by address: regrouping must not
+        // throw the agent's judgement away.
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([
+                mcpMessage(1, from: "Acme <news@acme.com>"),
+                mcpMessage(2, from: "Acme <deals@mail.acme.com>"),
+            ])
+            try store.recordDecision(
+                address: "deals@mail.acme.com", classification: "keep",
+                reason: "order receipts", context: "shopping")
+            let snapshot = try mcpSnapshot(store)
+            eq(snapshot.groups.count, 1, "one merged row")
+            eq(snapshot.decision(for: snapshot.groups[0])?.classification, "keep")
+        } catch { expect(false, "threw: \(error)") }
+    }
+}
+
+Harness.suite("MCP read routes") {
+    /// A mailbox big enough that paging is not theoretical.
+    func bigStore(senders: Int) throws -> MessageStore {
+        let store = try MessageStore.inMemory()
+        var messages: [EmailMessage] = []
+        var uid: UInt32 = 1
+        for i in 0 ..< senders {
+            for _ in 0 ..< (i % 3 + 1) {
+                messages.append(
+                    mcpMessage(uid, from: "Sender \(i) <news@brand\(i).com>", daysAgo: Double(i)))
+                uid += 1
+            }
+        }
+        try store.upsert(messages)
+        return store
+    }
+
+    Harness.test("list_senders defaults to a limit that won't swamp an agent") {
+        do {
+            let snapshot = try mcpSnapshot(try bigStore(senders: 400))
+            let page = mcpJSON(mcpCall("/mcp/senders/list", snapshot))
+            eq(MCPRoutes.defaultLimit, 50, "the documented default")
+            eq(page["limit"] as? Int, 50)
+            eq(page["total"] as? Int, 400)
+            eq(mcpRows(mcpCall("/mcp/senders/list", snapshot)).count, 50)
+            eq(page["has_more"] as? Bool, true)
+            eq(page["next_offset"] as? Int, 50)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("paging walks the whole list exactly once") {
+        do {
+            let snapshot = try mcpSnapshot(try bigStore(senders: 120))
+            var seen: Set<String> = []
+            var offset = 0
+            var pages = 0
+            while true {
+                let page = mcpCall(
+                    "/mcp/senders/list", snapshot, ["limit": 25, "offset": offset])
+                for row in mcpRows(page) { seen.insert(row["id"] as? String ?? "") }
+                pages += 1
+                guard let next = mcpJSON(page)["next_offset"] as? Int, pages < 20 else { break }
+                offset = next
+            }
+            eq(seen.count, 120, "every sender seen, none twice")
+            eq(pages, 5)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("a limit above the cap is reduced and says so, rather than refused") {
+        do {
+            let snapshot = try mcpSnapshot(try bigStore(senders: 400))
+            let page = mcpJSON(mcpCall("/mcp/senders/list", snapshot, ["limit": 5000]))
+            eq(page["limit"] as? Int, MCPRoutes.maxLimit)
+            expect(
+                (page["note"] as? String ?? "").contains("reduced from 5000"),
+                "the reduction is reported, not silent")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("every response names the account it is about") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
+            try store.recordDecision(
+                address: "a@x.com", classification: "drop", reason: "why", context: "cohort")
+            let snapshot = try mcpSnapshot(store, account: "someone@example.org")
+            for path in MCPRoutes.paths.sorted() {
+                let arguments: [String: Any] = [
+                    "sender_id": "domain:x.com", "context": "cohort", "query": "a",
+                ]
+                let response = mcpCall(path, snapshot, arguments)
+                eq(response.statusCode, 200, path)
+                eq(mcpJSON(response)["account"] as? String, "someone@example.org", path)
+            }
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("every response repeats that message bodies do not exist here") {
+        // An agent may only ever see one response, without the tool description
+        // that came with it — so the ceiling on what it can know has to travel
+        // on the data.
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
+            let snapshot = try mcpSnapshot(store)
+            for path in MCPRoutes.paths.sorted() where path != "/mcp/decisions/by-context" {
+                let response = mcpCall(
+                    path, snapshot, ["sender_id": "domain:x.com", "query": "a"])
+                let note = mcpJSON(response)["note"] as? String ?? ""
+                expect(note.lowercased().contains("bodies"), "\(path) note: \(note)")
+            }
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("senders are partitioned by unsubscribe method without attempting anything") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([
+                mcpMessage(1, from: "One <a@one.com>", oneClick: true),
+                mcpMessage(2, from: "Web <b@web.com>"),
+                mcpMessage(3, from: "Mail <c@mail.com>", unsub: "<mailto:stop@mail.com?subject=x>"),
+                mcpMessage(4, from: "Nothing <d@nothing.com>", unsub: nil),
+            ])
+            let snapshot = try mcpSnapshot(store)
+            for (method, key) in [
+                ("one_click", "domain:one.com"), ("web", "domain:web.com"),
+                ("mailto", "domain:mail.com"), ("none", "domain:nothing.com"),
+            ] {
+                let rows = mcpRows(
+                    mcpCall("/mcp/senders/list", snapshot, ["unsubscribe_method": method]))
+                eq(rows.count, 1, method)
+                eq(rows.first?["id"] as? String, key, method)
+            }
+            let browser = mcpRows(mcpCall("/mcp/senders/list", snapshot, ["needs_browser": true]))
+            eq(browser.count, 1, "only the sender with no target needs a human")
+            eq(browser.first?["id"] as? String, "domain:nothing.com")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("a sender that ignored an unsubscribe also needs the browser") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([mcpMessage(1, from: "Back <d@back.com>", oneClick: true)])
+            try store.recordUnsubscribe(
+                GroupID(kind: .domain, key: "back.com"), senderName: "Back",
+                senderEmail: "d@back.com", senderDomain: "back.com", url: nil, outcome: .requested,
+                attemptedAt: Date(timeIntervalSince1970: 1_700_000_000 - 86400))
+            let snapshot = try mcpSnapshot(store)
+            let rows = mcpRows(mcpCall("/mcp/senders/reappeared", snapshot))
+            eq(rows.count, 1)
+            eq(rows.first?["needs_browser"] as? Bool, true, "retrying the same POST is what failed")
+            eq(rows.first?["unsubscribe_method"] as? String, "one_click", "the method is unchanged")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("filters narrow on count, read rate, recency and list status") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([
+                mcpMessage(1, from: "Loud <a@loud.com>", daysAgo: 1, unread: true),
+                mcpMessage(2, from: "Loud <a@loud.com>", daysAgo: 2, unread: true),
+                mcpMessage(3, from: "Loud <a@loud.com>", daysAgo: 3, unread: true),
+                mcpMessage(4, from: "Read <b@read.com>", daysAgo: 400, unread: false),
+                mcpMessage(5, from: "List <c@list.com>", daysAgo: 1, listID: "<x.list.com>"),
+            ])
+            let snapshot = try mcpSnapshot(store)
+            func ids(_ arguments: [String: Any]) -> [String] {
+                mcpRows(mcpCall("/mcp/senders/list", snapshot, arguments))
+                    .compactMap { $0["id"] as? String }
+            }
+            eq(ids(["min_messages": 3]), ["domain:loud.com"])
+            eq(ids(["max_messages": 1]).count, 2)
+            eq(ids(["min_unread_percent": 100]), ["domain:loud.com"])
+            eq(ids(["max_unread_percent": 0]).count, 2)
+            eq(ids(["is_mailing_list": true]), ["domain:list.com"])
+            eq(ids(["received_before": "2023-01-01"]), ["domain:read.com"])
+            eq(ids(["received_after": "2023-01-01"]).count, 2)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("classification and context filter on what a previous session decided") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([
+                mcpMessage(1, from: "A <a@a.com>"),
+                mcpMessage(2, from: "B <b@b.com>"),
+                mcpMessage(3, from: "C <c@c.com>"),
+            ])
+            try store.recordDecision(
+                address: "a@a.com", classification: "drop", reason: "over", context: "job-search")
+            try store.recordDecision(
+                address: "b@b.com", classification: "keep", reason: "bank", context: nil)
+            let snapshot = try mcpSnapshot(store)
+            func ids(_ arguments: [String: Any]) -> [String] {
+                mcpRows(mcpCall("/mcp/senders/list", snapshot, arguments))
+                    .compactMap { $0["id"] as? String }
+            }
+            eq(ids(["classification": "drop"]), ["domain:a.com"])
+            eq(ids(["context": "job-search"]), ["domain:a.com"])
+            eq(ids(["classification": "keep"]), ["domain:b.com"])
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("an unknown collection is refused with the names that would have worked") {
+        do {
+            let snapshot = try mcpSnapshot(try bigStore(senders: 2))
+            let response = mcpCall("/mcp/senders/list", snapshot, ["collection": "inbox"])
+            eq(response.statusCode, 400)
+            let error = mcpJSON(response)["error"] as? String ?? ""
+            expect(error.contains("allSenders"), "names the valid collections: \(error)")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("the collection an agent would guess from the wire format is accepted") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
+            let snapshot = try mcpSnapshot(store)
+            eq(mcpCall("/mcp/senders/list", snapshot, ["collection": "all_senders"]).statusCode, 200)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("get_sender reports the parsed targets and what was already tried") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([
+                mcpMessage(
+                    1, from: "Acme <news@acme.com>", subject: "Sale",
+                    unsub: "<https://acme.com/u?t=1>, <mailto:stop@acme.com?subject=tok>",
+                    oneClick: true)
+            ])
+            try store.recordUnsubscribe(
+                GroupID(kind: .domain, key: "acme.com"), senderName: "Acme",
+                senderEmail: "news@acme.com", senderDomain: "acme.com",
+                url: "https://acme.com/u?t=1", outcome: .requested,
+                attemptedAt: Date(timeIntervalSince1970: 1_800_000_000))
+            let snapshot = try mcpSnapshot(store)
+            let detail = mcpJSON(
+                mcpCall("/mcp/senders/get", snapshot, ["sender_id": "domain:acme.com"]))
+            eq(detail["supports_one_click"] as? Bool, true)
+            eq((detail["web_targets"] as? [String])?.first, "https://acme.com/u?t=1")
+            let mailto = (detail["mailto_targets"] as? [[String: Any]])?.first
+            eq(mailto?["address"] as? String, "stop@acme.com")
+            eq(mailto?["identifies_recipient"] as? Bool, true)
+            let record = detail["unsubscribe_record"] as? [String: Any]
+            eq(record?["outcome"] as? String, "requested")
+            eq(record?["reappeared"] as? Bool, false)
+            eq((detail["recent_subjects"] as? [[String: Any]])?.first?["subject"] as? String, "Sale")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("get_sender and list_messages refuse an id that isn't there") {
+        do {
+            let snapshot = try mcpSnapshot(try bigStore(senders: 1))
+            for path in ["/mcp/senders/get", "/mcp/senders/messages"] {
+                eq(mcpCall(path, snapshot, ["sender_id": "domain:nope.com"]).statusCode, 404, path)
+                eq(mcpCall(path, snapshot).statusCode, 400, "\(path) without an id")
+            }
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("list_messages pages subjects newest first") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert(
+                (1 ... 30).map {
+                    mcpMessage(
+                        UInt32($0), from: "A <a@x.com>", subject: "S\($0)", daysAgo: Double(30 - $0))
+                })
+            let snapshot = try mcpSnapshot(store)
+            let first = mcpCall(
+                "/mcp/senders/messages", snapshot, ["sender_id": "domain:x.com", "limit": 10])
+            eq(mcpJSON(first)["total"] as? Int, 30)
+            eq(mcpRows(first, "messages").count, 10)
+            eq(mcpRows(first, "messages").first?["subject"] as? String, "S30", "newest first")
+            eq(mcpJSON(first)["next_offset"] as? Int, 10)
+            let last = mcpCall(
+                "/mcp/senders/messages", snapshot,
+                ["sender_id": "domain:x.com", "limit": 10, "offset": 20])
+            eq(mcpJSON(last)["has_more"] as? Bool, false)
+            eq(mcpRows(last, "messages").count, 10)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("search reaches senders already unsubscribed from or ignored") {
+        // "Did I already deal with these people" is what a search is asked, and
+        // answering it from the working list alone says no when the answer is yes.
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([
+                mcpMessage(1, from: "Acme Deals <news@acme.com>", subject: "Spring sale"),
+                mcpMessage(2, from: "Other <x@other.com>", subject: "Acme mentioned here"),
+            ])
+            try store.ignore(GroupID(kind: .domain, key: "acme.com"))
+            let snapshot = try mcpSnapshot(store)
+            eq(mcpRows(mcpCall("/mcp/senders/search", snapshot, ["query": "acme"])).count, 2)
+            eq(mcpRows(mcpCall("/mcp/senders/search", snapshot, ["query": "spring"])).count, 1)
+            eq(mcpRows(mcpCall("/mcp/senders/search", snapshot, ["query": "other.com"])).count, 1)
+            eq(mcpCall("/mcp/senders/search", snapshot).statusCode, 400, "an empty query is refused")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("unsubscribe_history reports reappearance alongside the outcome") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([
+                mcpMessage(1, from: "Back <a@back.com>", daysAgo: 0),
+                mcpMessage(2, from: "Quiet <b@quiet.com>", daysAgo: 30),
+            ])
+            try store.recordUnsubscribe(
+                GroupID(kind: .domain, key: "back.com"), senderName: "Back",
+                senderEmail: "a@back.com", senderDomain: "back.com", url: nil, outcome: .requested,
+                attemptedAt: Date(timeIntervalSince1970: 1_700_000_000 - 86400))
+            try store.recordUnsubscribe(
+                GroupID(kind: .domain, key: "quiet.com"), senderName: "Quiet",
+                senderEmail: "b@quiet.com", senderDomain: "quiet.com", url: nil,
+                outcome: .confirmed, attemptedAt: Date(timeIntervalSince1970: 1_700_000_000))
+            let snapshot = try mcpSnapshot(store)
+            let all = mcpRows(mcpCall("/mcp/unsubscribe/history", snapshot), "records")
+            eq(all.count, 2)
+            let back = all.first { $0["sender_id"] as? String == "domain:back.com" }
+            eq(back?["reappeared"] as? Bool, true)
+            let quiet = all.first { $0["sender_id"] as? String == "domain:quiet.com" }
+            eq(quiet?["reappeared"] as? Bool, false)
+            eq(
+                mcpRows(
+                    mcpCall("/mcp/unsubscribe/history", snapshot, ["outcome": "confirmed"]),
+                    "records"
+                ).count, 1)
+            eq(
+                mcpCall("/mcp/unsubscribe/history", snapshot, ["outcome": "maybe"]).statusCode, 400)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("mailbox_summary orients without returning rows") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([
+                mcpMessage(1, from: "One <a@one.com>", oneClick: true, listID: "<l.one.com>"),
+                mcpMessage(2, from: "Nothing <d@nothing.com>", unsub: nil),
+                mcpMessage(3, from: "Hidden <e@hidden.com>"),
+            ])
+            try store.ignore(GroupID(kind: .domain, key: "hidden.com"))
+            try store.recordDecision(
+                address: "a@one.com", classification: "keep", reason: "r", context: "cohort")
+            let summary = mcpJSON(mcpCall("/mcp/mailbox/summary", try mcpSnapshot(store)))
+            eq(summary["senders"] as? Int, 3)
+            eq(summary["messages"] as? Int, 3)
+            eq(summary["need_browser"] as? Int, 1)
+            eq(summary["mailing_lists"] as? Int, 1)
+            eq(summary["decided"] as? Int, 1)
+            eq(summary["contexts"] as? [String], ["cohort"])
+            eq((summary["by_collection"] as? [String: Int])?["ignored"], 1)
+            eq((summary["by_collection"] as? [String: Int])?["allSenders"], 2)
+            eq((summary["by_unsubscribe_method"] as? [String: Int])?["one_click"], 1)
+            eq((summary["by_unsubscribe_method"] as? [String: Int])?["none"], 1)
+            expect(summary["senders_list"] == nil, "no rows are returned")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("sync_status reports the token, and says so when there isn't one") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
+            eq(
+                mcpJSON(mcpCall("/mcp/sync/status", try mcpSnapshot(store)))["has_synced"] as? Bool,
+                false)
+            try store.setSyncToken(
+                SyncToken(
+                    uidValidity: 7, highestUID: 99,
+                    lastSyncedAt: Date(timeIntervalSince1970: 1_700_000_000)))
+            let status = mcpJSON(mcpCall("/mcp/sync/status", try mcpSnapshot(store)))
+            eq(status["has_synced"] as? Bool, true)
+            eq(status["uid_validity"] as? Int, 7)
+            eq(status["highest_uid"] as? Int, 99)
+            expect(
+                (status["last_synced_at"] as? String ?? "").hasPrefix("2023-11-"),
+                "an ISO date, not a float: \(status["last_synced_at"] ?? "nil")")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("list_by_context returns the cohort, including decisions whose mail is gone") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([mcpMessage(1, from: "Still <a@still.com>")])
+            try store.recordDecision(
+                address: "a@still.com", classification: "drop", reason: "over",
+                context: "job-search-2026")
+            try store.recordDecision(
+                address: "deleted@gone.com", classification: "drop", reason: "over",
+                context: "job-search-2026")
+            try store.recordDecision(
+                address: "other@x.com", classification: "keep", reason: "bank", context: "money")
+            let snapshot = try mcpSnapshot(store)
+            let cohort = mcpJSON(
+                mcpCall("/mcp/decisions/by-context", snapshot, ["context": "job-search-2026"]))
+            eq(cohort["total"] as? Int, 2)
+            eq(cohort["available_contexts"] as? [String], ["job-search-2026", "money"])
+            let rows = cohort["decisions"] as? [[String: Any]] ?? []
+            let orphan = rows.first {
+                ($0["decision"] as? [String: Any])?["address"] as? String == "deleted@gone.com"
+            }
+            expect(orphan != nil, "the decision outlives the mail")
+            expect(
+                orphan?["sender"] is NSNull || orphan?["sender"] == nil,
+                "and reports no sender rather than inventing one")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("list_by_context without a label lists the labels that exist") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.recordDecision(
+                address: "a@x.com", classification: "drop", reason: "r", context: "job-search-2026")
+            let response = mcpCall("/mcp/decisions/by-context", try mcpSnapshot(store))
+            eq(response.statusCode, 400)
+            expect(
+                (mcpJSON(response)["error"] as? String ?? "").contains("job-search-2026"),
+                "an agent shouldn't have to guess the label")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("the whole surface is read-only — driving every route changes nothing") {
+        // The safety argument for TASK-46 rests on this: the token does not bound
+        // what an agent can do, so the read surface has to be incapable of acting.
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
+            try store.ignore(GroupID(kind: .domain, key: "y.com"))
+            try store.recordUnsubscribe(
+                GroupID(kind: .domain, key: "z.com"), senderName: "Z", senderEmail: "z@z.com",
+                senderDomain: "z.com", url: nil, outcome: .requested)
+            try store.recordDecision(
+                address: "a@x.com", classification: "keep", reason: "r", context: "c")
+            let before = (
+                try store.count(), try store.ignoredGroupKeys().count,
+                try store.unsubscribeHistory().count, try store.allDecisions().count
+            )
+            let snapshot = try mcpSnapshot(store)
+            for path in MCPRoutes.paths.sorted() {
+                _ = mcpCall(
+                    path, snapshot, ["sender_id": "domain:x.com", "context": "c", "query": "a"])
+            }
+            let after = (
+                try store.count(), try store.ignoredGroupKeys().count,
+                try store.unsubscribeHistory().count, try store.allDecisions().count
+            )
+            expect(before == after, "the store is untouched: \(before) -> \(after)")
+        } catch { expect(false, "threw: \(error)") }
+    }
+}
+
+Harness.suite("MCP server dispatch") {
+    func serve(
+        path: String, token: String = "s3cret", presented: String = "s3cret", isDemo: Bool = false,
+        context: MCPContext?
+    ) -> HTTPResponse {
+        runAsync {
+            let server = NevermoreServer(appVersion: "9.9.9", isDemo: isDemo, mcpToken: token)
+            await server.setMCPContext(context)
+            return await server.routeRequest(
+                HTTPRequest(
+                    method: "POST", path: path,
+                    headers: ["authorization": "Bearer \(presented)"],
+                    body: Data("{}".utf8)))
+        }
+    }
+
+    Harness.test("a real route serves the open account") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
+            let response = serve(
+                path: "/mcp/senders/list",
+                context: MCPContext(account: "me@example.com", store: store))
+            eq(response.statusCode, 200)
+            eq(mcpJSON(response)["account"] as? String, "me@example.com")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("with no mailbox open the answer is 503, never an empty mailbox") {
+        // "This person has no senders" and "no account is open" are answers an
+        // agent would act on very differently.
+        let response = serve(path: "/mcp/senders/list", context: nil)
+        eq(response.statusCode, 503)
+        expect(
+            (mcpJSON(response)["error"] as? String ?? "").contains("No mailbox is open"),
+            "says which it is")
+    }
+
+    Harness.test("demo mode refuses every tool") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
+            let context = MCPContext(account: "me@example.com", store: store)
+            for path in MCPRoutes.paths.sorted() {
+                let response = serve(path: path, isDemo: true, context: context)
+                eq(response.statusCode, 403, path)
+                expect(
+                    (mcpJSON(response)["error"] as? String ?? "").contains("demo mode"), path)
+            }
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("the four refusals stay distinguishable, demo mode included") {
+        // A bridge reads its situation off these codes: 401 fix your token, 404
+        // that tool doesn't exist, 403 leave demo mode, 503 open an account.
+        do {
+            let store = try MessageStore.inMemory()
+            let context = MCPContext(account: "me@example.com", store: store)
+            eq(
+                serve(path: "/mcp/senders/list", presented: "wrong", isDemo: true, context: context)
+                    .statusCode, 401, "credential first, even in demo mode")
+            eq(
+                serve(path: "/mcp/not-a-tool", isDemo: true, context: context).statusCode, 404,
+                "an unknown route is still about the route in demo mode")
+            eq(
+                serve(path: "/mcp/senders/list", isDemo: true, context: nil).statusCode, 403,
+                "demo mode is reported before the absent mailbox")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("the local server hands the context on to a server it starts later") {
+        // The account and the server come up in either order, so whichever is
+        // second has to find the other already recorded.
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
+            let dir = URL.temporaryDirectory.appending(path: "nevermore-mcp-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let tokenURL = dir.appending(path: ".nevermore-mcp-token")
+
+            let controller = LocalServerController(tokenURL: tokenURL, appVersion: "9.9.9")
+            runAsync {
+                await controller.setMCPContext(
+                    MCPContext(account: "me@example.com", store: store))
+            }
+            let status = runAsync { await controller.start(isDemo: false) }
+            defer { runAsync { await controller.stop() } }
+            guard case let .running(port) = status, let token = MCPTokenManager.read(at: tokenURL)
+            else {
+                expect(false, "expected a running server with a token, got \(status)")
+                return
+            }
+            let result: (status: Int, body: String)? = runAsync {
+                guard let url = URL(string: "http://127.0.0.1:\(port)/mcp/mailbox/summary")
+                else { return nil }
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                request.httpBody = Data("{}".utf8)
+                guard let (data, response) = try? await URLSession.shared.data(for: request),
+                    let http = response as? HTTPURLResponse
+                else { return nil }
+                return (http.statusCode, String(data: data, encoding: .utf8) ?? "")
+            }
+            eq(result?.status, 200, "the tool answers over the socket, not just in-process")
+            expect(result?.body.contains("me@example.com") ?? false, "and names the account")
+        } catch { expect(false, "threw: \(error)") }
+    }
+}
+
+Harness.suite("MCP tool catalog") {
+    Harness.test("the nine read tools are present, and nothing that writes") {
+        eq(MCPToolCatalog.tools.count, 9)
+        let names = Set(MCPToolCatalog.tools.map(\.name))
+        eq(
+            names,
+            [
+                "list_senders", "get_sender", "list_messages", "search_senders",
+                "unsubscribe_history", "list_reappeared", "mailbox_summary", "sync_status",
+                "list_by_context",
+            ])
+        // TASK-41: the agent proposes, the human actuates. A verb here would be a
+        // reversal of that, not a feature.
+        for forbidden in ["unsubscribe_sender", "ignore", "trash", "delete", "propose", "act"] {
+            expect(!names.contains(forbidden), "no write verb named \(forbidden)")
+        }
+    }
+
+    Harness.test("every description states that message bodies are unavailable") {
+        for tool in MCPToolCatalog.tools {
+            let description = MCPToolCatalog.fullDescription(of: tool).lowercased()
+            expect(description.contains("bodies are unavailable"), tool.name)
+            expect(description.contains("headers only"), "\(tool.name) says why")
+        }
+    }
+
+    Harness.test("every description states the account rule and that the app must be running") {
+        for tool in MCPToolCatalog.tools {
+            let description = MCPToolCatalog.fullDescription(of: tool)
+            expect(description.contains("account currently open"), tool.name)
+            expect(description.contains("app must be running"), tool.name)
+            expect(description.contains("demo mode"), tool.name)
+        }
+    }
+
+    Harness.test("every schema is valid JSON describing an object of arguments") {
+        for tool in MCPToolCatalog.tools {
+            guard let data = tool.schemaJSON.data(using: .utf8),
+                let schema = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+                expect(false, "\(tool.name): schema is not a JSON object")
+                continue
+            }
+            eq(schema["type"] as? String, "object", tool.name)
+            expect(schema["properties"] is [String: Any], "\(tool.name) declares properties")
+        }
+    }
+
+    Harness.test("every tool points at a route the server actually serves") {
+        for tool in MCPToolCatalog.tools {
+            expect(MCPRoutes.paths.contains(tool.path), "\(tool.name) -> \(tool.path)")
+        }
+        // And nothing is served that no tool can reach — an unreachable route is
+        // either a missing tool or dead code, and both want finding.
+        let reached = Set(MCPToolCatalog.tools.map(\.path))
+        eq(reached, MCPRoutes.paths)
+    }
+
+    Harness.test("the paging contract in the schema matches the one the server enforces") {
+        guard let list = MCPToolCatalog.tool(named: "list_senders") else {
+            expect(false, "list_senders is missing")
+            return
+        }
+        expect(list.schemaJSON.contains("\"default\": \(MCPRoutes.defaultLimit)"), "default limit")
+        expect(list.schemaJSON.contains("\"maximum\": \(MCPRoutes.maxLimit)"), "maximum limit")
+        expect(
+            MCPToolCatalog.fullDescription(of: list).contains("has_more"),
+            "tells the agent how to know it saw everything")
+    }
+}
+
+Harness.suite("MCP bridge protocol") {
+    Harness.test("recognises the three methods a client actually sends") {
+        eq(MCPBridge.parse(#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#), .initialize(id: .number(1)))
+        eq(MCPBridge.parse(#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#), .toolsList(id: .number(2)))
+        eq(
+            MCPBridge.parse(
+                #"{"jsonrpc":"2.0","id":"a","method":"tools/call","params":{"name":"sync_status"}}"#),
+            .toolsCall(id: .string("a"), name: "sync_status", argumentsJSON: Data("{}".utf8)))
+    }
+
+    Harness.test("a notification is answered with silence, as the spec requires") {
+        eq(MCPBridge.parse(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#),
+           .notification(method: "notifications/initialized"))
+    }
+
+    Harness.test("garbage on stdin is a parse error rather than a crash") {
+        eq(MCPBridge.parse("not json"), .parseError)
+        eq(MCPBridge.parse("{}"), .parseError, "no method")
+        eq(MCPBridge.parse(""), .parseError)
+    }
+
+    Harness.test("the request id comes back exactly as it was sent") {
+        for line in [
+            #"{"id":7,"method":"initialize"}"#, #"{"id":"seven","method":"initialize"}"#,
+        ] {
+            guard case let .initialize(id) = MCPBridge.parse(line) else {
+                expect(false, "did not parse: \(line)")
+                continue
+            }
+            let response =
+                (try? JSONSerialization.jsonObject(
+                    with: Data(MCPBridge.initializeResponse(id: id).utf8))) as? [String: Any]
+            expect(response?["id"] != nil, "the id is echoed: \(line)")
+        }
+    }
+
+    Harness.test("tool arguments are forwarded verbatim, not re-interpreted") {
+        // The bridge holds no schema of its own; the server is the only place
+        // that decides what an argument means.
+        let line =
+            #"{"id":1,"method":"tools/call","params":{"name":"list_senders","arguments":{"limit":5,"collection":"ignored"}}}"#
+        guard case let .toolsCall(_, name, argumentsJSON) = MCPBridge.parse(line) else {
+            expect(false, "did not parse a tools/call")
+            return
+        }
+        eq(name, "list_senders")
+        let arguments =
+            (try? JSONSerialization.jsonObject(with: argumentsJSON)) as? [String: Any] ?? [:]
+        eq(arguments["limit"] as? Int, 5)
+        eq(arguments["collection"] as? String, "ignored")
+    }
+
+    Harness.test("tools/list ships every catalogued tool with a parsed schema") {
+        let response =
+            (try? JSONSerialization.jsonObject(
+                with: Data(MCPBridge.toolsListResponse(id: .number(1)).utf8))) as? [String: Any]
+        let result = response?["result"] as? [String: Any]
+        let tools = result?["tools"] as? [[String: Any]] ?? []
+        eq(tools.count, MCPToolCatalog.tools.count)
+        for tool in tools {
+            expect(tool["inputSchema"] is [String: Any], "\(tool["name"] ?? "?") carries an object schema")
+            expect(
+                (tool["description"] as? String ?? "").contains("bodies are unavailable"),
+                "\(tool["name"] ?? "?") keeps the caveat on the wire")
+        }
+    }
+
+    Harness.test("a failed tool call is a result carrying isError, not a transport error") {
+        // A JSON-RPC error would tell the client the bridge broke; the call
+        // reached the server and came back with a refusal.
+        let response =
+            (try? JSONSerialization.jsonObject(
+                with: Data(MCPBridge.toolErrorResponse(id: .number(1), message: "nope").utf8)))
+            as? [String: Any]
+        expect(response?["error"] == nil, "not a protocol-level error")
+        eq((response?["result"] as? [String: Any])?["isError"] as? Bool, true)
+    }
+
+    Harness.test("a 401 refreshes the token only; a dead connection re-probes the port") {
+        // The bridge outlives the app: a relaunch rotates the token and may move
+        // the port, and without this every later call fails until the MCP client
+        // itself is restarted.
+        expect(MCPBridge.shouldRefresh(status: 401, hasBody: true), "401 = rotated token")
+        expect(!MCPBridge.refreshNeedsPortProbe(status: 401), "401 means we reached a server")
+        expect(MCPBridge.shouldRefresh(status: 500, hasBody: false), "no body = never got there")
+        expect(MCPBridge.refreshNeedsPortProbe(status: 500), "so the port may have moved")
+    }
+
+    Harness.test("a real error from the app is not retried into a second failure") {
+        expect(!MCPBridge.shouldRefresh(status: 500, hasBody: true), "the app answered")
+        expect(!MCPBridge.shouldRefresh(status: 503, hasBody: true), "no mailbox open")
+        expect(!MCPBridge.shouldRefresh(status: 403, hasBody: true), "demo mode")
+        expect(!MCPBridge.shouldRefresh(status: 404, hasBody: true), "unknown route")
+        expect(!MCPBridge.shouldRefresh(status: 200, hasBody: true), "success")
+    }
+}
+
+Harness.suite("Store build excludes the bridge") {
+    /// The repo root, from this file's own path.
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()  // NevermoreTests
+        .deletingLastPathComponent()  // Tests
+        .deletingLastPathComponent()  // NevermoreKit
+        .deletingLastPathComponent()  // Packages
+        .deletingLastPathComponent()  // repo root
+
+    Harness.test("Project.swift names neither the bridge target nor its product") {
+        // The Mac App Store target depends on the NevermoreKit *library* product,
+        // so the bridge cannot ride along — but "cannot" is only true while
+        // nothing here mentions it, which is what this pins.
+        guard let manifest = try? String(contentsOf: root.appending(path: "Project.swift"),
+                                         encoding: .utf8) else {
+            expect(false, "could not read Project.swift at \(root.path)")
+            return
+        }
+        expect(!manifest.contains("NevermoreMCP"), "no bridge target")
+        expect(!manifest.contains("nevermore-mcp"), "no bridge product")
+        expect(
+            manifest.contains("Sources/NevermoreApp/**"),
+            "the store target still builds only the app's sources")
+    }
+
+    Harness.test("the package declares the bridge as its own executable product") {
+        guard let manifest = try? String(
+            contentsOf: root.appending(path: "Packages/NevermoreKit/Package.swift"),
+            encoding: .utf8) else {
+            expect(false, "could not read Package.swift")
+            return
+        }
+        expect(
+            manifest.contains(#".executable(name: "nevermore-mcp", targets: ["NevermoreMCP"])"#),
+            "a separate executable product, not a dependency of the app")
     }
 }
 

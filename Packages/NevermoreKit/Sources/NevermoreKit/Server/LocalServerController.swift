@@ -31,6 +31,11 @@ public actor LocalServerController {
     private var server: NevermoreServer?
     private let tokenURL: URL
     private let appVersion: String
+    /// The open account the MCP routes serve. Held here as well as on the server because the two
+    /// change independently: the user can switch accounts while the server is off, and the server
+    /// can be restarted (demo mode) while the account stays put. Whichever happens second has to
+    /// find the other already recorded.
+    private var mcpContext: MCPContext?
 
     public private(set) var status: LocalServerStatus = .off
 
@@ -60,6 +65,7 @@ public actor LocalServerController {
         do {
             let token = try MCPTokenManager.generateAndWrite(at: tokenURL)
             let fresh = NevermoreServer(appVersion: appVersion, isDemo: isDemo, mcpToken: token)
+            await fresh.setMCPContext(mcpContext)
             server = fresh
             try await fresh.start()
             status = .running(port: await fresh.listeningPort)
@@ -81,6 +87,17 @@ public actor LocalServerController {
         MCPTokenManager.delete(at: tokenURL)
         status = .off
         return status
+    }
+
+    /// Record which account the MCP routes serve, and tell a running server about it.
+    ///
+    /// Nil when no account is open. Called on every account change, not only at launch: the MCP
+    /// surface is defined as "the account currently open", and a server still pointing at the
+    /// previous account's store would answer questions about a mailbox the user has left — while
+    /// naming the new one in every response.
+    public func setMCPContext(_ context: MCPContext?) async {
+        mcpContext = context
+        await server?.setMCPContext(context)
     }
 
     /// Stop and start again, so a running server picks up a changed `isDemo` — otherwise

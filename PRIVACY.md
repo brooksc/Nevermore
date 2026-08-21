@@ -1,7 +1,7 @@
 # Privacy Policy
 
 **Nevermore for macOS**
-_Last updated: 1 August 2026_
+_Last updated: 20 August 2026_
 
 ## The short version
 
@@ -11,6 +11,11 @@ advertising of any kind. Your mail, your credentials, and everything the app
 derives from them stay on your Mac.
 
 There is no account to create, because there is nothing to create it with.
+
+The one exception is deliberate, off by default, and yours to switch on:
+connecting an **AI agent over MCP** sends sender names and subject lines to
+whichever model that agent runs. See [Connecting an AI
+agent](#connecting-an-ai-agent-mcp) below.
 
 ## What the app accesses
 
@@ -67,8 +72,46 @@ Three things, all of them direct and all of them initiated by you:
    in-app browser uses a non-persistent data store, so it never reads or writes
    your normal browser's cookies.
 
+4. **An AI model, if you connect one over MCP.** Off by default, and covered
+   in full in the next section.
+
 Nevermore never contacts the developer. There is no licence check and no
 "phone home".
+
+## Connecting an AI agent (MCP)
+
+Nevermore can expose a **read-only** view of your senders to an AI coding agent
+through a local MCP server. It is off unless you turn it on in Settings, and
+turning it on changes the app's privacy posture in a way nothing else here does
+— so this section states it plainly rather than burying it behind a prompt.
+
+**What the agent can see.** Sender display names, email addresses, domains,
+**subject lines**, dates, read/unread counts, your unsubscribe history, and any
+classifications a previous session recorded. Message bodies are not available,
+because Nevermore never downloads them.
+
+**Where that data goes.** To whichever AI model the connected client is running.
+That model is very often **cloud-hosted and operated by a third party**, and
+what it does with the text it is sent is governed by that provider's terms, not
+by this policy and not by the developer. If you would not paste your subject
+lines into that service, do not connect it here.
+
+**What the agent cannot do.** The MCP surface is read-only. It cannot
+unsubscribe, ignore, trash, or send anything, and it cannot switch accounts. It
+serves only the account currently open in the app, and it refuses entirely while
+the app is in demo mode. Acting on mail in bulk still requires a selection you
+have reviewed and confirmed in the app yourself.
+
+**How it is reached.** The server listens on the loopback interface only —
+127.0.0.1, on a port in 8775–8779 — so nothing outside your Mac can reach it.
+Requests carry a token written to `~/.nevermore-mcp-token` with owner-only
+permissions, generated fresh each time the server starts and deleted when it
+stops. That token keeps other accounts on the Mac out; it is not a defence
+against software already running as you, which could read your mail cache
+directly in any case.
+
+Turn the server off and every one of these paths closes: the port stops
+listening, the token file is removed, and nothing is sent anywhere.
 
 ## Software updates
 

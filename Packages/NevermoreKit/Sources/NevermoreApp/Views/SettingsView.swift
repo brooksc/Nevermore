@@ -184,7 +184,11 @@ struct SettingsView: View {
                 }
             switch model.localServerStatus {
             case .off:
-                Text("Off. When on, Nevermore listens on 127.0.0.1 so an AI assistant can read your senders and act on them. Only this Mac can reach it, and only with the token below.")
+                // "read", not "read and act": the MCP surface is read-only, and acting in bulk
+                // goes through a selection confirmed in the app. Copy that promised more than the
+                // routes deliver would be the one place a user could reasonably form the opposite
+                // belief.
+                Text("Off. When on, Nevermore listens on 127.0.0.1 so an AI assistant can read your senders — their names, addresses and subject lines, which go to that assistant's AI model. It can read, never act. Only this Mac can reach it, and only with the token below.")
                     .font(.caption).foregroundStyle(.secondary)
             case .starting:
                 HStack(spacing: 6) {
@@ -202,7 +206,7 @@ struct SettingsView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
-                Text("Point your MCP client at that address; it reads the token from that file. The token is new each time the server starts and is deleted when it stops.")
+                Text("Point your MCP client at the nevermore-mcp bridge; it finds this address and reads the token from that file. The token is new each time the server starts and is deleted when it stops.")
                     .font(.caption).foregroundStyle(.secondary)
             case .failed(let message):
                 Label(message, systemImage: "exclamationmark.triangle.fill")
