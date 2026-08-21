@@ -59,7 +59,7 @@ final class AppModel {
     /// same kind of row, but a sender means a different thing in each, and
     /// carrying a selection over is what left the inspector describing a sender
     /// the visible list didn't contain and the status bar counting it.
-    var collection: Collection = .allSenders {
+    var collection: SenderCollection = .allSenders {
         didSet {
             guard oldValue != collection else { return }
             selection = SelectionCursor.surviving(
@@ -1022,7 +1022,7 @@ final class AppModel {
     /// never has to mutate `self.collection` — doing that during view-body
     /// evaluation triggers an observation-graph mutation mid-render, which on
     /// macOS escalates to an AppKit constraint-update exception and aborts.
-    private func matches(_ g: SenderGroup, in collection: Collection) -> Bool {
+    private func matches(_ g: SenderGroup, in collection: SenderCollection) -> Bool {
         collection.contains(state(of: g))
     }
 
@@ -1098,7 +1098,7 @@ final class AppModel {
 
     // MARK: - Counts for the sidebar
 
-    func count(for collection: Collection) -> Int {
+    func count(for collection: SenderCollection) -> Int {
         // Unsubscribed is counted from the durable history log, not from
         // messages, so it's correct even after a sender's mail is deleted.
         if collection == .unsubscribed { return unsubscribedRecords.count }

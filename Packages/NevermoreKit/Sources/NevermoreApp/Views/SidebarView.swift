@@ -28,7 +28,7 @@ struct SidebarView: View {
                     }
                 }
             }
-            ForEach(Collection.Section.allCases) { section in
+            ForEach(SenderCollection.Section.allCases) { section in
                 // Hide the ATTENTION section entirely when nothing reappeared.
                 if section != .attention || model.count(for: .reappeared) > 0 {
                     Section(section.rawValue) {
@@ -48,7 +48,7 @@ struct SidebarView: View {
     }
 
     @ViewBuilder
-    private func row(_ item: Collection) -> some View {
+    private func row(_ item: SenderCollection) -> some View {
         let n = model.count(for: item)
         if item == .reappeared {
             // Reappeared uses an accent pill, not a plain count (design 1a).

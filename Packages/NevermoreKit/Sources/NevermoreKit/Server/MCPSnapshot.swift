@@ -25,7 +25,7 @@ public struct MCPContext: Sendable {
 /// it could neither be reached from an actor nor tested without a UI. Everything
 /// it needs — messages, grouping rules, ignore list, unsubscribe history,
 /// decisions — is in the store, so this reconstructs the same rows from the same
-/// inputs. The rules that decide what a row *means* (`Grouping`, `Collection`,
+/// inputs. The rules that decide what a row *means* (`Grouping`, `SenderCollection`,
 /// `SenderState`) are shared, not re-implemented; if they change, both callers
 /// change together.
 ///
@@ -74,7 +74,7 @@ public struct MCPSnapshot: Sendable {
 
     // MARK: - Derived state
 
-    /// What the app knows about a sender, in the form `Collection.contains`
+    /// What the app knows about a sender, in the form `SenderCollection.contains`
     /// wants. The same four facts `AppModel.state(of:)` assembles.
     public func state(of group: SenderGroup) -> SenderState {
         SenderState(
@@ -99,12 +99,12 @@ public struct MCPSnapshot: Sendable {
     /// The collection a sender currently belongs to. Exactly one holds any
     /// sender that has messages, so naming it on every row saves an agent
     /// running four filtered queries to work out where a sender sits.
-    public func collection(of group: SenderGroup) -> Collection? {
+    public func collection(of group: SenderGroup) -> SenderCollection? {
         let state = state(of: group)
-        return Collection.allCases.first { $0.contains(state) }
+        return SenderCollection.allCases.first { $0.contains(state) }
     }
 
-    public func groups(in collection: Collection) -> [SenderGroup] {
+    public func groups(in collection: SenderCollection) -> [SenderGroup] {
         groups.filter { collection.contains(state(of: $0)) }
     }
 

@@ -1892,7 +1892,7 @@ Harness.suite("Local server lifecycle") {
 
 // MARK: - One selection model for every collection (TASK-27)
 
-Harness.suite("Collection membership") {
+Harness.suite("SenderCollection membership") {
     func state(
         ignored: Bool = false, unsubscribed: Bool = false,
         reappeared: Bool = false, messages: Bool = true
@@ -1904,26 +1904,26 @@ Harness.suite("Collection membership") {
 
     Harness.test("a plain sender is in All Senders and nowhere else") {
         let s = state()
-        eq(Collection.allCases.filter { $0.contains(s) }, [.allSenders])
+        eq(SenderCollection.allCases.filter { $0.contains(s) }, [.allSenders])
     }
 
     Harness.test("unsubscribing takes a sender out of the working list") {
         let s = state(unsubscribed: true)
-        expect(!Collection.allSenders.contains(s), "gone from All Senders")
-        expect(Collection.unsubscribed.contains(s), "listed under Unsubscribed")
-        expect(!Collection.reappeared.contains(s), "they haven't mailed again")
+        expect(!SenderCollection.allSenders.contains(s), "gone from All Senders")
+        expect(SenderCollection.unsubscribed.contains(s), "listed under Unsubscribed")
+        expect(!SenderCollection.reappeared.contains(s), "they haven't mailed again")
     }
 
     Harness.test("mailing again moves a sender from Unsubscribed to Reappeared") {
         let s = state(unsubscribed: true, reappeared: true)
-        expect(Collection.reappeared.contains(s), "Reappeared")
-        expect(!Collection.unsubscribed.contains(s), "and only there — not both")
+        expect(SenderCollection.reappeared.contains(s), "Reappeared")
+        expect(!SenderCollection.unsubscribed.contains(s), "and only there — not both")
     }
 
     Harness.test("ignoring hides a sender from All Senders and Reappeared") {
-        expect(!Collection.allSenders.contains(state(ignored: true)))
-        expect(!Collection.reappeared.contains(state(ignored: true, unsubscribed: true, reappeared: true)))
-        expect(Collection.ignored.contains(state(ignored: true)))
+        expect(!SenderCollection.allSenders.contains(state(ignored: true)))
+        expect(!SenderCollection.reappeared.contains(state(ignored: true, unsubscribed: true, reappeared: true)))
+        expect(SenderCollection.ignored.contains(state(ignored: true)))
     }
 
     // Inherited behaviour, pinned rather than endorsed: Unsubscribed doesn't
@@ -1931,12 +1931,12 @@ Harness.suite("Collection membership") {
     // is a product decision, not part of unifying the selection model.
     Harness.test("an ignored sender with a record is listed in both archives") {
         let s = state(ignored: true, unsubscribed: true)
-        eq(Collection.allCases.filter { $0.contains(s) }, [.unsubscribed, .ignored])
+        eq(SenderCollection.allCases.filter { $0.contains(s) }, [.unsubscribed, .ignored])
     }
 
     Harness.test("losing their messages doesn't remove a record from Unsubscribed") {
         // The point of the durable log: the record outlives the mail.
-        expect(Collection.unsubscribed.contains(state(unsubscribed: true, messages: false)))
+        expect(SenderCollection.unsubscribed.contains(state(unsubscribed: true, messages: false)))
     }
 }
 
@@ -1970,7 +1970,7 @@ Harness.suite("Selection across collections") {
 }
 
 Harness.suite("Selection action availability") {
-    func context(_ collection: Collection, count: Int, withMessages: Int? = nil)
+    func context(_ collection: SenderCollection, count: Int, withMessages: Int? = nil)
         -> SelectionContext
     {
         SelectionContext(
@@ -2044,7 +2044,7 @@ Harness.suite("Selection action availability") {
     Harness.test("every refusal is a sentence, not an empty string") {
         // The reason becomes the disabled control's tooltip; a blank one is no
         // better than the silent no-op this replaced.
-        for collection in Collection.allCases {
+        for collection in SenderCollection.allCases {
             for action in SelectionAction.allCases {
                 for c in [context(collection, count: 1), context(collection, count: 2, withMessages: 0)] {
                     guard let reason = action.unavailability(in: c) else { continue }

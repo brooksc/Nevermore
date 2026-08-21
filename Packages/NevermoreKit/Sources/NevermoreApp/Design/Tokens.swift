@@ -36,7 +36,7 @@ enum Tokens {
 
 /// How the collections defined in NevermoreKit are presented. The cases and
 /// their membership rules live there, where they can be tested without a UI.
-extension Collection {
+extension SenderCollection {
     var title: String {
         switch self {
         case .allSenders: "All Senders"
@@ -58,7 +58,7 @@ extension Collection {
     enum Section: String, CaseIterable, Identifiable {
         case inbox = "INBOX", attention = "ATTENTION", archive = "ARCHIVE"
         var id: String { rawValue }
-        var members: [Collection] {
+        var members: [SenderCollection] {
             switch self {
             case .inbox: [.allSenders]
             case .attention: [.reappeared]

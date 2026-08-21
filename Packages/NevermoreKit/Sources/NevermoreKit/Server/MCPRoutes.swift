@@ -115,12 +115,12 @@ public enum MCPRoutes {
     // MARK: - Handlers
 
     static func listSenders(_ snapshot: MCPSnapshot, _ args: MCPToolRequest) -> HTTPResponse {
-        let collection: Collection
+        let collection: SenderCollection
         if let raw = args.collection {
             guard let parsed = parseCollection(raw) else {
                 return .error(
                     "Unknown collection '\(raw)'. Use one of: "
-                        + Collection.allCases.map(\.rawValue).joined(separator: ", "),
+                        + SenderCollection.allCases.map(\.rawValue).joined(separator: ", "),
                     code: 400)
             }
             collection = parsed
@@ -189,7 +189,7 @@ public enum MCPRoutes {
     static func listReappeared(_ snapshot: MCPSnapshot, _ args: MCPToolRequest) -> HTTPResponse {
         let matched = snapshot.groups(in: .reappeared)
             .sorted { snapshot.messagesSinceUnsubscribe($0) > snapshot.messagesSinceUnsubscribe($1) }
-        return json(page(matched, collection: Collection.reappeared.rawValue, args: args, snapshot: snapshot))
+        return json(page(matched, collection: SenderCollection.reappeared.rawValue, args: args, snapshot: snapshot))
     }
 
     static func getSender(_ snapshot: MCPSnapshot, _ args: MCPToolRequest) -> HTTPResponse {
@@ -283,7 +283,7 @@ public enum MCPRoutes {
 
     static func mailboxSummary(_ snapshot: MCPSnapshot) -> HTTPResponse {
         var byCollection: [String: Int] = [:]
-        for collection in Collection.allCases {
+        for collection in SenderCollection.allCases {
             byCollection[collection.rawValue] = snapshot.groups(in: collection).count
         }
         var byMethod: [String: Int] = [:]
@@ -471,11 +471,11 @@ public enum MCPRoutes {
         return values.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
-    static func parseCollection(_ raw: String) -> Collection? {
-        Collection(rawValue: raw)
+    static func parseCollection(_ raw: String) -> SenderCollection? {
+        SenderCollection(rawValue: raw)
             // Tolerate the snake_case an agent will infer from the wire format,
             // since every other field it sees is snake_case.
-            ?? Collection.allCases.first { $0.rawValue.lowercased() == raw.replacingOccurrences(
+            ?? SenderCollection.allCases.first { $0.rawValue.lowercased() == raw.replacingOccurrences(
                 of: "_", with: "").lowercased() }
     }
 

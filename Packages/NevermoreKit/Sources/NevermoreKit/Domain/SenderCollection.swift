@@ -12,9 +12,11 @@ import Foundation
 /// UI — the app was carrying four hand-written variants of both. How a
 /// collection is *presented* (title, icon, sidebar section) stays in the app.
 ///
-/// The name shadows `Swift.Collection` inside this module; the protocol is
-/// still reachable by its qualified name, and nothing here is generic over it.
-public enum Collection: String, CaseIterable, Identifiable, Hashable, Sendable {
+/// Named `SenderCollection` rather than `Collection`: the short name shadowed
+/// `Swift.Collection` throughout this module, which surfaced as a compile error
+/// in any file that had forgotten to import NevermoreKit — a confusing symptom
+/// for an unrelated cause.
+public enum SenderCollection: String, CaseIterable, Identifiable, Hashable, Sendable {
     case allSenders
     case reappeared
     case unsubscribed, ignored
@@ -48,7 +50,7 @@ public struct SenderState: Hashable, Sendable {
     }
 }
 
-extension Collection {
+extension SenderCollection {
     /// Whether a sender in this state belongs in this collection.
     public func contains(_ state: SenderState) -> Bool {
         switch self {
@@ -79,14 +81,14 @@ public enum SelectionAction: String, CaseIterable, Sendable {
 
 /// The selection, as the availability rules see it.
 public struct SelectionContext: Hashable, Sendable {
-    public var collection: Collection
+    public var collection: SenderCollection
     /// Rows selected *in the collection on screen*. A selection is never
     /// carried across a switch, so this is simply the selection's size.
     public var count: Int
     /// How many of those still have messages in the mailbox to act on.
     public var withMessages: Int
 
-    public init(collection: Collection, count: Int, withMessages: Int) {
+    public init(collection: SenderCollection, count: Int, withMessages: Int) {
         self.collection = collection
         self.count = count
         self.withMessages = withMessages
