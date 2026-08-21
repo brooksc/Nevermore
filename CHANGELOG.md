@@ -8,6 +8,35 @@ All notable changes to Nevermore are recorded here. Format follows
 
 ### Added
 
+- **Demo mode seeds an unsubscribe history**, so Reappeared is no longer always
+  empty for someone meeting the app through the demo.
+- **An MCP server, so an AI assistant can help you triage senders.** Off by
+  default, direct-download builds only. Nevermore listens on 127.0.0.1 and a
+  `nevermore-mcp` bridge connects your assistant to it. The assistant can read
+  your senders — names, addresses, subject lines, counts and read rates — and
+  record what it decided about each one and why, under a label like
+  `job-search-2026` that Nevermore stores but never interprets. Ask it later
+  what can go now that a situation has ended.
+- **A Proposed collection** where an assistant's suggestions wait for you. It
+  appears only when something is in it, shows the assistant's reason on every
+  row, and acts on nothing until you say so.
+- **A browser queue**, so the senders that publish only a web form can be worked
+  through in one sitting instead of one at a time.
+
+### Notes
+
+- **There is no bulk unsubscribe over MCP, and there will not be one.**
+  Unsubscribing is irreversible and goes to a third party, so a set of senders
+  is unsubscribed only after you have reviewed that exact set in Nevermore and
+  confirmed it. An assistant proposes; you decide.
+- Connecting an assistant sends sender names and subject lines to that
+  assistant's AI model, which may be cloud-hosted. Nothing else about the app
+  changes: still no server, no account, no telemetry. See [PRIVACY.md](PRIVACY.md).
+- The Mac App Store build does not include any of this. The sandbox there
+  permits outgoing connections only, so the local server cannot run.
+
+### Added
+
 - **An MCP server**, off by default, so an AI agent can read and classify your
   senders while every action that reaches a sender stays with you. Nine read
   tools —
