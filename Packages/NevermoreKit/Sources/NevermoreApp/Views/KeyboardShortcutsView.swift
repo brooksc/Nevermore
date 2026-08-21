@@ -15,7 +15,7 @@ struct KeyboardShortcutsView: View {
             "Navigate",
             [
                 Shortcut(keys: "↑ ↓  /  j  k", action: "Move up / down the list"),
-                Shortcut(keys: "⌘1 – ⌘4", action: "Switch collection"),
+                Shortcut(keys: "⌘1 – ⌘5", action: "Switch collection"),
                 Shortcut(keys: "⌘F", action: "Search"),
             ]
         ),

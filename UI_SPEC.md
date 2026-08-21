@@ -117,6 +117,15 @@ secondary-styled numbers. No action buttons live here.
 - **Unsubscribable** — senders with a `List-Unsubscribe` target (`envelope.open`)
 - **Manual only** — senders lacking a target; these need a browser visit (`hand.raised`)
 
+**REVIEW** — section hidden entirely when there is no proposal
+- **Proposed** — senders an external AI agent has put forward over MCP, with the
+  agent's one-line reason on each row (`sparkles.rectangle.stack`). Accent pill,
+  like Reappeared: it is a queue waiting on the user, not a standing total.
+  **The row exists only while a proposal does**, and goes when the proposal is
+  dismissed or emptied — most users never connect an MCP client, and a
+  permanently visible empty collection advertises a feature they cannot use.
+  Dismissing clears the proposal and acts on no sender.
+
 **ATTENTION** — section hidden entirely when empty
 - **Reappeared** — senders that kept mailing after a successful unsubscribe
   (`exclamationmark.triangle`). Badge uses the accent color, not red: this is
@@ -149,17 +158,20 @@ current selection.
 The selection count drives the toolbar and status bar: *"3 senders selected ·
 214 messages"*.
 
-**One selection model, not one per collection.** Reappeared, Unsubscribed and
-Ignored are lists rather than tables, but they select, navigate and triage
-exactly like this one — same click and `⇧`/`⌘`-click, same `j`/`k`, same
+**One selection model, not one per collection.** Reappeared, Unsubscribed,
+Ignored and Proposed are lists rather than tables, but they select, navigate and
+triage exactly like this one — same click and `⇧`/`⌘`-click, same `j`/`k`, same
 inspector, same status-bar count. A selection does **not** survive a collection
 switch: a sender means something different in each list, and carrying it over
 left the inspector describing a row that wasn't on screen. Actions that don't
 apply where you are (unsubscribing from Ignored, trashing mail that no longer
 exists) are disabled with the reason as their tooltip rather than silently
 acting on a stale sender. Membership and availability are decided in
-`NevermoreKit`'s `Collection` / `SelectionAction`, so a new collection inherits
-the whole model.
+`NevermoreKit`'s `SenderCollection` / `SelectionAction`, so a new collection
+inherits the whole model. Where a collection's *rows* come from is a second
+question with a second answer — `AppModel.RowSource` — because not every list is
+a filter of the synced senders: Unsubscribed lists durable records that outlive
+the mail, and Proposed lists what an agent put forward.
 
 ### Columns
 
@@ -289,6 +301,7 @@ Standard `Undo ⌘Z` / `Redo ⇧⌘Z` / Cut / Copy / Paste · `Select All ⌘A` 
 
 **View**
 `All Senders ⌘1` · `Reappeared ⌘2` · `Unsubscribed ⌘3` · `Ignored ⌘4` ·
+`Proposed ⌘5` (disabled with no proposal) ·
 `Sort By ▸` (Messages / Sender / Unread / Last Received) ·
 `Show Only Unread` · `Toggle Sidebar ⌥⌘S` · `Toggle Inspector ⌥⌘I` ·
 Enter Full Screen
@@ -300,15 +313,19 @@ Enter Full Screen
 ### Shortcut summary
 
 `⌘R` sync · `⌘U` unsubscribe · `⇧⌘U` unsubscribe + delete · `⌘I` ignore ·
-`⌘⌫` trash · `⌘G` view in Gmail · `⌘F` search · `⌘1`–`⌘4` collections ·
+`⌘⌫` trash · `⌘G` view in Gmail · `⌘F` search · `⌘1`–`⌘5` collections ·
 `⌘Z` undo · `⌥⌘S` sidebar · `⌥⌘I` inspector · `⌘,` settings
 
 Never override standard shortcuts. `⌘⌫` for trash matches Finder.
 
 The collection numbers are positional — `Commands.swift` derives them from the
-order of `Collection.allCases`, so inserting a collection silently renumbers the
-ones after it. Unsubscribable and Manual Only were specified here and never
-built; filtering by method belongs to search, not to a collection.
+order of `SenderCollection.allCases`, so inserting a collection silently
+renumbers the ones after it. Proposed was therefore *appended* rather than
+slotted next to All Senders where it reads best: it takes ⌘5 and nothing else
+moves. Its sidebar position is independent of its number, which is why it can
+appear above ATTENTION while numbering last. Unsubscribable and Manual Only were
+specified here and never built; filtering by method belongs to search, not to a
+collection.
 
 ---
 
@@ -407,6 +424,25 @@ an alert. Reserve alerts for genuinely modal problems (credentials invalidated
 mid-session). Never surface a raw IMAP or SMTP error string; map to plain
 language and put the technical detail behind a disclosure triangle.
 
+### 9.10 Agent proposals — not a sheet
+
+An agent's proposal arrives as the **Proposed collection**, for the same reason
+Reappeared is a collection: a sheet is modal, blocks the app while the one thing
+you want is to go and look at a sender, and cannot use the keyboard triage that
+already exists. It leads with a banner naming the agent's summary and when the
+proposal was made, and carrying `Remove from Proposal` (for the selection) and
+`Dismiss Proposal`.
+
+Each row shows the sender, the agent's **one-line reason**, and the message
+count. The reason is in the row and not the inspector on purpose: reviewing
+twenty-five rows without seeing why each was picked is rubber-stamping rather
+than review, and this review is the safety mechanism the whole MCP feature rests
+on. A sender whose mail has been trashed since the proposal was made keeps its
+row — with its actions disabled — so what the human reviews is the proposal that
+was actually made.
+
+Dismissing acts on nothing: no unsubscribe, no ignore, no trash.
+
 ---
 
 ## 10. Empty and transitional states
@@ -423,6 +459,7 @@ useful — a button.
 | Search: no results | `magnifyingglass` | "No senders match '\(query)'" | `Clear Search` |
 | Ignored: empty | `eye.slash` | "No ignored senders" | — |
 | Reappeared: empty | `checkmark.shield` | "Everyone honored your unsubscribes" | — |
+| Proposed: empty | — | *Not reachable.* The collection disappears with its proposal, so the only empty it can show is a search that matched nothing | `Clear Search` |
 | Offline | `wifi.slash` | "No internet connection" | `Retry` |
 
 **First sync deserves care.** It takes ~90 seconds on a large mailbox and is the

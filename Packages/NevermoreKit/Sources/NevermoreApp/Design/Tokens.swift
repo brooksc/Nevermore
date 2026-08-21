@@ -43,6 +43,7 @@ extension SenderCollection {
         case .reappeared: "Reappeared"
         case .unsubscribed: "Unsubscribed"
         case .ignored: "Ignored"
+        case .proposed: "Proposed"
         }
     }
 
@@ -52,15 +53,27 @@ extension SenderCollection {
         case .reappeared: "exclamationmark.triangle"
         case .unsubscribed: "checkmark.circle"
         case .ignored: "eye.slash"
+        // Not a warning symbol: an agent's proposal is a suggestion awaiting a
+        // decision, and nothing has gone wrong.
+        case .proposed: "sparkles.rectangle.stack"
         }
     }
 
+    /// Sidebar grouping. Sections are ordered as declared; a section whose
+    /// members are all hidden isn't drawn at all.
+    ///
+    /// REVIEW sits above ATTENTION because it is the more transient of the two —
+    /// it appears when an agent proposes something and goes when the human is
+    /// finished — and its own section rather than sharing ATTENTION because
+    /// "an agent suggests these" and "these senders ignored your unsubscribe"
+    /// are different enough that one label cannot honestly cover both.
     enum Section: String, CaseIterable, Identifiable {
-        case inbox = "INBOX", attention = "ATTENTION", archive = "ARCHIVE"
+        case inbox = "INBOX", review = "REVIEW", attention = "ATTENTION", archive = "ARCHIVE"
         var id: String { rawValue }
         var members: [SenderCollection] {
             switch self {
             case .inbox: [.allSenders]
+            case .review: [.proposed]
             case .attention: [.reappeared]
             case .archive: [.unsubscribed, .ignored]
             }

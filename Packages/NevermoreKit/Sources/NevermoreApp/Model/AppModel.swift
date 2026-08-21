@@ -53,6 +53,11 @@ final class AppModel {
     private var history: [String: MessageStore.UnsubscribeRecord] = [:]
     private(set) var sendAsAddresses: [String] = []
 
+    /// The agent proposal awaiting review, if there is one. Read from the
+    /// account's store on every reload, so it is here after a relaunch — the
+    /// agent's session and the review session are naturally hours apart.
+    private(set) var proposal: SenderProposal?
+
     // MARK: - UI state
 
     /// Switching collections clears the selection. Every collection shows the
@@ -191,6 +196,7 @@ final class AppModel {
     private func openDemo() async {
         reauthAccount = nil
         groups = []
+        proposal = nil
         selection = []
         do {
             store = try MessageStore(path: registry.demoDatabasePath)
@@ -217,6 +223,7 @@ final class AppModel {
         store = nil
         backend = nil
         groups = []
+        proposal = nil
         selection = []
         syncState = .idle
         lastSyncedAt = nil
@@ -353,6 +360,7 @@ final class AppModel {
         registry.resetAllLocalData()
 
         groups = []
+        proposal = nil
         selection = []
         ignoredKeys = []
         history = [:]
@@ -680,6 +688,7 @@ final class AppModel {
         store = nil
         backend = nil
         groups = []
+        proposal = nil
         selection = []
         currentAccount = email
         await publishMCPContext()
@@ -696,6 +705,7 @@ final class AppModel {
             store = nil
             backend = nil
             groups = []
+            proposal = nil
             await publishMCPContext()
             if let next = currentAccount { await open(account: next) }
         }
@@ -717,6 +727,7 @@ final class AppModel {
             groups = Grouping(rules: groupingRules).group(messages)
             ignoredKeys = try store.ignoredGroupKeys()
             history = try store.unsubscribeHistory()
+            proposal = store.proposal()
             hasLoadedOnce = true
             pruneSelection()
         } catch {
@@ -857,18 +868,44 @@ final class AppModel {
     /// Whether the how-it-works sheet is showing (Help menu).
     var showHowItWorks = false
 
+    /// Where a collection's rows come from.
+    ///
+    /// Not every collection lists `groups`: Unsubscribed lists durable records,
+    /// which outlive the messages they were recorded for, and Proposed lists
+    /// what an agent put forward, which is neither. This replaces an
+    /// `if collection == .unsubscribed` special case that could hold two
+    /// answers and no more — a `switch` over the enum makes a new collection
+    /// state its row source or fail to compile, which is the property that
+    /// matters when the next one is added.
+    enum RowSource {
+        /// Senders filtered out of `groups` — All Senders, Reappeared, Ignored.
+        case senders([SenderRow])
+        case history([HistoryRow])
+        case proposals([ProposedRow])
+
+        var ids: [GroupID] {
+            switch self {
+            case .senders(let rows): rows.map(\.id)
+            case .history(let rows): rows.map(\.id)
+            case .proposals(let rows): rows.map(\.id)
+            }
+        }
+    }
+
+    var rowSource: RowSource {
+        switch collection {
+        case .allSenders, .reappeared, .ignored: .senders(visibleRows)
+        case .unsubscribed: .history(unsubscribedRows)
+        case .proposed: .proposals(proposedRows)
+        }
+    }
+
     /// Every row on screen, in display order, whichever collection that is.
     ///
     /// The one answer to "what can be selected right now": keyboard navigation,
     /// the cursor after an action, selection pruning and the status bar all read
     /// it, so a new collection joins the selection model by appearing here.
-    /// Unsubscribed is the odd one — it lists durable records, which outlive the
-    /// messages they were recorded for, so its rows can't come from `groups`.
-    var visibleIDs: [GroupID] {
-        collection == .unsubscribed
-            ? unsubscribedRows.map(\.id)
-            : visibleRows.map(\.id)
-    }
+    var visibleIDs: [GroupID] { rowSource.ids }
 
     /// The sender rows on screen, in display order — All Senders, Reappeared and
     /// Ignored all list the same thing, filtered differently.
@@ -885,6 +922,41 @@ final class AppModel {
     var unsubscribedRows: [HistoryRow] {
         unsubscribedRecords.compactMap { record in
             GroupID(storageKey: record.groupKey).map { HistoryRow(id: $0, record: record) }
+        }
+    }
+
+    /// One Proposed row: the agent's item, and the sender as they stand now.
+    struct ProposedRow: Identifiable {
+        let id: GroupID
+        /// The agent's one-line reason, shown in the table. Not the inspector:
+        /// reviewing twenty-five rows without seeing why each was picked is
+        /// rubber-stamping, and the reason is the only thing that makes the
+        /// agent's judgement checkable.
+        let reason: String
+        let name: String
+        let email: String
+        /// Nil once the sender's messages are gone — trashed since the proposal
+        /// was made, or regrouped. The row stays, so the human still reviews
+        /// the proposal the agent actually sent; the actions disable themselves
+        /// through the usual `withMessages` rule.
+        let sender: SenderRow?
+    }
+
+    /// The proposal's rows, in the agent's order, filtered by the search field.
+    var proposedRows: [ProposedRow] {
+        guard let proposal else { return [] }
+        return proposal.senders(in: groups, matching: searchText).map { proposed in
+            let row = proposed.group.map {
+                SenderRow(group: $0, priorOutcome: outcome(for: $0.id))
+            }
+            return ProposedRow(
+                id: proposed.id,
+                reason: proposed.item.reason,
+                // Prefer what the sender is called now; fall back to what the
+                // agent was looking at when it proposed them.
+                name: row?.name ?? proposed.item.senderName,
+                email: row?.email ?? proposed.item.senderEmail,
+                sender: row)
         }
     }
 
@@ -1014,6 +1086,64 @@ final class AppModel {
         pruneSelection()
     }
 
+    // MARK: - Agent proposals
+
+    /// Accept a proposal from an agent and put it up for review.
+    ///
+    /// The in-process seam, deliberately: the MCP write route that calls this
+    /// is TASK-46, and until it exists this is the only way in — which is also
+    /// what lets the behaviour be driven without an HTTP server. It stores and
+    /// displays; it does not act on a single sender, and it never will.
+    ///
+    /// Not called in demo mode: the whole MCP surface refuses there (TASK-41),
+    /// and a proposal seeded into the demo database would survive into the next
+    /// person's demo.
+    func receiveProposal(_ incoming: SenderProposal) {
+        guard let store, !isDemoMode else { return }
+        try? store.setProposal(incoming)
+        proposal = incoming
+        Log.app.event("received an agent proposal of \(incoming.items.count) sender(s)")
+    }
+
+    /// Clear the proposal without acting on any sender.
+    ///
+    /// This is the decline path and it must stay inert: no unsubscribe, no
+    /// ignore, no trash, no classification written. The only thing that happens
+    /// is that the review queue goes away.
+    func dismissProposal() {
+        guard proposal != nil else { return }
+        try? store?.clearProposal()
+        proposal = nil
+        Log.app.event("dismissed the agent proposal; no sender was acted on")
+        leaveProposedIfGone()
+    }
+
+    /// Drop senders from the proposal — the human editing it, having decided
+    /// the agent was wrong about those rows. Acts on the proposal only.
+    func removeFromProposal(_ ids: Set<GroupID>) {
+        guard let proposal else { return }
+        let keys = Set(ids.map(\.storageKey))
+        let edited = proposal.removing(groupKeys: keys)
+        if let edited {
+            try? store?.setProposal(edited)
+        } else {
+            // The last row went, so there is nothing left to review and the
+            // sidebar row must go with it.
+            try? store?.clearProposal()
+        }
+        self.proposal = edited
+        selection.subtract(ids)
+        leaveProposedIfGone()
+    }
+
+    /// Send the user somewhere real when the collection they're looking at
+    /// stops existing. Leaving them on Proposed would show an empty list with
+    /// no sidebar row selected.
+    private func leaveProposedIfGone() {
+        guard collection == .proposed, proposal == nil else { return }
+        collection = .allSenders  // clears the selection through its own didSet
+    }
+
     private func matchesCollection(_ g: SenderGroup) -> Bool {
         matches(g, in: collection)
     }
@@ -1033,7 +1163,14 @@ final class AppModel {
             isIgnored: ignoredKeys.contains(g.id.storageKey),
             isUnsubscribed: history[g.id.storageKey] != nil,
             hasReappeared: isReappeared(g),
-            hasMessages: !g.messages.isEmpty)
+            hasMessages: !g.messages.isEmpty,
+            isProposed: proposedKeys.contains(g.id.storageKey))
+    }
+
+    /// The group keys the live proposal names. An overlay: it does not move a
+    /// sender out of the collection it already sits in.
+    private var proposedKeys: Set<String> {
+        Set(proposal?.items.map(\.groupKey) ?? [])
     }
 
     /// True once this sender has any recorded unsubscribe attempt — meaning the
@@ -1099,10 +1236,31 @@ final class AppModel {
     // MARK: - Counts for the sidebar
 
     func count(for collection: SenderCollection) -> Int {
+        switch collection {
         // Unsubscribed is counted from the durable history log, not from
         // messages, so it's correct even after a sender's mail is deleted.
-        if collection == .unsubscribed { return unsubscribedRecords.count }
-        return groups.filter { matches($0, in: collection) }.count
+        case .unsubscribed: return unsubscribedRecords.count
+        // Every row the agent proposed, including any whose sender has since
+        // lost their mail — the badge counts what is left to review, and those
+        // rows still have to be reviewed.
+        case .proposed: return proposal?.items.count ?? 0
+        case .allSenders, .reappeared, .ignored:
+            return groups.filter { matches($0, in: collection) }.count
+        }
+    }
+
+    /// Whether a collection has a sidebar row at all.
+    ///
+    /// Proposed exists only while there is something to review. Most users will
+    /// never connect an MCP client, and a permanently visible empty collection
+    /// advertises a feature they cannot use. Reappeared follows the rule it
+    /// already had — its whole section hides when nobody has reappeared.
+    func shows(_ collection: SenderCollection) -> Bool {
+        switch collection {
+        case .proposed: proposal != nil
+        case .reappeared: count(for: .reappeared) > 0
+        case .allSenders, .unsubscribed, .ignored: true
+        }
     }
 
     var totalMessages: Int { rows.reduce(0) { $0 + $1.count } }
@@ -1131,7 +1289,8 @@ final class AppModel {
             count: visible.count,
             // An Unsubscribed row whose messages have been deleted has a record
             // and nothing to act on.
-            withMessages: visible.filter { group(for: $0) != nil }.count)
+            withMessages: visible.filter { group(for: $0) != nil }.count,
+            alreadyUnsubscribed: visible.filter { history[$0.storageKey] != nil }.count)
     }
 
     /// Whether an action can run on the current selection.

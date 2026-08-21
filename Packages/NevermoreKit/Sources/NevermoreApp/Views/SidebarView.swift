@@ -29,10 +29,15 @@ struct SidebarView: View {
                 }
             }
             ForEach(SenderCollection.Section.allCases) { section in
-                // Hide the ATTENTION section entirely when nothing reappeared.
-                if section != .attention || model.count(for: .reappeared) > 0 {
+                // A section with nothing to show isn't drawn — which is how
+                // ATTENTION disappears when nobody has reappeared, and how
+                // REVIEW stays invisible for the users (most of them) who never
+                // connect an agent. The rule per collection lives on the model,
+                // so this doesn't name any one of them.
+                let visible = section.members.filter(model.shows)
+                if !visible.isEmpty {
                     Section(section.rawValue) {
-                        ForEach(section.members) { item in
+                        ForEach(visible) { item in
                             row(item)
                                 .tag(item)
                         }
@@ -50,8 +55,11 @@ struct SidebarView: View {
     @ViewBuilder
     private func row(_ item: SenderCollection) -> some View {
         let n = model.count(for: item)
-        if item == .reappeared {
+        if item == .reappeared || item == .proposed {
             // Reappeared uses an accent pill, not a plain count (design 1a).
+            // Proposed takes the same treatment: both are rows that appear
+            // because something is waiting on the user, and a plain badge reads
+            // as a standing total rather than a queue.
             HStack {
                 Label(item.title, systemImage: item.systemImage)
                 Spacer()
