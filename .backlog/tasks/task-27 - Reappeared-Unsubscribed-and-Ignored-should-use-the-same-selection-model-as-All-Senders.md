@@ -37,15 +37,15 @@ Worth deciding while implementing: whether selection carries *across* collection
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 Rows in Reappeared, Unsubscribed and Ignored can be selected, with the same click, keyboard and multi-select behaviour as All Senders
-- [x] #2 Switching collections never leaves the inspector describing a sender absent from the visible list
-- [x] #3 The status bar's "N selected" count always refers to rows in the current collection
-- [x] #4 Existing per-row actions still work and still act on their own row, not on the selection
-- [x] #5 Toolbar and menu actions that operate on the selection either work in these collections or are disabled with a reason, rather than silently acting on a stale sender
+- [ ] #1 Rows in Reappeared, Unsubscribed and Ignored can be selected, with the same click, keyboard and multi-select behaviour as All Senders
+- [ ] #2 Switching collections never leaves the inspector describing a sender absent from the visible list
+- [ ] #3 The status bar's "N selected" count always refers to rows in the current collection
+- [ ] #4 Existing per-row actions still work and still act on their own row, not on the selection
+- [ ] #5 Toolbar and menu actions that operate on the selection either work in these collections or are disabled with a reason, rather than silently acting on a stale sender
 - [x] #6 A decision is recorded on whether selection persists across collection switches, and the chosen behaviour is covered by a test
-- [x] #7 Reappeared offers a way to open the latest message before deciding, using viewLatestMessage() so Gmail opens the conversation and other providers fall back to search
-- [x] #8 The v shortcut and Actions > View Latest Message work in every collection that has a selection, not just All Senders
-- [x] #9 Demo mode keeps its explanatory toast rather than opening a browser
+- [ ] #7 Reappeared offers a way to open the latest message before deciding, using viewLatestMessage() so Gmail opens the conversation and other providers fall back to search
+- [ ] #8 The v shortcut and Actions > View Latest Message work in every collection that has a selection, not just All Senders
+- [ ] #9 Demo mode keeps its explanatory toast rather than opening a browser
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -86,6 +86,12 @@ what left the inspector describing an off-screen row. Covered by tests on
 `SelectionCursor.surviving`.
 
 ## Outcome (2026-08-20)
+
+**Only AC #6 is ticked.** The other eight are implemented and reasoned through,
+but every one of them ultimately asserts something on screen — a row
+highlighting, an inspector pane, a tooltip on a greyed-out control — and the GUI
+was deliberately not launched (shared machine). The underlying rules are covered
+by tests; the clicking is not. They are left unchecked rather than claimed.
 
 Built as planned. `swift build` clean; `swift run nevermore-tests` reports
 **175 passed, 0 failed** (157 before, 18 added across three new suites:
