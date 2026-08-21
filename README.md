@@ -95,6 +95,9 @@ Nevermore is the opposite shape:
 - **Demo mode.** A built-in sample mailbox you can explore before handing over a
   password, and switch back to any time from Settings. It runs on a backend with
   no network code in it, so nothing in demo mode can reach a server.
+- **Read-only MCP server.** Optional, off by default: let an AI agent read and
+  classify your senders while you keep every action. See [Connecting an AI
+  agent](#connecting-an-ai-agent-mcp).
 
 ## Screenshots
 
@@ -186,7 +189,9 @@ Packages/NevermoreKit/
 │   │   ├── Store/             # GRDB/SQLite header cache
 │   │   ├── Demo/              # fabricated mailbox + a backend with no network
 │   │   └── Credentials/       # Keychain, account registry
+│   │   └── Server/            # loopback HTTP server + the read-only MCP surface
 │   ├── NevermoreApp/          # SwiftUI app: views, sheets, AppModel
+│   ├── NevermoreMCP/          # nevermore-mcp: stdio->HTTP bridge for MCP clients
 │   └── Probe/                 # CLI harness for live-mailbox testing
 └── Tests/NevermoreTests/
 ```
@@ -221,6 +226,74 @@ built accordingly:
   `WhenUnlockedThisDeviceOnly`, so it can't ride a backup to another machine.
 - **Every sender-supplied URL is guarded** — the silent request, the redirect
   chain, the in-app browser, and the "Manage" link in your unsubscribe history.
+
+## Connecting an AI agent (MCP)
+
+Nevermore decides one sender at a time, which is the right shape when the answer
+is uncertain and useless when the question is *"which of these 400 senders
+belong to a life situation that is now over"*. That judgement is semantic and
+changes over time. Rather than build an LLM into a mail app, Nevermore can hand
+a **read-only** view of your senders to an agent you already use, and keep the
+acting to itself.
+
+**Read this first: subject lines leave your Mac.** The agent sees sender names,
+addresses, domains, subject lines, dates and read rates — and sends them to
+whatever model it runs, which is usually cloud-hosted and run by someone else.
+Message *bodies* are never available, because Nevermore never downloads them.
+This is the one thing the app does that isn't local, it is off until you turn it
+on, and [PRIVACY.md](PRIVACY.md#connecting-an-ai-agent-mcp) spells out the rest.
+
+### Setting it up
+
+1. Build the bridge: `cd Packages/NevermoreKit && swift build -c release`. The
+   binary lands at `.build/release/nevermore-mcp`. It ships with the direct
+   download only — the Mac App Store build does not contain it.
+2. In Nevermore, open **Settings ▸ Local Server** and turn the local server on.
+3. Point your MCP client at the binary. For Claude Code:
+
+   ```bash
+   claude mcp add nevermore /full/path/to/nevermore-mcp
+   ```
+
+   or, for a client that reads a JSON config:
+
+   ```json
+   {
+     "mcpServers": {
+       "nevermore": { "command": "/full/path/to/nevermore-mcp" }
+     }
+   }
+   ```
+
+**Nevermore has to be running, with the local server on, whenever the agent
+calls a tool.** The bridge holds no mail of its own — it forwards to the app,
+which is the only thing that opens the database. If the app is closed, the
+tools report that rather than answering from a cache. It survives the app being
+quit and relaunched underneath it, so you do not need to restart your MCP client
+when you restart Nevermore.
+
+### What the agent gets
+
+Nine read tools: `mailbox_summary` and `sync_status` for orientation,
+`list_senders` (filtered by collection, message count, read rate, recency,
+unsubscribe method, mailing-list status, or a recorded classification),
+`search_senders`, `get_sender`, `list_messages`, `unsubscribe_history`,
+`list_reappeared`, and `list_by_context`.
+
+Senders are partitioned by **how** they can be unsubscribed from — one-click
+POST, plain link, `mailto:`, or nothing machine-readable — which is known from
+the stored headers, so an agent can tell you which senders will need a browser
+without attempting anything.
+
+### What it can't do
+
+- **It cannot act.** There is no unsubscribe, ignore or trash tool. Bulk action
+  goes through a selection you review and confirm in the app.
+- **It cannot switch accounts.** Only the account currently open is served, and
+  every response names it.
+- **It refuses in demo mode**, so an agent can't spend a context window
+  reasoning about a fabricated mailbox.
+- **It cannot read your mail.** The bodies are not there to read.
 
 ## Your mail
 

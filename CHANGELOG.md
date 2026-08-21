@@ -6,6 +6,21 @@ All notable changes to Nevermore are recorded here. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **A read-only MCP server**, off by default, so an AI agent can read and
+  classify your senders while every action stays with you. Nine read tools —
+  orientation, filtered sender lists, search, per-sender detail with the parsed
+  unsubscribe targets, subject lines, unsubscribe history, reappeared senders,
+  and the decisions recorded under a context label. Senders are partitioned by
+  how they can be unsubscribed from, so you learn which will need a browser
+  without anything being attempted. Connected through `nevermore-mcp`, a bridge
+  that ships with the direct download only; see the README.
+- Turning it on sends sender names and **subject lines** to whichever AI model
+  the connected client runs, which is usually cloud-hosted and someone else's.
+  That is the one thing Nevermore does that isn't local, and PRIVACY.md now says
+  so rather than leaving it to be discovered.
+
 ## [1.0.0] — 2026-08-01
 
 First Mac App Store release, and the version number catching up to what the app

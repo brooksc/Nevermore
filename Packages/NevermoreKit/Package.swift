@@ -9,6 +9,11 @@ let package = Package(
         .executable(name: "nevermore-probe", targets: ["Probe"]),
         .executable(name: "nevermore-tests", targets: ["NevermoreTests"]),
         .executable(name: "NevermoreApp", targets: ["NevermoreApp"]),
+        // The MCP bridge (TASK-44). A separate executable product, and deliberately
+        // not a dependency of anything: the Mac App Store target in Project.swift
+        // depends on the NevermoreKit *library* product only, so the store build
+        // cannot pick this up. Direct-download channel only.
+        .executable(name: "nevermore-mcp", targets: ["NevermoreMCP"]),
     ],
     dependencies: [
         // SwiftMail 1.8.0 depends on a branch-pinned swift-nio-imap, so SPM rejects
@@ -53,6 +58,15 @@ let package = Package(
             name: "NevermoreTests",
             dependencies: ["NevermoreKit"],
             path: "Tests/NevermoreTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        // The stdio->HTTP bridge an MCP client spawns. Depends on NevermoreKit for
+        // the token path, the port contract and the tool catalog — the three things
+        // it must not re-derive, since a bridge that disagrees with the server about
+        // any of them looks exactly like an app that isn't running.
+        .executableTarget(
+            name: "NevermoreMCP",
+            dependencies: ["NevermoreKit"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // The SwiftUI app (M5). Built as a plain executable here and wrapped into

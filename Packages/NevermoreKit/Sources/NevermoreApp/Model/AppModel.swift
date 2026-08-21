@@ -200,6 +200,7 @@ final class AppModel {
             return
         }
         backend = DemoBackend()
+        await publishMCPContext()
         await reloadFromStore()
         startSync()
         // No background sync in demo mode: there is nothing to poll, and a tick
@@ -230,6 +231,7 @@ final class AppModel {
             // Keep it selected and flag re-auth so the UI can explain why.
             Log.app.event("keychain read failed for \(account) — needs re-auth")
             reauthAccount = account
+            await publishMCPContext()
             return
         }
         reauthAccount = nil
@@ -238,11 +240,13 @@ final class AppModel {
         } catch {
             Log.app.problem("could not open database: \(error.localizedDescription)")
             syncState = .failed("Could not open local database: \(error.localizedDescription)")
+            await publishMCPContext()
             return
         }
         backend = makeBackend(for: account, password: password)
         currentAccount = account
         Log.app.event("opened account \(account)")
+        await publishMCPContext()
         await reloadFromStore()
         // Deliberately not awaited: the first sync on a large mailbox takes
         // minutes, and `open` is called from the onboarding sheet's submit
@@ -345,6 +349,7 @@ final class AppModel {
 
         store = nil
         backend = nil
+        await publishMCPContext()
         registry.resetAllLocalData()
 
         groups = []
@@ -452,6 +457,25 @@ final class AppModel {
     /// actually in; the server reads `isDemo` once, at construction.
     private func refreshLocalServerDemoMode() async {
         localServerStatus = await localServer.restartIfRunning(isDemo: isDemoMode)
+        await publishMCPContext()
+    }
+
+    /// Tell the local server which account its MCP routes read.
+    ///
+    /// Called on every path that opens, closes or switches a mailbox, because
+    /// the MCP surface is defined as "the account currently open" and every
+    /// response names it — a server left pointing at the previous account would
+    /// answer about one mailbox while labelling it another.
+    ///
+    /// Demo mode publishes nothing. The routes refuse in demo anyway, but
+    /// handing them a fabricated store and relying on that refusal would make
+    /// the guarantee depend on a flag rather than on what the server can reach.
+    private func publishMCPContext() async {
+        guard !isDemoMode, let store, let currentAccount else {
+            await localServer.setMCPContext(nil)
+            return
+        }
+        await localServer.setMCPContext(MCPContext(account: currentAccount, store: store))
     }
 
     /// Remove the token file when the app quits. The port goes away with the
@@ -648,6 +672,7 @@ final class AppModel {
         groups = []
         selection = []
         currentAccount = email
+        await publishMCPContext()
         await open(account: email)
     }
 
@@ -661,6 +686,7 @@ final class AppModel {
             store = nil
             backend = nil
             groups = []
+            await publishMCPContext()
             if let next = currentAccount { await open(account: next) }
         }
     }

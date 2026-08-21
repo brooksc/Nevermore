@@ -59,6 +59,10 @@ public actor NevermoreServer {
     /// The token `/mcp/*` requests must present. Empty means MCP is not configured, and every MCP
     /// route answers 503 — fail closed rather than fail open.
     private let mcpToken: String
+    /// Which account the MCP routes read, and its store. Settable rather than an init parameter
+    /// because the server outlives the open account: the user switches accounts, or closes the one
+    /// that was open, without the listener going down.
+    private var mcpContext: MCPContext?
 
     public init(
         appVersion: String = AppVersion.marketing,
@@ -122,6 +126,15 @@ public actor NevermoreServer {
     public var listeningPort: UInt16 { port }
 
     public var isListening: Bool { listener != nil }
+
+    /// Point the MCP routes at an open account, or at nothing.
+    ///
+    /// Nil is meaningful: with no context every tool answers 503 rather than serving an empty
+    /// mailbox, because "this account has no senders" and "no account is open" are answers an agent
+    /// would act on very differently.
+    public func setMCPContext(_ context: MCPContext?) {
+        mcpContext = context
+    }
 
     // MARK: - Listener parameters
 
@@ -332,9 +345,12 @@ public actor NevermoreServer {
         }
     }
 
-    /// Authenticate and dispatch `/mcp/*`. The tool routes themselves are TASK-44; what this task
-    /// owes is the gate in front of them, so an unauthenticated caller can never reach a route that
-    /// does not exist yet and later silently start existing.
+    /// Authenticate and dispatch `/mcp/*`.
+    ///
+    /// The order of the checks is the contract a client reads its situation from, and each answer
+    /// means one thing only: 401 the credential, 404 the route, 403 demo mode, 503 no mailbox. A
+    /// bridge that got 403 where it expected 404 would report "that tool doesn't exist" for an app
+    /// that is merely showing the demo.
     private func routeMCPRequest(_ request: HTTPRequest) -> HTTPResponse {
         // Fail closed: an empty server token means MCP is not configured — never "no token
         // required".
@@ -350,7 +366,36 @@ public actor NevermoreServer {
         guard request.method == "POST" else {
             return .error("Method not allowed; MCP routes require POST", code: 405)
         }
-        return .error("MCP route not found", code: 404)
+        // Unknown routes are answered before anything about the mailbox, so 404 keeps meaning
+        // "no such tool" whatever state the app happens to be in.
+        guard MCPRoutes.paths.contains(request.path) else {
+            return .error("MCP route not found", code: 404)
+        }
+        // TASK-41: the demo mailbox is fabricated, and an agent told to triage it would spend a
+        // context window reasoning about senders that do not exist. Refuse rather than serve it.
+        if isDemo {
+            return .error(
+                "Nevermore is in demo mode. The demo mailbox is fabricated, so the tools refuse "
+                    + "rather than let an agent reason about senders that aren't real. Leave demo "
+                    + "mode in the app and try again.",
+                code: 403)
+        }
+        guard let context = mcpContext else {
+            return .error(
+                "No mailbox is open in Nevermore. Open an account in the app and try again.",
+                code: 503)
+        }
+        // Rebuilt per request: the app writes to this database whenever a sync lands or the user
+        // acts, so a cached read model would describe a mailbox that has moved on.
+        let snapshot: MCPSnapshot
+        do {
+            snapshot = try MCPSnapshot.load(context)
+        } catch {
+            Log.app.problem("MCP snapshot failed: \(error.localizedDescription)")
+            return .error("Could not read the mailbox: \(error.localizedDescription)", code: 500)
+        }
+        return MCPRoutes.handle(path: request.path, request: request, snapshot: snapshot)
+            ?? .error("MCP route not found", code: 404)
     }
 
     /// Extract the credential from `Authorization: Bearer <token>`. The scheme is matched
