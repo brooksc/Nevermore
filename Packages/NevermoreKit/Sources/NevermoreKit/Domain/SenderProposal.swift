@@ -1,5 +1,75 @@
 import Foundation
 
+/// What the agent means should happen to a sender (TASK-52).
+///
+/// A proposal used to carry only prose, and prose cannot override a button: an
+/// agent that wrote "IGNORE, do not unsubscribe" was proposing into a row whose
+/// primary action was Unsubscribe and whose habitual keystroke is `u`, and both
+/// senders were unsubscribed before anyone read the sentence. The recommendation
+/// has to be data the row can act on, so this is the field the row leads with.
+///
+/// Three cases and no more, because these are the three things the app can
+/// actually do to a sender. There is no `none`: an agent that has looked at a
+/// sender closely enough to propose it has an opinion, and "no opinion" would be
+/// read as the default, which is how this went wrong the first time.
+public enum RecommendedAction: String, Codable, Sendable, Hashable, CaseIterable {
+    /// Worth telling the sender to stop. Only for a genuine recurring
+    /// subscription: the request confirms a live, read address, and that
+    /// exposure only pays for itself against mail that keeps coming.
+    case unsubscribe
+    /// Hide the sender here and tell them nothing. The safe answer for cold
+    /// outreach and one-off senders.
+    case ignore
+    /// Clear the mail out, and still tell them nothing.
+    case trash
+
+    /// The button, in the app's existing words for these actions.
+    public var buttonTitle: String {
+        switch self {
+        case .unsubscribe: "Unsubscribe"
+        case .ignore: "Ignore"
+        case .trash: "Trash Messages"
+        }
+    }
+
+    /// The badge at the head of the row.
+    public var badgeTitle: String {
+        switch self {
+        case .unsubscribe: "Unsubscribe"
+        case .ignore: "Ignore"
+        case .trash: "Trash"
+        }
+    }
+
+    public var symbolName: String {
+        switch self {
+        case .unsubscribe: "envelope.open"
+        case .ignore: "eye.slash"
+        case .trash: "trash"
+        }
+    }
+
+    /// Why an agent would pick this one, in the words the tool description and
+    /// the override warning both use.
+    public var guidance: String {
+        switch self {
+        case .unsubscribe:
+            "a genuine recurring subscription the sender will honour a request from"
+        case .ignore:
+            "cold outreach, a one-off sender, or anyone an unsubscribe would only "
+                + "confirm a live address to"
+        case .trash:
+            "the same as ignore, plus the mail already sitting in the mailbox is not "
+                + "worth keeping"
+        }
+    }
+
+    /// Every value, for a refusal that has to say what it would have accepted.
+    public static var namesSentence: String {
+        allCases.map(\.rawValue).joined(separator: ", ")
+    }
+}
+
 /// A set of senders an external agent has put forward, waiting for a human to
 /// look at it.
 ///
@@ -27,14 +97,41 @@ public struct SenderProposal: Codable, Sendable, Hashable, Identifiable {
         /// and a reason the app rewrote would be the app's judgement, not the
         /// agent's.
         public let reason: String
+        /// What the agent means should happen to this sender. The row leads
+        /// with it, and an unsubscribe that contradicts it has to be confirmed.
+        public let recommendation: RecommendedAction
 
         public var id: String { groupKey }
 
-        public init(groupKey: String, senderName: String, senderEmail: String, reason: String) {
+        public init(
+            groupKey: String, senderName: String, senderEmail: String, reason: String,
+            recommendation: RecommendedAction = .unsubscribe
+        ) {
             self.groupKey = groupKey
             self.senderName = senderName
             self.senderEmail = senderEmail
             self.reason = reason
+            self.recommendation = recommendation
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case groupKey, senderName, senderEmail, reason, recommendation
+        }
+
+        /// Hand-written for one reason: a proposal stored before recommendations
+        /// existed has no such key, and it should reappear on the next launch
+        /// rather than fail to decode and take the whole review with it.
+        /// `.unsubscribe` is what those rows already meant — the difference is
+        /// that the row now says so out loud instead of implying it.
+        public init(from decoder: any Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            groupKey = try c.decode(String.self, forKey: .groupKey)
+            senderName = try c.decode(String.self, forKey: .senderName)
+            senderEmail = try c.decode(String.self, forKey: .senderEmail)
+            reason = try c.decode(String.self, forKey: .reason)
+            recommendation =
+                try c.decodeIfPresent(RecommendedAction.self, forKey: .recommendation)
+                ?? .unsubscribe
         }
     }
 
@@ -134,5 +231,46 @@ extension SenderProposal {
             }
             return ProposedSender(id: id, item: item, group: byKey[item.groupKey])
         }
+    }
+
+    /// The proposed senders among `groupKeys` the agent recommended something
+    /// other than `action` for.
+    ///
+    /// The whole override check, and it lives here rather than in the app so it
+    /// can be held to it: an unsubscribe started from Proposed asks this first,
+    /// and a non-empty answer is a confirmation the user has to read.
+    public func items(contradicting action: RecommendedAction, in groupKeys: Set<String>) -> [Item] {
+        items.filter { groupKeys.contains($0.groupKey) && $0.recommendation != action }
+    }
+}
+
+/// What the user is asked when they unsubscribe from a sender the agent said not
+/// to (TASK-52).
+///
+/// The copy is here, next to the rule, because it is the feature: the dialog has
+/// to name the senders and repeat the agent's own reason, or it is a speed bump
+/// that teaches nothing and gets clicked through. It never blocks — overriding is
+/// a legitimate answer, and the agent is often wrong — it only makes the
+/// override a decision rather than the second half of a habitual keystroke.
+public enum ProposalOverrideWarning {
+    public static let confirmTitle = "Unsubscribe Anyway"
+
+    public static func title(count: Int) -> String {
+        count == 1
+            ? "The agent recommended against unsubscribing from this sender"
+            : "The agent recommended against unsubscribing from \(count) of these senders"
+    }
+
+    /// Names every sender, what the agent asked for instead, and why — verbatim,
+    /// because a reason the app paraphrased would be the app's judgement.
+    public static func message(for items: [SenderProposal.Item]) -> String {
+        let lines = items.map { item in
+            "\(item.senderName) — recommended: \(item.recommendation.badgeTitle). \(item.reason)"
+        }
+        return
+            (lines + [
+                "Unsubscribing tells the sender the address is live and read, which cannot be "
+                    + "taken back. Their recommendation is still one keystroke away in the row."
+            ]).joined(separator: "\n\n")
     }
 }

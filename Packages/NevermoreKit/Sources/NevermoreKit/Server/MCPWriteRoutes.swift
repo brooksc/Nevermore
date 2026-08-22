@@ -8,6 +8,10 @@ public struct MCPWriteRequest: Decodable, Sendable {
     public struct ProposedItem: Decodable, Sendable {
         public var senderId: String?
         public var reason: String?
+        /// `unsubscribe`, `ignore` or `trash`. Required, and deliberately not
+        /// defaulted — defaulting to unsubscribe is the bug this field exists
+        /// for (TASK-52).
+        public var recommendation: String?
     }
 
     public var senderId: String?
@@ -172,9 +176,10 @@ public enum MCPWriteRoutes {
         guard let raw = args.senders, !raw.isEmpty else {
             return .refusal(
                 message:
-                    "propose_selection needs `senders`: a list of {sender_id, reason} objects. The "
-                    + "reason is what makes the proposal reviewable, so it is required for every "
-                    + "sender.",
+                    "propose_selection needs `senders`: a list of {sender_id, reason, "
+                    + "recommendation} objects. The reason is what makes the proposal reviewable "
+                    + "and the recommendation is the action the row will offer, so both are "
+                    + "required for every sender.",
                 code: 400)
         }
         var requests: [AgentProposalRequest] = []
@@ -196,7 +201,32 @@ public enum MCPWriteRoutes {
                         + "for.",
                     code: 400)
             }
-            requests.append(AgentProposalRequest(senderId: senderId, reason: reason))
+            // No default. A proposal with no stated action is one the app would
+            // have to guess about, and the guess it used to make — unsubscribe,
+            // because that is what the row's primary button says — is exactly
+            // how an agent's "do not unsubscribe from these" ended up
+            // unsubscribing from them (TASK-52).
+            guard let rawAction = nonEmpty(item.recommendation) else {
+                return .refusal(
+                    message:
+                        "'\(senderId)' has no recommendation. Say what you mean should happen to "
+                        + "the sender — \(RecommendedAction.namesSentence) — because that is the "
+                        + "action the row offers the human. Nevermore will not assume unsubscribe: "
+                        + "unsubscribing confirms a live, read address to the sender, which is "
+                        + "worth it for \(RecommendedAction.unsubscribe.guidance) and not "
+                        + "otherwise.",
+                    code: 400)
+            }
+            guard let recommendation = RecommendedAction(rawValue: rawAction.lowercased()) else {
+                return .refusal(
+                    message:
+                        "'\(rawAction)' is not a recommendation Nevermore has. Use one of: "
+                        + "\(RecommendedAction.namesSentence).",
+                    code: 400)
+            }
+            requests.append(
+                AgentProposalRequest(
+                    senderId: senderId, reason: reason, recommendation: recommendation))
         }
         let summary = args.summary?.trimmingCharacters(in: .whitespacesAndNewlines)
         return await actions.propose(

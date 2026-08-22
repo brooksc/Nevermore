@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - task-52-recommendation
 created_date: '2026-08-22 02:32'
-updated_date: '2026-08-22 03:31'
+updated_date: '2026-08-22 03:44'
 labels:
   - mcp
   - ui
@@ -38,12 +38,12 @@ Recorded user preference driving this: cold outreach and one-off senders should 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 propose_selection accepts a recommended action per sender, and the tool description explains when each is appropriate
+- [x] #1 propose_selection accepts a recommended action per sender, and the tool description explains when each is appropriate
 - [ ] #2 The row leads with the recommended action rather than defaulting to unsubscribe regardless
 - [ ] #3 Acting against a recommendation is possible but deliberate, not something a single habitual keystroke does silently
 - [ ] #4 The agent's reason is legible in the row without selecting it
 - [ ] #5 get_proposal_status reports whether the human followed the recommendation or overrode it
-- [ ] #6 A decision is recorded on whether this merges with TASK-30's spammer warning
+- [x] #6 A decision is recorded on whether this merges with TASK-30's spammer warning
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -97,3 +97,97 @@ Recorded user preference driving this: cold outreach and one-off senders should 
 
 Build: `swift build`, `swift run nevermore-tests` in `Packages/NevermoreKit`.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## TASK-30 decision (AC #6): they do not merge, but they share this row
+
+They are the same *moment* and not the same *work*, and the split falls in a
+place that makes both cheaper rather than more expensive.
+
+TASK-52 builds the carrier: a per-sender `RecommendedAction` on the proposal,
+rendered as the thing the row leads with, guarded so an unsubscribe against it
+is deliberate, and reported back through `get_proposal_status`. TASK-30 supplies
+a *reason to recommend against unsubscribing* that Nevermore computes locally
+from `Authentication-Results` — a fact the app knows and no agent does, needing
+header fields the app does not fetch yet (its dependency on TASK-36 is real).
+
+Merging them would have made a UI defect that has already cost the user two
+wrong unsubscribes wait on a header-fetch cost study. Building them separately
+without deciding this would have produced the competition the task warns about:
+two different things arguing about unsubscribing in the same row.
+
+**Binding on whoever takes TASK-30:** its verdict must render through this row's
+recommendation slot — a DMARC-failing sender is shown as `Ignore` or `Trash`
+with the provider's verdict as the reason — and must not add a second warning
+surface competing with it. Its AC #3 ("advice is trash and ignore rather than
+unsubscribe") is already the shape of `RecommendedAction`, and its AC #2 and #5
+are copy inside this slot plus the inspector. What it still owns alone is AC #1
+(fetch, parse, store) and AC #4 (sending domain versus unsubscribe target).
+When a locally-computed verdict and an agent's recommendation disagree, the app's
+own evidence should win the badge and the agent's reason should stay visible —
+noted for TASK-30 to settle, not settled here.
+
+## What was built
+
+- `RecommendedAction` (unsubscribe / ignore / trash) on `SenderProposal.Item`,
+  with a hand-written decoder so a proposal stored by the previous build still
+  opens (defaults to `.unsubscribe`, which is what those rows already meant).
+- `propose_selection` **requires** it. Not defaulted, deliberately: defaulting
+  to unsubscribe is the defect — the agent said ignore and the app heard
+  unsubscribe. A sender without one is refused with a message that explains the
+  three values and the exposure argument.
+- The row leads with a labelled badge (icon *and* word, so the distinction
+  survives Dark Mode and colour-blindness) and its primary button does the
+  recommended thing. The unsubscribe-method icon moved to sit beside the message
+  count, where it answers a question instead of making a suggestion.
+- Every user-started unsubscribe funnels through `MainWindowView.beginUnsubscribe`
+  / `beginUnsubscribeAndDelete`, and both now ask `AppModel.mayUnsubscribeFromProposal`
+  first. A contradiction raises a confirmation naming the senders and repeating
+  the agent's reason verbatim. It is asked wherever the unsubscribe started, not
+  only in Proposed — a warning you could step around by switching collections
+  would not be one. Only unsubscribe is guarded; ignore and trash are local and
+  undoable, and guarding them would cost the triage rhythm for nothing.
+- `AppModel.proposalActions` records *which* action retired each row, and
+  `AgentProposalDecisions` (in NevermoreKit, so it is testable) turns that into
+  per-sender `decisions` with `followed_recommendation`, plus a note naming the
+  overrides and telling the agent to read them as considered disagreement.
+- Reason legibility: primary colour, `.callout`, three lines, selectable, still
+  with the full text in the tooltip.
+
+No safety property was weakened: no route mints, accepts or returns a
+`ReviewToken`, `MCPActions` still has no batch unsubscribe, and the confirmed /
+unattended tool split is unchanged.
+
+## Verification
+
+`cd Packages/NevermoreKit && swift build && swift run nevermore-tests` —
+**321 passed, 0 failed** (309 before; 12 new). Three existing write-route tests
+were edited to send the now-required `recommendation`; `StubActions.propose`
+now records it so routes can be asserted against it.
+
+- **AC #1 — checked.** Route tests: all three values reach the action layer
+  intact; a sender with no recommendation is refused and nothing is proposed; a
+  value Nevermore does not have is refused with the list. Catalog test: the
+  schema requires `recommendation`, its `enum` matches `RecommendedAction`, and
+  the description carries the per-value guidance plus the standing rule that
+  cold outreach and one-off senders are ignored or trashed, never unsubscribed.
+- **AC #2 — left unchecked.** The row code is written and compiles, but nobody
+  has looked at it. Views cannot be reached from the harness and the GUI was not
+  launched (shared machine).
+- **AC #3 — left unchecked.** The decision the guard rests on is tested
+  (`SenderProposal.items(contradicting:in:)` and the warning copy), but
+  `mayUnsubscribeFromProposal` is in the app target and the dialog is on-screen
+  behaviour; neither was exercised.
+- **AC #4 — left unchecked.** Legibility is a thing you check by looking.
+- **AC #5 — left unchecked.** `AgentProposalDecisions.build` is tested for all
+  four answers (followed / overrode / undecided / struck out), as is the
+  override note and the snake-case JSON the wire carries. What is *not* proven
+  is the wiring in `AgentActions.proposalStatus` and `AppModel.proposalActions`,
+  which live in the app target the harness cannot import.
+- **AC #6 — checked.** Decision recorded above.
+
+Docs updated to match: `README.md`, `UI_SPEC.md` §9.10 and the sidebar list, and
+the Unreleased CHANGELOG entry for the Proposed collection.
+<!-- SECTION:NOTES:END -->

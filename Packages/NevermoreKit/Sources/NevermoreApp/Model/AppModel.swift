@@ -202,7 +202,7 @@ final class AppModel {
         reauthAccount = nil
         groups = []
         proposal = nil
-        proposalActedKeys = []
+        proposalActions = [:]
         browserQueue = BrowserQueue()
         selection = []
         do {
@@ -231,7 +231,7 @@ final class AppModel {
         backend = nil
         groups = []
         proposal = nil
-        proposalActedKeys = []
+        proposalActions = [:]
         browserQueue = BrowserQueue()
         selection = []
         syncState = .idle
@@ -370,7 +370,7 @@ final class AppModel {
 
         groups = []
         proposal = nil
-        proposalActedKeys = []
+        proposalActions = [:]
         browserQueue = BrowserQueue()
         selection = []
         ignoredKeys = []
@@ -719,7 +719,7 @@ final class AppModel {
         backend = nil
         groups = []
         proposal = nil
-        proposalActedKeys = []
+        proposalActions = [:]
         browserQueue = BrowserQueue()
         selection = []
         currentAccount = email
@@ -738,7 +738,7 @@ final class AppModel {
             backend = nil
             groups = []
             proposal = nil
-        proposalActedKeys = []
+        proposalActions = [:]
             browserQueue = BrowserQueue()
             await publishMCPContext()
             if let next = currentAccount { await open(account: next) }
@@ -968,6 +968,9 @@ final class AppModel {
         /// rubber-stamping, and the reason is the only thing that makes the
         /// agent's judgement checkable.
         let reason: String
+        /// What the agent means should happen to this sender. The row leads
+        /// with it (TASK-52).
+        let recommendation: RecommendedAction
         let name: String
         let email: String
         /// Nil once the sender's messages are gone — trashed since the proposal
@@ -987,6 +990,7 @@ final class AppModel {
             return ProposedRow(
                 id: proposed.id,
                 reason: proposed.item.reason,
+                recommendation: proposed.item.recommendation,
                 // Prefer what the sender is called now; fall back to what the
                 // agent was looking at when it proposed them.
                 name: row?.name ?? proposed.item.senderName,
@@ -1138,7 +1142,7 @@ final class AppModel {
         guard let store, !isDemoMode else { return false }
         try? store.setProposal(incoming)
         proposal = incoming
-        proposalActedKeys = []
+        proposalActions = [:]
         Log.app.event("received an agent proposal of \(incoming.items.count) sender(s)")
         // Show it. A proposal that arrives behind three other windows has been
         // proposed into a void, and the review is the entire safety mechanism.
@@ -1158,7 +1162,7 @@ final class AppModel {
         guard proposal != nil else { return }
         try? store?.clearProposal()
         proposal = nil
-        proposalActedKeys = []
+        proposalActions = [:]
         Log.app.event("dismissed the agent proposal; no sender was acted on")
         leaveProposedIfGone()
     }
@@ -1167,6 +1171,63 @@ final class AppModel {
     /// the agent was wrong about those rows. Acts on the proposal only.
     func removeFromProposal(_ ids: Set<GroupID>) {
         dropFromProposal(ids)
+    }
+
+    /// An unsubscribe from Proposed that goes against what the agent asked for,
+    /// waiting on the user to say they mean it (TASK-52).
+    struct ProposalOverride: Identifiable {
+        let id = UUID()
+        let ids: Set<GroupID>
+        let alsoDelete: Bool
+        let title: String
+        let message: String
+    }
+
+    var pendingProposalOverride: ProposalOverride?
+
+    /// Whether an unsubscribe started from the Proposed collection may go ahead
+    /// now, or has to be confirmed first.
+    ///
+    /// This is the fix for the defect: `u` is muscle memory and Unsubscribe is
+    /// the primary button everywhere else in the app, so a proposal that says
+    /// "ignore, do not unsubscribe" was being answered with an unsubscribe by a
+    /// keystroke that had already left the fingers. The override is still one
+    /// dialog away — the agent is often wrong, and overriding it is a legitimate
+    /// answer — but it is now a decision, taken with the recommendation and the
+    /// agent's own reason on screen.
+    ///
+    /// Only unsubscribe is guarded, and the asymmetry is deliberate: it is
+    /// irreversible and it tells a third party the address is live. Ignoring or
+    /// trashing a sender the agent wanted unsubscribed is local to this Mac and
+    /// undone with ⌘Z, so making that deliberate would buy nothing and cost the
+    /// triage rhythm the app is built around.
+    /// Asked wherever the unsubscribe was started, not only in Proposed: a
+    /// sender under review is under review in All Senders too, and a warning
+    /// you could step around by changing lists would not be one.
+    func mayUnsubscribeFromProposal(_ ids: Set<GroupID>, alsoDelete: Bool) -> Bool {
+        guard let proposal, !ids.isEmpty else { return true }
+        let against = proposal.items(
+            contradicting: .unsubscribe, in: Set(ids.map(\.storageKey)))
+        guard !against.isEmpty else { return true }
+        pendingProposalOverride = ProposalOverride(
+            ids: ids,
+            alsoDelete: alsoDelete,
+            title: ProposalOverrideWarning.title(count: against.count),
+            message: ProposalOverrideWarning.message(for: against))
+        return false
+    }
+
+    /// Do to a proposed sender what the agent recommended, from the row's own
+    /// button. The one path where following the recommendation is a single
+    /// click, which is the point of putting it in the row.
+    func actOnRecommendation(_ id: GroupID, onUnsubscribe: (Set<GroupID>) -> Void) {
+        guard let item = proposal?.items.first(where: { $0.groupKey == id.storageKey })
+        else { return }
+        switch item.recommendation {
+        case .unsubscribe: onUnsubscribe([id])
+        case .ignore: ignore([id])
+        case .trash: requestTrash([id])
+        }
     }
 
     /// A sender that has been acted on leaves the review queue.
@@ -1179,7 +1240,7 @@ final class AppModel {
     /// lives in the outcome ledger an agent reads back, and in the durable
     /// unsubscribe history. What goes away is only the row asking you to decide
     /// something you have decided.
-    private func retireFromProposal(_ ids: Set<GroupID>) {
+    private func retireFromProposal(_ ids: Set<GroupID>, as action: RecommendedAction) {
         guard let proposal, !ids.isEmpty else { return }
         // Remember which rows left because they were acted on. Deriving this
         // from the outcome ledger instead looked tempting and is wrong: only
@@ -1187,14 +1248,22 @@ final class AppModel {
         // be indistinguishable from one the human struck out — and the agent
         // would be told its judgement was rejected on the rows it got right.
         let acted = Set(ids.map(\.storageKey)).intersection(proposal.items.map(\.groupKey))
-        proposalActedKeys.formUnion(acted)
+        for key in acted { proposalActions[key] = action }
         dropFromProposal(ids)
     }
 
-    /// Keys from the live proposal that left it by being acted on rather than
-    /// declined. Reset whenever a new proposal arrives or the queue is cleared,
-    /// so it never describes a review that is already over.
-    private(set) var proposalActedKeys: Set<String> = []
+    /// What the human actually did to each row that left the proposal by being
+    /// acted on rather than declined. The action and not merely the fact of it,
+    /// because that is what says whether the agent's recommendation was followed
+    /// or overridden (TASK-52) — "this row was acted on" cannot tell an agent
+    /// that its "ignore" was answered with an unsubscribe.
+    ///
+    /// Reset whenever a new proposal arrives or the queue is cleared, so it
+    /// never describes a review that is already over.
+    private(set) var proposalActions: [String: RecommendedAction] = [:]
+
+    /// The same set, for callers that only need to know a row was acted on.
+    var proposalActedKeys: Set<String> { Set(proposalActions.keys) }
 
     private func dropFromProposal(_ ids: Set<GroupID>) {
         guard let proposal else { return }
@@ -1443,7 +1512,7 @@ final class AppModel {
         try? targets.forEach { try store.ignore($0.id) }
         ignoredKeys = (try? store.ignoredGroupKeys()) ?? ignoredKeys
         selection.subtract(ids)
-        retireFromProposal(ids)
+        retireFromProposal(ids, as: .ignore)
         Log.app.event("ignored \(targets.count) sender(s): \(targets.map(\.id.key).joined(separator: ", "))")
         guard !silently else { return }
         showToast(
@@ -1523,7 +1592,7 @@ final class AppModel {
             try store.delete(uids: movedUIDs)
             await reloadFromStore()
             selection.subtract(ids)
-            retireFromProposal(ids)
+            retireFromProposal(ids, as: .trash)
             let n = movedUIDs.count
             Log.app.event("trashed \(n) messages from \(targets.count) sender(s)")
 
@@ -1765,7 +1834,7 @@ final class AppModel {
             })
         selection.subtract(Set(targets.map(\.id)))
         // These senders have been decided, so they leave the review queue.
-        retireFromProposal(Set(results.filter { $0.outcome != nil }.map(\.id)))
+        retireFromProposal(Set(results.filter { $0.outcome != nil }.map(\.id)), as: .unsubscribe)
         // Keep triage flowing, the same way ignore and trash do. Without this
         // the selection is simply emptied and the next keystroke has nothing
         // to act on.
