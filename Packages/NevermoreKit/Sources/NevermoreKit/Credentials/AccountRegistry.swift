@@ -38,12 +38,34 @@ public struct AccountRegistry: Sendable {
         directory.appendingPathComponent("Demo.sqlite").path
     }
 
+    /// Delete a database and everything that lives alongside it.
+    ///
+    /// A SQLite database is not one file. WAL mode keeps recent writes in a
+    /// `-wal` sibling until a checkpoint, and `MessageStore` copies the whole
+    /// database aside as `.pre-<migration>.bak` before a new migration runs. So
+    /// deleting `<name>.sqlite` alone leaves both the newest rows and an entire
+    /// prior copy on disk — which, since the store holds the free-text reasons
+    /// an agent wrote about the user, is data outliving the mailbox it
+    /// describes.
+    ///
+    /// Sweeping the directory by prefix rather than listing known suffixes: the
+    /// list of suffixes was already incomplete once, and a new sibling file
+    /// should not need every deletion site updated to stay private.
+    private func removeDatabase(atPath path: String) {
+        let fm = FileManager.default
+        let url = URL(fileURLWithPath: path)
+        let prefix = url.lastPathComponent
+        let parent = url.deletingLastPathComponent()
+        let siblings = (try? fm.contentsOfDirectory(atPath: parent.path)) ?? []
+        for name in siblings where name.hasPrefix(prefix) {
+            try? fm.removeItem(at: parent.appendingPathComponent(name))
+        }
+    }
+
     /// Delete the demo database so the next entry into demo mode rebuilds it.
     /// Demo mode is for showing the app off; it should look the same every time.
     public func resetDemoDatabase() {
-        for suffix in ["", "-wal", "-shm"] {
-            try? FileManager.default.removeItem(atPath: demoDatabasePath + suffix)
-        }
+        removeDatabase(atPath: demoDatabasePath)
     }
 
     /// Delete every account database, the demo database, and the registry
@@ -55,9 +77,7 @@ public struct AccountRegistry: Sendable {
     /// is the separate, explicit way to do that.
     public func resetAllLocalData() {
         for account in accounts() {
-            for suffix in ["", "-wal", "-shm"] {
-                try? FileManager.default.removeItem(atPath: databasePath(for: account) + suffix)
-            }
+            removeDatabase(atPath: databasePath(for: account))
         }
         resetDemoDatabase()
         try? FileManager.default.removeItem(at: registryFile)
@@ -85,7 +105,7 @@ public struct AccountRegistry: Sendable {
         map[account] = nil
         try? JSONEncoder().encode(map).write(to: providersFile)
         Keychain.delete(for: account)
-        try? FileManager.default.removeItem(atPath: databasePath(for: account))
+        removeDatabase(atPath: databasePath(for: account))
     }
 
     // MARK: - Provider association
