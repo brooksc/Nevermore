@@ -377,12 +377,36 @@ stay done — this is not transactional and the UI shouldn't imply it is.
 Replaces the progress sheet when finished. This screen is where Nevermore is
 honest about a hard truth: **an HTTP 200 does not prove an unsubscribe worked.**
 
-Group results into three lists:
+Group results into four lists, **in this order** — whatever needs the user
+first, because the sheet's only call to action lives there and a summary whose
+action is below the fold reads as complete:
 
-- **Confirmed** — the endpoint positively acknowledged. `checkmark.circle.fill`.
+- **Failed** — with the reason, and `Open in Browser` to hand the sender to the
+  in-app browser rather than repeat the request that just failed.
+  `xmark.octagon.fill`. Senders that were never sent anything (`needsManual`)
+  belong here too: the user still has to finish them.
+- **Not attempted** — only reachable by cancelling mid-run. `minus.circle`.
 - **Requested** — accepted, unverifiable. `clock.badge.questionmark`. Copy:
   *"Sent. If mail continues, they'll show up under Reappeared."*
-- **Failed** — with the reason and a `Retry` button.
+- **Confirmed** — the endpoint positively acknowledged. `checkmark.circle.fill`.
+
+**Headline:** counts confirmed + requested only, and says *"Unsubscribed from 10
+of 11 senders"* whenever some sender did not succeed, so the count and the
+`FAILED · 1` below it cannot be read as contradicting each other. No sender
+succeeded → *"No senders were unsubscribed"*.
+
+**The report is longer than the sheet, and must say so without being touched.**
+Beneath the headline, a line naming the whole run — *"11 senders in this report
+· 1 still needs you, listed first"*. The list itself scrolls to a maximum of
+420pt so the sheet still fits a small display, with scroll indicators forced
+visible (macOS overlay indicators hide until you scroll, which is exactly the
+state needing one) and the bottom edge faded, so an overflowing report ends in a
+fade rather than a line of text sliced through its glyphs. The results stage is
+560pt wide rather than the 460pt of confirm and progress: an outcome reads
+*"one-click accepted (HTTP 204), unverifiable"* and needs the room.
+
+The ordering, counting and wording live in `UnsubscribeReport` in NevermoreKit,
+not in the view, so they can be tested without looking at a screen.
 
 Footer: `Delete messages from confirmed senders` and `Done`.
 

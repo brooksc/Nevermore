@@ -36,7 +36,10 @@ struct UnsubscribeFlow: View {
             case .results: resultsView
             }
         }
-        .frame(width: 460)
+        // The results stage is wider: an outcome reads "one-click accepted
+        // (HTTP 204), unverifiable", which nearly fills a 460pt row on its own
+        // and pushes rows into a second line for no reason.
+        .frame(width: stage == .results ? 560 : 460)
         .padding(24)
         // Closable with Cmd-W and Escape like any other window — except while
         // requests are in flight, where the Cancel button is the only correct
@@ -208,32 +211,46 @@ struct UnsubscribeFlow: View {
 
     private var resultsView: some View {
         VStack(alignment: .leading, spacing: 14) {
-            // Count what actually worked. `results.count` includes failures and
-            // senders that were never attempted, so a run where everything
-            // failed still announced "Unsubscribed from 5 senders".
-            Text(
-                (confirmed + requested).isEmpty
-                    ? "No senders were unsubscribed"
-                    : "Unsubscribed from \((confirmed + requested).count) sender\((confirmed + requested).count == 1 ? "" : "s")"
-            )
-            .font(.title3.weight(.semibold))
+            // `UnsubscribeReport` owns the counting and the wording: what
+            // "unsubscribed" is allowed to mean, and how to say it next to a
+            // failure without the two reading as contradictory.
+            Text(report.headline).font(.title3.weight(.semibold))
             Text("A confirmation from the sender is the only real proof — here's what each one said.")
+                .font(.caption).foregroundStyle(.secondary)
+            // Says how big the report is before the list clips it, so a run of
+            // ten is never read as a complete report of the two rows that fit.
+            Text(report.contentsLine)
                 .font(.caption).foregroundStyle(.secondary)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    bucket("CONFIRMED", "checkmark.circle.fill", .green, confirmed)
-                    bucket("REQUESTED", "clock.badge.questionmark", .orange, requested)
-                    bucket("FAILED", "xmark.octagon.fill", .red, failed)
-                    // Cancelling left these with no outcome, so they appeared in
-                    // no bucket at all — silently missing from the report.
-                    bucket("NOT ATTEMPTED", "minus.circle", .secondary, notAttempted)
+                    // Actionable buckets first — see `UnsubscribeReport.order`.
+                    // "Open in Browser" used to sit below the fold while the
+                    // senders needing nothing held the visible region.
+                    ForEach(report.buckets, id: \.self) { bucket($0) }
                 }
+                // Room for the fade below, so it never eats the last row.
+                .padding(.bottom, 12)
             }
-            .frame(maxHeight: 280)
+            .frame(maxHeight: 420)
+            // macOS overlay indicators stay hidden until you scroll, which is
+            // exactly the state that needs an indicator.
+            .scrollIndicators(.visible)
+            // And fade the boundary, so an overflowing report ends in a fade
+            // rather than a line of text sliced through its glyphs. A report
+            // shorter than the box has nothing down there to fade.
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .black, location: 0),
+                        .init(color: .black, location: 0.93),
+                        .init(color: .clear, location: 1),
+                    ],
+                    startPoint: .top, endPoint: .bottom
+                )
+            )
 
             HStack {
-                let succeeded = confirmed + requested
                 if alsoDelete {
                     // Only the senders that actually unsubscribed got deleted,
                     // so don't imply every listed sender's mail is gone.
@@ -259,34 +276,35 @@ struct UnsubscribeFlow: View {
         }
     }
 
-    /// Targets the run never reached — only possible after Cancel.
-    private var notAttempted: [AppModel.UnsubTarget] {
-        results.filter { $0.outcome == nil }
+    private var report: UnsubscribeReport {
+        UnsubscribeReport(outcomes: results.map(\.outcome))
     }
 
-    private var confirmed: [AppModel.UnsubTarget] {
-        results.filter { if case .confirmed = $0.outcome { return true } else { return false } }
+    private func targets(in bucket: UnsubscribeReportBucket) -> [AppModel.UnsubTarget] {
+        results.filter { UnsubscribeReport.bucket(for: $0.outcome) == bucket }
     }
-    private var requested: [AppModel.UnsubTarget] {
-        results.filter { if case .requested = $0.outcome { return true } else { return false } }
+
+    /// Confirmed plus requested — the senders the footer may call unsubscribed.
+    private var succeeded: [AppModel.UnsubTarget] {
+        targets(in: .confirmed) + targets(in: .requested)
     }
-    private var failed: [AppModel.UnsubTarget] {
-        results.filter {
-            switch $0.outcome {
-            case .failed, .needsManual: return true
-            default: return false
-            }
+
+    private func color(for bucket: UnsubscribeReportBucket) -> Color {
+        switch bucket {
+        case .failed: .red
+        case .notAttempted: .secondary
+        case .requested: .orange
+        case .confirmed: .green
         }
     }
 
     @ViewBuilder
-    private func bucket(
-        _ title: String, _ symbol: String, _ color: Color, _ items: [AppModel.UnsubTarget]
-    ) -> some View {
+    private func bucket(_ bucket: UnsubscribeReportBucket) -> some View {
+        let items = targets(in: bucket)
         if !items.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
-                Label("\(title) · \(items.count)", systemImage: symbol)
-                    .font(.caption.weight(.semibold)).foregroundStyle(color)
+                Label("\(bucket.title) · \(items.count)", systemImage: bucket.symbolName)
+                    .font(.caption.weight(.semibold)).foregroundStyle(color(for: bucket))
                 ForEach(items) { t in
                     HStack {
                         Text(t.name).font(.callout)
@@ -303,7 +321,7 @@ struct UnsubscribeFlow: View {
                         }
                     }
                 }
-                if title == "REQUESTED" {
+                if bucket == .requested {
                     Text("Sent. If mail continues, they'll show up under Reappeared.")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
