@@ -4227,4 +4227,90 @@ Harness.suite("Browser queue over MCP") {
     }
 }
 
+// MARK: - Removing an account takes the whole database with it
+
+Harness.suite("Account removal leaves no database file behind") {
+    // A SQLite database is a family of files, not one file: `-wal` holds writes
+    // that have not been checkpointed, and MessageStore leaves a `.pre-*.bak`
+    // copy behind before a migration. Removing an account used to delete only
+    // the head of that family, so decisions an agent recorded about the user
+    // could outlive the mailbox they were about.
+    let siblings = ["", "-wal", "-shm", ".pre-v9.bak"]
+
+    func filesMatching(_ path: String) -> [String] {
+        let url = URL(fileURLWithPath: path)
+        let parent = url.deletingLastPathComponent().path
+        let all = (try? FileManager.default.contentsOfDirectory(atPath: parent)) ?? []
+        return all.filter { $0.hasPrefix(url.lastPathComponent) }.sorted()
+    }
+
+    Harness.test("every file sharing the database's name is gone") {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("nevermore-remove-\(UUID().uuidString)")
+        let registry = AccountRegistry(directory: dir)
+        let account = "tester@example.com"
+        registry.add(account)
+        registry.setProviderID("gmail", for: account)
+
+        let path = registry.databasePath(for: account)
+        // Scoped so SQLite's own connection is closed; the siblings are then
+        // written by hand, because whether a real store happens to leave a
+        // `-wal` behind at any moment is exactly the timing this must not depend on.
+        do { _ = try? MessageStore(path: path) }
+        for suffix in siblings {
+            FileManager.default.createFile(atPath: path + suffix, contents: Data("x".utf8))
+        }
+        eq(filesMatching(path).count, siblings.count, "all siblings written")
+
+        registry.remove(account)
+
+        expect(filesMatching(path).isEmpty, "left behind: \(filesMatching(path))")
+        expect(registry.accounts().isEmpty, "account deregistered")
+        eq(registry.providerID(for: account), nil, "provider mapping cleared")
+
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    Harness.test("another account's database is not swept up with it") {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("nevermore-remove-\(UUID().uuidString)")
+        let registry = AccountRegistry(directory: dir)
+        let (going, staying) = ("tester@example.com", "tester@example.com.au")
+        registry.add(going)
+        registry.add(staying)
+        for account in [going, staying] {
+            for suffix in siblings {
+                FileManager.default.createFile(
+                    atPath: registry.databasePath(for: account) + suffix, contents: Data("x".utf8))
+            }
+        }
+
+        registry.remove(going)
+
+        expect(filesMatching(registry.databasePath(for: going)).isEmpty, "removed account gone")
+        eq(
+            filesMatching(registry.databasePath(for: staying)).count, siblings.count,
+            "the account with the longer name keeps all of its files")
+        eq(registry.accounts(), [staying], "and is still registered")
+
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    Harness.test("resetting the demo database takes its siblings too") {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("nevermore-demo-\(UUID().uuidString)")
+        let registry = AccountRegistry(directory: dir)
+        for suffix in siblings {
+            FileManager.default.createFile(
+                atPath: registry.demoDatabasePath + suffix, contents: Data("x".utf8))
+        }
+
+        registry.resetDemoDatabase()
+
+        expect(filesMatching(registry.demoDatabasePath).isEmpty, "demo rebuilds from nothing")
+
+        try? FileManager.default.removeItem(at: dir)
+    }
+}
+
 exit(Harness.finish())
