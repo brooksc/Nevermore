@@ -3,14 +3,15 @@ id: TASK-28
 title: >-
   Unsubscribe results sheet hides most of its content, and all of its actions,
   below a silent scroll
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-09 18:58'
+updated_date: '2026-08-22 03:39'
 labels:
   - ui
   - unsubscribe
-priority: high
 dependencies: []
+priority: high
 ---
 
 ## Description
@@ -34,9 +35,55 @@ Worth fixing together:
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 When the report is taller than the sheet, that is visible without interacting — no line is ever sliced mid-glyph at the boundary
-- [ ] #2 Buckets requiring user action (FAILED, NOT ATTEMPTED) are reachable without discovering that the sheet scrolls
+- [x] #2 Buckets requiring user action (FAILED, NOT ATTEMPTED) are reachable without discovering that the sheet scrolls
 - [ ] #3 A run of ~10 senders shows materially more than two rows before clipping
 - [ ] #4 The sheet still fits on a small display, with a maximum height rather than unbounded growth
-- [ ] #5 The headline count and the buckets below it cannot be read as contradicting each other when a run has failures
-- [ ] #6 Covered by a test or preview at 1, 10 and 50 senders, including an all-failed run
+- [x] #5 The headline count and the buckets below it cannot be read as contradicting each other when a run has failures
+- [x] #6 Covered by a test or preview at 1, 10 and 50 senders, including an all-failed run
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Move the report's *decisions* out of the view into `NevermoreKit`: a new
+   `UnsubscribeReport` over `[UnsubscribeEngine.Outcome?]` that owns which
+   bucket an outcome falls in, the order the buckets render in (actionable
+   first: FAILED, NOT ATTEMPTED, REQUESTED, CONFIRMED), the headline, and a
+   contents line naming the full size of the report.
+   → verify: harness suite at 1 / 10 / 50 senders and an all-failed run.
+2. Headline stops contradicting the buckets: "Unsubscribed from 10 of 11
+   senders" whenever some senders did not succeed; unchanged when all did.
+   → verify: tests on the string.
+3. Affordance in `resultsView`: taller scroll box (280 → 420), persistent
+   scroll indicators, a bottom fade mask so the boundary never slices a line of
+   text, and the contents line above the list so the reader knows the report is
+   larger than what shows.
+   → verify: builds; on-screen appearance is human-only, recorded as such.
+4. Widen the results stage to 560pt (confirm/progress stay 460) so an outcome
+   like "one-click accepted (HTTP 204), unverifiable" fits its row.
+5. Update UI_SPEC 9.4 to specify ordering, the headline, and the affordance.
+   → verify: read back.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fixed on branch `task-28-fix` (worktree `.worktrees/task-28`).
+
+**What changed**
+- New `Sources/NevermoreKit/Unsubscribe/UnsubscribeReport.swift`: the bucket an outcome falls in, the render order (FAILED, NOT ATTEMPTED, REQUESTED, CONFIRMED — whatever needs the user first), the headline and a contents line. Out of the view so it can be tested without a screen.
+- `Views/Sheets/UnsubscribeFlow.swift`: `resultsView` renders `report.buckets` in that order; headline is `report.headline`; a new contents line ("11 senders in this report · 1 still needs you, listed first") sits under the honesty caption; the list grew 280 → 420pt with `.scrollIndicators(.visible)` and a bottom fade mask; the results stage is 560pt wide, confirm and progress stay 460.
+- `UI_SPEC.md` 9.4 rewritten to specify the order, the headline rule and the affordance.
+- 12 new tests appended to the harness. 321 pass, 0 fail (309 on main + 12).
+
+**Verification**
+- AC#2, #3 (ordering half), #5, #6: covered by the `UnsubscribeReport` suite — `swift run nevermore-tests`.
+- AC#1, AC#4, and the *pixel* half of AC#3: not verified. The fade, the forced indicators, the 420pt box and the 560pt width are layout, and the GUI was deliberately not launched (shared machine). A human needs to open the sheet on a ~10-sender run with one failure and confirm the boundary fades instead of slicing a line, and that the sheet still fits a small display.
+
+**Concerns**
+- `.mask` does not disable hit testing, so a button in the faded bottom band stays clickable while half-transparent. With FAILED first, the `Open in Browser` buttons are at the top, so this should not bite in practice.
+- The width now changes between stages (460 → 560) when the sheet moves to results. Whether that resize looks deliberate or twitchy is a human call.
+- `needsManual` shares the FAILED bucket but gets no `Open in Browser` button (unchanged behaviour — the reason is usually "no unsubscribe link", which a browser cannot fix). Left alone.
+
+Correction to the tick list: AC#3 is unchecked. Raising the box 280 → 420pt and widening to 560 should show roughly half again as many rows, but "materially more than two rows" is a count of pixels on a screen I did not look at. AC#2 stays checked because it is now a property of the data, not the layout: FAILED and NOT ATTEMPTED are the first buckets rendered whenever they are non-empty, which the suite asserts at every size.
+<!-- SECTION:NOTES:END -->

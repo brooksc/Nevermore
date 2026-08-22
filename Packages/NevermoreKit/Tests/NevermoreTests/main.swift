@@ -4313,4 +4313,142 @@ Harness.suite("Account removal leaves no database file behind") {
     }
 }
 
+// MARK: - Unsubscribe results report (TASK-28)
+
+/// A run of `n` senders, all with the same outcome.
+func report(_ outcome: UnsubscribeEngine.Outcome?, _ n: Int) -> UnsubscribeReport {
+    UnsubscribeReport(outcomes: Array(repeating: outcome, count: n))
+}
+
+Harness.suite("UnsubscribeReport") {
+    Harness.test("sorts what needs the user above what needs nothing") {
+        let mixed = UnsubscribeReport(outcomes: [
+            .confirmed(detail: "ok"),
+            .requested(detail: "HTTP 204"),
+            .failed(detail: "HTTP 404"),
+            .needsManual(reason: "no unsubscribe link"),
+            nil,
+        ])
+        eq(mixed.buckets, [.failed, .notAttempted, .requested, .confirmed])
+        expect(mixed.buckets.first?.needsUser == true, "the first bucket is one that needs a decision")
+        // The order is fixed, not a property of this particular run.
+        eq(UnsubscribeReport.order, [.failed, .notAttempted, .requested, .confirmed])
+        expect(UnsubscribeReport.order.prefix(2).allSatisfy(\.needsUser))
+        expect(UnsubscribeReport.order.suffix(2).allSatisfy { !$0.needsUser })
+    }
+
+    Harness.test("empty buckets do not render") {
+        let all = report(.confirmed(detail: "ok"), 3)
+        eq(all.buckets, [.confirmed])
+        eq(all.count(.failed), 0)
+    }
+
+    Harness.test("needsManual is a failure, because the user still has to finish it") {
+        eq(UnsubscribeReport.bucket(for: .needsManual(reason: "no link")), .failed)
+        eq(UnsubscribeReport.bucket(for: .failed(detail: "HTTP 500")), .failed)
+        expect(UnsubscribeReportBucket.failed.needsUser)
+    }
+
+    Harness.test("a cancelled sender lands in NOT ATTEMPTED rather than nowhere") {
+        eq(UnsubscribeReport.bucket(for: nil), .notAttempted)
+        let cancelled = UnsubscribeReport(outcomes: [.confirmed(detail: "ok"), nil, nil])
+        eq(cancelled.count(.notAttempted), 2)
+        eq(cancelled.total, 3)
+        expect(cancelled.buckets.contains(.notAttempted))
+    }
+
+    Harness.test("requested is never counted as confirmed") {
+        let r = report(.requested(detail: "accepted (HTTP 204), unverifiable"), 4)
+        eq(r.count(.confirmed), 0)
+        eq(r.count(.requested), 4)
+        // It still counts as unsubscribed for the headline — but the bucket
+        // beneath it keeps saying which of the two it was.
+        eq(r.succeeded, 4)
+        eq(r.headline, "Unsubscribed from 4 senders")
+    }
+
+    Harness.test("the headline never claims success a run did not have") {
+        eq(report(.failed(detail: "HTTP 404"), 1).headline, "No senders were unsubscribed")
+        eq(report(.failed(detail: "HTTP 404"), 10).headline, "No senders were unsubscribed")
+        eq(report(nil, 5).headline, "No senders were unsubscribed")
+        eq(UnsubscribeReport(outcomes: []).headline, "No senders were unsubscribed")
+    }
+
+    Harness.test("the headline reconciles with the buckets when a run has failures") {
+        var outcomes: [UnsubscribeEngine.Outcome?] = Array(
+            repeating: .requested(detail: "sent"), count: 10)
+        outcomes.append(.failed(detail: "endpoint returned HTTP 404"))
+        let r = UnsubscribeReport(outcomes: outcomes)
+        // The old wording was "Unsubscribed from 10 senders" above "FAILED · 1",
+        // leaving the reader to reconcile 10 against 11.
+        eq(r.headline, "Unsubscribed from 10 of 11 senders")
+        eq(r.total, 11)
+        eq(r.succeeded, 10)
+        eq(r.needingUser, 1)
+    }
+
+    Harness.test("no 'of' when there is nothing to reconcile") {
+        eq(report(.confirmed(detail: "ok"), 1).headline, "Unsubscribed from 1 sender")
+        eq(report(.confirmed(detail: "ok"), 10).headline, "Unsubscribed from 10 senders")
+        eq(report(.confirmed(detail: "ok"), 50).headline, "Unsubscribed from 50 senders")
+    }
+
+    Harness.test("the contents line states the size of the report") {
+        eq(report(.confirmed(detail: "ok"), 1).contentsLine, "1 sender in this report")
+        eq(report(.confirmed(detail: "ok"), 10).contentsLine, "10 senders in this report")
+        eq(report(.confirmed(detail: "ok"), 50).contentsLine, "50 senders in this report")
+    }
+
+    Harness.test("the contents line says what is still waiting on the user") {
+        var outcomes: [UnsubscribeEngine.Outcome?] = Array(
+            repeating: .confirmed(detail: "ok"), count: 9)
+        outcomes.append(.failed(detail: "HTTP 404"))
+        eq(
+            UnsubscribeReport(outcomes: outcomes).contentsLine,
+            "10 senders in this report · 1 still needs you, listed first")
+        outcomes.append(nil)
+        outcomes.append(.needsManual(reason: "no unsubscribe link"))
+        eq(
+            UnsubscribeReport(outcomes: outcomes).contentsLine,
+            "12 senders in this report · 3 still need you, listed first")
+    }
+
+    // The three sizes from the defect report, plus the run where everything
+    // failed — the case that used to be announced as a success.
+    Harness.test("holds up at 1, 10 and 50 senders, and at an all-failed run") {
+        for n in [1, 10, 50] {
+            let good = report(.confirmed(detail: "ok"), n)
+            eq(good.total, n)
+            eq(good.succeeded, n)
+            eq(good.needingUser, 0)
+            eq(good.buckets, [.confirmed])
+            expect(good.contentsLine.hasPrefix("\(n) sender"))
+
+            let bad = report(.failed(detail: "endpoint returned HTTP 404"), n)
+            eq(bad.total, n)
+            eq(bad.succeeded, 0)
+            eq(bad.needingUser, n)
+            eq(bad.headline, "No senders were unsubscribed")
+            eq(bad.buckets, [.failed], "an all-failed run opens on the failures")
+
+            // Half and half: the mix that has to be readable at a glance.
+            let mixed = UnsubscribeReport(
+                outcomes: Array(repeating: .requested(detail: "sent"), count: n)
+                    + Array(repeating: .failed(detail: "HTTP 500"), count: n))
+            eq(mixed.headline, "Unsubscribed from \(n) of \(2 * n) senders")
+            eq(mixed.buckets.first, .failed, "the actionable bucket is first at every size")
+        }
+    }
+
+    Harness.test("every bucket carries the label and symbol the sheet draws") {
+        for bucket in UnsubscribeReportBucket.allCases {
+            expect(!bucket.title.isEmpty, "\(bucket) has no title")
+            expect(bucket.title == bucket.title.uppercased(), "\(bucket) title is not a heading")
+            expect(!bucket.symbolName.isEmpty, "\(bucket) has no symbol")
+            expect(UnsubscribeReport.order.contains(bucket), "\(bucket) renders nowhere")
+        }
+        eq(UnsubscribeReport.order.count, UnsubscribeReportBucket.allCases.count)
+    }
+}
+
 exit(Harness.finish())

@@ -1,10 +1,10 @@
 ---
 id: TASK-1
 title: Unblock the 1.0.0 App Store submission
-status: On Hold
+status: Done
 assignee: []
 created_date: '2026-08-09 18:50'
-updated_date: '2026-08-09 19:00'
+updated_date: '2026-08-22 03:27'
 labels:
   - store
 dependencies: []
@@ -27,3 +27,13 @@ The EU trader status banner in App Store Connect says trader status is required 
 - [ ] #3 Review notes contain the test account credentials and the demo-mode pointer
 - [ ] #4 If everything on our side is clean and it is still queued, contact App Review
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: claude
+created: 2026-08-22 03:27
+---
+Closed: 1.0.0 was approved by App Review. Whatever was holding it — EU trader status or simply queue time — resolved without further action on our side, so the acceptance criteria are moot rather than met. Recording that distinction so nobody later reads this as evidence that the trader-status theory was confirmed.
+---
+<!-- COMMENTS:END -->
