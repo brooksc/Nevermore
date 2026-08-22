@@ -26,7 +26,10 @@ private struct HealthResponse: Encodable {
 /// terminal state more than once. Resuming a continuation twice is a crash, not a warning, so the
 /// gate takes the continuation on the first resume and drops it. A plain `var didResume` can't do
 /// this job under strict concurrency — it would be a mutable capture in a `@Sendable` closure.
-private final class ContinuationGate<T, E: Error>: @unchecked Sendable {
+///
+/// Internal rather than private because `PinnedHTTPClient` needs exactly this for `NWConnection`,
+/// whose callbacks have the same double-resume hazard.
+final class ContinuationGate<T, E: Error>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<T, E>?
 

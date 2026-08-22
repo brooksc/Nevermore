@@ -9,16 +9,69 @@ import Foundation
 /// address it maps to be a public, global-unicast address; anything loopback,
 /// private, link-local, ULA, or otherwise special is refused, as is a host that
 /// won't resolve. The same check re-runs on each redirect hop.
+///
+/// Checking is not enough on its own. Deciding here and letting something else
+/// resolve the name again leaves a window for a hostile resolver to answer
+/// public for the check and private for the connection (DNS rebinding), so the
+/// address that passed the check has to be the address that gets dialled. That
+/// is what `pin(for:)` is for, and `PinnedProxy` is what dials it.
 public enum DestinationGuard {
     public static func isAllowed(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https"
         else { return false }
         guard let host = url.host, !host.isEmpty else { return false }
+        return pin(for: host) != nil
+    }
 
+    // MARK: - Pinning
+
+    /// One address, resolved once, already checked — the whole point being that
+    /// the caller connects to *this* rather than resolving the name a second
+    /// time and getting a different answer.
+    public struct PinnedAddress: Sendable, Equatable {
+        /// The name as it appeared in the URL. Kept so the caller can still send
+        /// it as `Host:`/SNI, which is what makes vhosts and TLS keep working.
+        public let host: String
+        /// Presentation form of the validated address, e.g. `93.184.216.34`.
+        public let literal: String
+        public let isIPv6: Bool
+
+        public init(host: String, literal: String, isIPv6: Bool) {
+            self.host = host
+            self.literal = literal
+            self.isIPv6 = isIPv6
+        }
+    }
+
+    /// Resolve `host` **once** and, if every answer is a public address, return
+    /// all of them in the order the resolver gave. Empty means refuse: no
+    /// answer, or an answer that includes anything loopback/private/link-local.
+    ///
+    /// Every address is checked, not just the one that ends up used. A name that
+    /// answers with a public address *and* a private one is a rebinding attempt
+    /// wearing a hat, and no legitimate unsubscribe endpoint needs it.
+    ///
+    /// All of them rather than just the first because a caller that dials a
+    /// single pinned address loses the failover a resolver's multiple answers
+    /// exist to provide — most CDN-backed endpoints publish several, and one
+    /// being out of rotation would otherwise read to the user as an unsubscribe
+    /// that simply doesn't work. Every address here has passed the same check,
+    /// so trying them in turn gives up nothing.
+    public static func pinnedAddresses(for host: String) -> [PinnedAddress] {
         let addresses = resolve(host)
         // A host that resolves to nothing is refused rather than sent blind.
-        guard !addresses.isEmpty else { return false }
-        return addresses.allSatisfy(\.isGlobalUnicast)
+        guard !addresses.isEmpty, addresses.allSatisfy(\.isGlobalUnicast) else { return [] }
+        return addresses.compactMap { address in
+            address.presentation.map {
+                PinnedAddress(host: host, literal: $0, isIPv6: address.isIPv6)
+            }
+        }
+    }
+
+    /// The first address `pinnedAddresses(for:)` would return, or nil if the
+    /// host is refused.
+    public static func pin(for host: String) -> PinnedAddress? {
+        pinnedAddresses(for: host).first
     }
 
     // MARK: - Resolution
@@ -65,6 +118,27 @@ public enum DestinationGuard {
 }
 
 extension DestinationGuard.IPAddress {
+    var isIPv6: Bool {
+        if case .v6 = self { return true }
+        return false
+    }
+
+    /// Presentation form, for handing to a connect call as a literal so no
+    /// second name lookup can happen.
+    var presentation: String? {
+        var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        let result: UnsafePointer<CChar>? = {
+            switch self {
+            case .v4(var addr):
+                return inet_ntop(AF_INET, &addr, &buffer, socklen_t(INET6_ADDRSTRLEN))
+            case .v6(var addr):
+                return inet_ntop(AF_INET6, &addr, &buffer, socklen_t(INET6_ADDRSTRLEN))
+            }
+        }()
+        guard result != nil else { return nil }
+        return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
     /// True only for ordinary public/global-unicast addresses. Every special
     /// range an SSRF would abuse — loopback, private, link-local, CGNAT, ULA,
     /// multicast, unspecified/reserved — returns false.
