@@ -4690,4 +4690,621 @@ Harness.suite("get_proposal_status reports followed or overrode") {
     }
 }
 
+// MARK: - DNS rebinding / pinned HTTP client (TASK-4)
+
+/// A plain HTTP server on loopback that answers a canned response per request
+/// and records what it was asked. Stands in for an unsubscribe endpoint.
+///
+/// Note this is a *test* listener. The app itself never binds one — the App
+/// Sandbox entitlements grant `network.client` only, which is exactly why the
+/// fix connects outbound rather than running a local proxy.
+final class StubHTTPServer: @unchecked Sendable {
+    private(set) var port: UInt16 = 0
+    private let listener: NWListener
+    private let respond: @Sendable (String) -> String
+    private let lock = NSLock()
+    private var seen: [String] = []
+
+    var requests: [String] { lock.withLock { seen } }
+    var requestLines: [String] { requests.map { $0.components(separatedBy: "\r\n").first ?? "" } }
+
+    /// Accepts the connection and then says nothing, ever. A hostile endpoint
+    /// costs nothing to run and this is the cheapest thing it can do to you.
+    private let staysSilent: Bool
+
+    init?(staysSilent: Bool = false, respond: @escaping @Sendable (String) -> String = { _ in "" }) {
+        self.respond = respond
+        self.staysSilent = staysSilent
+        let params = NWParameters.tcp
+        params.requiredInterfaceType = .loopback
+        guard let listener = try? NWListener(using: params, on: .any) else { return nil }
+        self.listener = listener
+        // Both handlers must be in place before start(), or the listener fails
+        // instead of binding.
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.handle(connection)
+        }
+        let ready = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { state in
+            switch state {
+            case .ready, .failed, .cancelled, .waiting: ready.signal()
+            default: break
+            }
+        }
+        listener.start(queue: .global())
+        guard ready.wait(timeout: .now() + 3) == .success,
+              case .ready = listener.state,
+              let bound = listener.port?.rawValue
+        else {
+            listener.cancel()
+            return nil
+        }
+        port = bound
+    }
+
+    private func handle(_ connection: NWConnection) {
+        connection.start(queue: .global())
+        read(connection, accumulated: Data())
+    }
+
+    private func read(_ connection: NWConnection, accumulated: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) {
+            [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            var buffer = accumulated
+            if let data { buffer.append(data) }
+            if let range = buffer.range(of: Data("\r\n\r\n".utf8)) {
+                let head = String(decoding: buffer[buffer.startIndex..<range.lowerBound], as: UTF8.self)
+                self.lock.withLock { self.seen.append(head) }
+                // Hold the connection open and answer nothing.
+                if self.staysSilent { return }
+                connection.send(
+                    content: Data(self.respond(head).utf8),
+                    completion: .contentProcessed { _ in connection.cancel() })
+                return
+            }
+            if error != nil || isComplete {
+                connection.cancel()
+                return
+            }
+            self.read(connection, accumulated: buffer)
+        }
+    }
+
+    func stop() { listener.cancel() }
+
+    static func ok(_ body: String) -> String {
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: \(body.utf8.count)\r\n"
+            + "Connection: close\r\n\r\n\(body)"
+    }
+
+    static func redirect(to location: String, status: Int = 302) -> String {
+        "HTTP/1.1 \(status) Found\r\nLocation: \(location)\r\nContent-Length: 0\r\n"
+            + "Connection: close\r\n\r\n"
+    }
+}
+
+/// Records every lookup and can change its answer between them — the whole
+/// point of the exercise.
+final class RecordingResolver: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls: [String] = []
+    private let answer: @Sendable (String, Int) -> [DestinationGuard.PinnedAddress]
+
+    /// `answer` receives the host and the 1-based number of times *that host*
+    /// has been looked up.
+    init(_ answer: @escaping @Sendable (String, Int) -> [DestinationGuard.PinnedAddress]) {
+        self.answer = answer
+    }
+
+    var hosts: [String] { lock.withLock { calls } }
+    var callCount: Int { lock.withLock { calls.count } }
+    func callCount(for host: String) -> Int { lock.withLock { calls.filter { $0 == host }.count } }
+
+    var resolver: PinnedHTTPClient.Resolver {
+        { [self] host in
+            let nth: Int = lock.withLock {
+                calls.append(host)
+                return calls.filter { $0 == host }.count
+            }
+            return answer(host, nth)
+        }
+    }
+}
+
+private func loopbackPin(_ host: String) -> DestinationGuard.PinnedAddress {
+    DestinationGuard.PinnedAddress(host: host, literal: "127.0.0.1", isIPv6: false)
+}
+
+/// TEST-NET-2. Routable nowhere, so a connection attempt cannot succeed — which
+/// is how "the client used the *other* answer" would show up as a failure.
+private func unreachablePin(_ host: String) -> DestinationGuard.PinnedAddress {
+    DestinationGuard.PinnedAddress(host: host, literal: "198.51.100.1", isIPv6: false)
+}
+
+private func send(
+    _ client: PinnedHTTPClient, _ method: String, _ urlString: String,
+    body: Data? = nil, timeout: TimeInterval = 8
+) -> Result<PinnedHTTPClient.Response, PinnedHTTPClient.Failure> {
+    runAsync {
+        await client.send(
+            method: method, url: URL(string: urlString)!, body: body, timeout: timeout)
+    }
+}
+
+private func status(
+    _ result: Result<PinnedHTTPClient.Response, PinnedHTTPClient.Failure>
+) -> Int? {
+    guard case .success(let response) = result else { return nil }
+    return response.statusCode
+}
+
+private func failure(
+    _ result: Result<PinnedHTTPClient.Response, PinnedHTTPClient.Failure>
+) -> PinnedHTTPClient.Failure? {
+    guard case .failure(let failure) = result else { return nil }
+    return failure
+}
+
+Harness.suite("DestinationGuard pinning") {
+    Harness.test("a public literal pins to itself") {
+        let pin = DestinationGuard.pin(for: "93.184.216.34")
+        eq(pin?.literal, "93.184.216.34")
+        eq(pin?.isIPv6, false)
+        eq(pin?.host, "93.184.216.34")
+    }
+
+    Harness.test("a public IPv6 literal pins, and is marked as v6") {
+        let pin = DestinationGuard.pin(for: "2606:2800:220:1:248:1893:25c8:1946")
+        expect(pin != nil, "public v6 literal pins")
+        eq(pin?.isIPv6, true)
+    }
+
+    // The pin is the address the connection uses, so anything isAllowed refuses
+    // must be unpinnable too — otherwise the two could drift apart and the one
+    // that matters would be the looser one.
+    Harness.test("refuses to pin anything the guard would block") {
+        for host in [
+            "127.0.0.1", "10.0.0.5", "192.168.1.1", "172.16.4.4", "169.254.169.254",
+            "0.0.0.0", "::1", "[::1]", "fe80::1", "fc00::1", "::ffff:127.0.0.1",
+        ] {
+            expect(DestinationGuard.pin(for: host) == nil, "pinned a blocked address: \(host)")
+        }
+    }
+
+    Harness.test("refuses to pin a name that does not resolve") {
+        expect(DestinationGuard.pin(for: "nevermore-nothing-here.invalid") == nil, ".invalid")
+        expect(DestinationGuard.pinnedAddresses(for: "nevermore-nothing-here.invalid").isEmpty)
+    }
+
+    Harness.test("pin is the first of the addresses, not a separate lookup") {
+        // If these two ever disagreed, the address that was checked and the
+        // address that gets dialled could differ — which is the entire bug.
+        let all = DestinationGuard.pinnedAddresses(for: "93.184.216.34")
+        eq(DestinationGuard.pin(for: "93.184.216.34"), all.first)
+    }
+}
+
+Harness.suite("PinnedHTTPClient wire format") {
+    func hop(_ urlString: String) -> PinnedHTTPClient.Hop? {
+        PinnedHTTPClient.Hop(URL(string: urlString)!)
+    }
+
+    Harness.test("Host omits the scheme's default port and keeps any other") {
+        eq(hop("http://acme.test/x")?.hostHeader, "acme.test")
+        eq(hop("https://acme.test/x")?.hostHeader, "acme.test")
+        eq(hop("http://acme.test:8080/x")?.hostHeader, "acme.test:8080")
+        // 443 is default for https but not for http, and vice versa.
+        eq(hop("http://acme.test:443/x")?.hostHeader, "acme.test:443")
+        eq(hop("https://acme.test:80/x")?.hostHeader, "acme.test:80")
+    }
+
+    Harness.test("the request target keeps the query and defaults to /") {
+        eq(hop("http://acme.test")?.pathAndQuery, "/")
+        eq(hop("http://acme.test/unsub?id=7&k=v")?.pathAndQuery, "/unsub?id=7&k=v")
+    }
+
+    Harness.test("only http and https are destinations at all") {
+        expect(hop("ftp://acme.test/x") == nil, "ftp")
+        expect(hop("file:///etc/passwd") == nil, "file")
+        expect(PinnedHTTPClient.Hop(URL(string: "mailto:a@b.com")!) == nil, "mailto")
+    }
+
+    Harness.test("a request carries one Host, a length, and closes the connection") {
+        let text = String(
+            decoding: PinnedHTTPClient.requestBytes(
+                hop: hop("http://acme.test/unsub?a=1")!,
+                method: "POST",
+                // A caller trying to set framing headers must not win.
+                headers: ["User-Agent": "nevermore", "Host": "evil.test", "Connection": "keep-alive"],
+                body: Data("List-Unsubscribe=One-Click".utf8)),
+            as: UTF8.self)
+        expect(text.hasPrefix("POST /unsub?a=1 HTTP/1.1\r\n"), "request line; got \(text.prefix(40))")
+        eq(text.components(separatedBy: "Host: ").count - 1, 1, "exactly one Host header")
+        expect(text.contains("Host: acme.test\r\n"), "the real host, not the caller's")
+        expect(text.contains("Content-Length: 26\r\n"), "length of the body")
+        expect(text.contains("Connection: close\r\n"), "one-shot")
+        expect(text.hasSuffix("\r\n\r\nList-Unsubscribe=One-Click"), "body follows the head")
+    }
+
+    Harness.test("a response head parses into status and lowercased headers") {
+        let response = PinnedHTTPClient.parseResponseHead(
+            Data("HTTP/1.1 302 Found\r\nLocation: https://a.test/x\r\nX-Odd-CASE: 1".utf8))
+        eq(response?.statusCode, 302)
+        eq(response?.headers["location"], "https://a.test/x")
+        eq(response?.headers["x-odd-case"], "1", "lookup does not depend on the sender's casing")
+    }
+
+    Harness.test("a first Location wins, so a second cannot override it") {
+        let response = PinnedHTTPClient.parseResponseHead(
+            Data("HTTP/1.1 302 Found\r\nLocation: https://a.test/\r\nLocation: http://10.0.0.1/".utf8))
+        eq(response?.headers["location"], "https://a.test/")
+    }
+
+    Harness.test("a malformed head is refused rather than guessed at") {
+        for head in ["", "not http at all", "HTTP/1.1\r\n", "HTTP/1.1 abc OK\r\n", "HTTP/1.1 999 X\r\n"] {
+            expect(PinnedHTTPClient.parseResponseHead(Data(head.utf8)) == nil, "accepted: \(head)")
+        }
+    }
+}
+
+Harness.suite("PinnedHTTPClient (DNS rebinding)") {
+    // AC #4, and the heart of the matter. The resolver answers with a reachable
+    // address the first time and an unreachable one every time after, which is
+    // the rebinding shape: check one address, connect to another.
+    //
+    // Two things are asserted and both are needed. That the request arrives at
+    // the *first* answer proves the validated address is the one dialled. That
+    // the host was looked up exactly once proves there was no second lookup for
+    // a hostile resolver to answer differently — the window is gone, not merely
+    // narrowed.
+    Harness.test("a resolver that changes its answer cannot move the connection") {
+        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("first-answer") })
+        else { return expect(false, "could not start stub origin") }
+        defer { origin.stop() }
+
+        let resolver = RecordingResolver { host, nth in
+            nth == 1 ? [loopbackPin(host)] : [unreachablePin(host)]
+        }
+        let result = send(
+            PinnedHTTPClient(resolve: resolver.resolver), "GET",
+            "http://rebind.invalid:\(origin.port)/unsub")
+
+        eq(status(result), 200, "reached the first, validated answer (\(String(describing: failure(result)))")
+        eq(resolver.callCount(for: "rebind.invalid"), 1, "exactly one lookup, so nothing to rebind")
+        eq(origin.requestLines.first, "GET /unsub HTTP/1.1")
+    }
+
+    // The same setup carries a second proof: `rebind.invalid` has no DNS record
+    // anywhere (RFC 6761 guarantees it), so a request that succeeds is one
+    // nothing but our own resolver could have routed. That is the pre-fix defect
+    // stated as an assertion — a second resolver existing at all.
+    Harness.test("nothing but the injected resolver ever looks the host up") {
+        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("pinned") })
+        else { return expect(false, "could not start stub origin") }
+        defer { origin.stop() }
+
+        // Independently confirm the name really is unresolvable, so this can't
+        // quietly pass because some resolver started answering for it.
+        expect(DestinationGuard.pin(for: "unresolvable.invalid") == nil, "name does not resolve")
+
+        let resolver = RecordingResolver { host, _ in [loopbackPin(host)] }
+        let result = send(
+            PinnedHTTPClient(resolve: resolver.resolver), "GET",
+            "http://unresolvable.invalid:\(origin.port)/x")
+        eq(status(result), 200, "delivered despite no DNS record anywhere")
+    }
+
+    // AC #2 on the wire rather than in a unit test: the origin has to see the
+    // name it serves, or every virtual host breaks.
+    Harness.test("the origin sees the real hostname in Host") {
+        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("ok") })
+        else { return expect(false, "could not start stub origin") }
+        defer { origin.stop() }
+
+        let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
+        _ = send(client, "GET", "http://vhost.invalid:\(origin.port)/path?a=1")
+
+        guard let seen = origin.requests.first else {
+            return expect(false, "origin received nothing")
+        }
+        expect(
+            seen.contains("Host: vhost.invalid:\(origin.port)"),
+            "Host carries the name and the non-default port; saw:\n\(seen)")
+        expect(seen.hasPrefix("GET /path?a=1 HTTP/1.1"), "request line; saw:\n\(seen)")
+    }
+
+    Harness.test("a refused host is never dialled") {
+        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
+        else { return expect(false, "could not start stub origin") }
+        defer { origin.stop() }
+
+        // Nil is what the real resolver returns for a private, local, or
+        // unresolvable answer.
+        let client = PinnedHTTPClient(resolve: { _ in [] })
+        let result = send(client, "GET", "http://blocked.invalid:\(origin.port)/")
+        eq(failure(result), .blocked(host: "blocked.invalid"))
+        expect(origin.requests.isEmpty, "the origin was never contacted")
+    }
+
+    // Pinning one address would otherwise throw away the failover a resolver's
+    // several answers exist to give. A CDN endpoint with a PoP out of rotation
+    // must not read to the user as an unsubscribe link that doesn't work.
+    Harness.test("a dead first address fails over to the next validated one") {
+        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("second-address") })
+        else { return expect(false, "could not start stub origin") }
+        defer { origin.stop() }
+
+        let client = PinnedHTTPClient(resolve: { host in
+            // Both were validated by the same single lookup; only the first is dead.
+            [unreachablePin(host), loopbackPin(host)]
+        })
+        // 8s across two addresses is a 4s slice each, so the dead one is given
+        // up on quickly rather than stranding the request.
+        let result = send(
+            client, "GET", "http://multi.invalid:\(origin.port)/unsub", timeout: 8)
+        eq(status(result), 200, "reached the live address (\(String(describing: failure(result))))")
+    }
+
+    // Found by measurement, not by reasoning: the timeout fired and reported
+    // itself accurately while `send` went on running for 30s, because
+    // Network.framework ignores Swift task cancellation and the sibling task sat
+    // in a continuation until the OS gave up. A budget nobody honours is worse
+    // than none, so this asserts the elapsed time, not the error message.
+    Harness.test("a timeout ends the request, not just the waiting for it") {
+        let client = PinnedHTTPClient(resolve: { host in
+            // TEST-NET-2: a connection here can never complete.
+            [DestinationGuard.PinnedAddress(host: host, literal: "198.51.100.1", isIPv6: false)]
+        })
+        let began = Date()
+        let result = send(client, "GET", "http://blackhole.invalid/x", timeout: 4)
+        let elapsed = Date().timeIntervalSince(began)
+        expect(failure(result) != nil, "the attempt failed")
+        expect(elapsed < 12, "returned in \(String(format: "%.1f", elapsed))s, budget was 4s")
+    }
+
+    // A host that accepts the connection and then answers nothing is the
+    // cheapest thing a hostile endpoint can do, and the deadline has to cover
+    // the response read — not just the connect — or an unsubscribe hangs on
+    // whatever a stranger put in a header.
+    Harness.test("a silent endpoint does not hang the request forever") {
+        guard let origin = StubHTTPServer(staysSilent: true)
+        else { return expect(false, "could not start stub origin") }
+        defer { origin.stop() }
+
+        let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
+        let began = Date()
+        let result = send(client, "GET", "http://silent.invalid:\(origin.port)/unsub", timeout: 4)
+        let elapsed = Date().timeIntervalSince(began)
+        expect(failure(result) != nil, "did not invent a response")
+        expect(elapsed < 12, "gave up in \(String(format: "%.1f", elapsed))s, budget was 4s")
+        expect(!origin.requests.isEmpty, "the request was actually sent and read")
+    }
+
+    Harness.test("failover only ever tries addresses that passed the check") {
+        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
+        else { return expect(false, "could not start stub origin") }
+        defer { origin.stop() }
+
+        // An empty answer is the guard's refusal, and there is nothing to fall
+        // back to — a refused host must not become a reachable one.
+        let client = PinnedHTTPClient(resolve: { _ in [] })
+        let result = send(client, "GET", "http://refused.invalid:\(origin.port)/")
+        eq(failure(result), .blocked(host: "refused.invalid"))
+        expect(origin.requests.isEmpty, "nothing was dialled")
+    }
+
+    Harness.test("a non-http scheme is refused before any lookup") {
+        let resolver = RecordingResolver { host, _ in [loopbackPin(host)] }
+        let client = PinnedHTTPClient(resolve: resolver.resolver)
+        let result = send(client, "GET", "ftp://acme.invalid/x")
+        expect(failure(result) != nil, "refused")
+        eq(resolver.callCount, 0, "never even resolved")
+    }
+
+    // AC #3. Each hop is resolved, checked and pinned on its own account.
+    Harness.test("a redirect to another host is pinned again, not inherited") {
+        guard let second = StubHTTPServer(respond: { _ in StubHTTPServer.ok("second-hop") })
+        else { return expect(false, "could not start second origin") }
+        defer { second.stop() }
+        let secondPort = second.port
+        guard let first = StubHTTPServer(respond: { _ in
+            StubHTTPServer.redirect(to: "http://hop-two.invalid:\(secondPort)/done")
+        }) else { return expect(false, "could not start first origin") }
+        defer { first.stop() }
+
+        let resolver = RecordingResolver { host, _ in [loopbackPin(host)] }
+        let result = send(
+            PinnedHTTPClient(resolve: resolver.resolver), "GET",
+            "http://hop-one.invalid:\(first.port)/start")
+
+        eq(status(result), 200, "followed the redirect")
+        expect(resolver.hosts.contains("hop-one.invalid"), "hop one was pinned")
+        expect(resolver.hosts.contains("hop-two.invalid"), "hop two got its own pin")
+        eq(second.requestLines.first, "GET /done HTTP/1.1")
+    }
+
+    // The hop-two guard has to survive, and has to stay distinguishable from a
+    // sender who simply answered 302 — the engine reports them differently.
+    Harness.test("a redirect into a refused host surfaces the 3xx unfollowed") {
+        guard let second = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
+        else { return expect(false, "could not start second origin") }
+        defer { second.stop() }
+        let secondPort = second.port
+        guard let first = StubHTTPServer(respond: { _ in
+            StubHTTPServer.redirect(to: "http://internal.invalid:\(secondPort)/admin")
+        }) else { return expect(false, "could not start first origin") }
+        defer { first.stop() }
+
+        let client = PinnedHTTPClient(resolve: { host in
+            host == "hop-one.invalid" ? [loopbackPin(host)] : []
+        })
+        let result = send(client, "GET", "http://hop-one.invalid:\(first.port)/start")
+
+        eq(status(result), 302, "the 3xx comes back unfollowed, for the engine to report")
+        expect(second.requests.isEmpty, "the internal host was never contacted")
+    }
+
+    Harness.test("a relative Location is resolved against the hop it came from") {
+        let box = ResultBox<UInt16>()
+        guard let origin = StubHTTPServer(respond: { head in
+            head.hasPrefix("GET /start")
+                ? StubHTTPServer.redirect(to: "/moved") : StubHTTPServer.ok("relative")
+        }) else { return expect(false, "could not start stub origin") }
+        defer { origin.stop() }
+        box.value = origin.port
+
+        let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
+        let result = send(client, "GET", "http://relative.invalid:\(origin.port)/start")
+        eq(status(result), 200)
+        eq(origin.requestLines.last, "GET /moved HTTP/1.1")
+    }
+
+    Harness.test("a redirect loop ends rather than running forever") {
+        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.redirect(to: "/again") })
+        else { return expect(false, "could not start stub origin") }
+        defer { origin.stop() }
+
+        let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
+        let result = send(client, "GET", "http://loop.invalid:\(origin.port)/start")
+        eq(failure(result), .tooManyRedirects)
+        expect(
+            origin.requests.count <= PinnedHTTPClient.maxRedirects + 1,
+            "bounded at \(PinnedHTTPClient.maxRedirects) hops; made \(origin.requests.count)")
+    }
+
+    // RFC 9110: 301/302/303 turn into GET, 307/308 keep the method. One-click is
+    // a POST, so getting this wrong either drops the body or replays it.
+    Harness.test("a 302 turns a one-click POST into a GET, and 307 does not") {
+        for (code, expected) in [(302, "GET /next HTTP/1.1"), (307, "POST /next HTTP/1.1")] {
+            guard let origin = StubHTTPServer(respond: { head in
+                head.hasPrefix("POST /start")
+                    ? StubHTTPServer.redirect(to: "/next", status: code) : StubHTTPServer.ok("done")
+            }) else { return expect(false, "could not start stub origin") }
+            defer { origin.stop() }
+
+            let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
+            let result = send(
+                client, "POST", "http://method.invalid:\(origin.port)/start",
+                body: Data("List-Unsubscribe=One-Click".utf8))
+            eq(status(result), 200, "HTTP \(code) chain completed")
+            eq(origin.requestLines.last, expected, "after HTTP \(code)")
+        }
+    }
+}
+
+// The engine's own vocabulary, driven through an injected client so the
+// outcomes a user actually sees are the thing under test.
+Harness.suite("UnsubscribeEngine over a pinned client") {
+    @Sendable func engine(_ resolve: @escaping PinnedHTTPClient.Resolver) -> UnsubscribeEngine {
+        UnsubscribeEngine(
+            sendMail: { _, _, _, _ in },
+            client: PinnedHTTPClient(resolve: resolve))
+    }
+
+    Harness.test("a refused destination reads as blocked, not as a dead link") {
+        guard let target = ListUnsubscribe(header: "<http://blocked.invalid/unsub>") else {
+            return expect(false, "could not parse header")
+        }
+        let outcome = runAsync { await engine({ _ in [] }).run(target) }
+        guard case .failed(let detail) = outcome else {
+            return expect(false, "expected failure, got \(outcome)")
+        }
+        expect(detail.contains("private or local address"), "says why; got: \(detail)")
+    }
+
+    Harness.test("a redirect into a private address is reported as blocked") {
+        guard let second = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
+        else { return expect(false, "could not start second origin") }
+        defer { second.stop() }
+        let secondPort = second.port
+        guard let first = StubHTTPServer(respond: { _ in
+            StubHTTPServer.redirect(to: "http://internal.invalid:\(secondPort)/admin")
+        }) else { return expect(false, "could not start first origin") }
+        defer { first.stop() }
+
+        guard let target = ListUnsubscribe(header: "<http://sender.invalid:\(first.port)/unsub>")
+        else { return expect(false, "could not parse header") }
+        let outcome = runAsync {
+            await engine({ host in host == "sender.invalid" ? [loopbackPin(host)] : [] }).run(target)
+        }
+        guard case .failed(let detail) = outcome else {
+            return expect(false, "expected failure, got \(outcome)")
+        }
+        expect(detail.contains("redirected to a private or local address"), "got: \(detail)")
+        expect(second.requests.isEmpty, "the internal host was never contacted")
+    }
+
+    // 0.1.0 shipped exactly this bug — "A blocked SSRF redirect was recorded as
+    // a successful unsubscribe" — because the unfollowed 3xx fell under
+    // `code < 400`. The sender was then moved out of the working list as though
+    // it had worked. Nothing in the suite guarded it before this: `main` has no
+    // redirect test of any kind. `isSuccess` is the exact property that
+    // regressed, so it is what gets asserted, across every redirect status.
+    Harness.test("a blocked redirect is never recorded as a success") {
+        for code in [301, 302, 303, 307, 308] {
+            guard let internalHost = StubHTTPServer(respond: { _ in StubHTTPServer.ok("owned") })
+            else { return expect(false, "could not start internal origin") }
+            defer { internalHost.stop() }
+            let internalPort = internalHost.port
+            guard let sender = StubHTTPServer(respond: { _ in
+                StubHTTPServer.redirect(to: "http://internal.invalid:\(internalPort)/admin", status: code)
+            }) else { return expect(false, "could not start sender origin") }
+            defer { sender.stop() }
+
+            guard let target = ListUnsubscribe(header: "<http://sender.invalid:\(sender.port)/unsub>")
+            else { return expect(false, "could not parse header") }
+            let outcome = runAsync {
+                await engine({ host in host == "sender.invalid" ? [loopbackPin(host)] : [] })
+                    .run(target)
+            }
+            expect(!outcome.isSuccess, "HTTP \(code) into a private host read as success: \(outcome)")
+            expect(internalHost.requests.isEmpty, "HTTP \(code): the internal host was contacted")
+        }
+    }
+
+    // An HTTP status can never prove an unsubscribe took effect, so a 200 is
+    // still only `requested`. This is load-bearing for the whole UI.
+    Harness.test("a 200 is still only requested, never confirmed") {
+        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("bye") })
+        else { return expect(false, "could not start stub origin") }
+        defer { origin.stop() }
+
+        guard let target = ListUnsubscribe(
+            header: "<http://sender.invalid:\(origin.port)/unsub>",
+            postHeader: "List-Unsubscribe=One-Click")
+        else { return expect(false, "could not parse header") }
+        expect(target.supportsOneClick, "this is the one-click path")
+
+        let outcome = runAsync { await engine({ host in [loopbackPin(host)] }).run(target) }
+        guard case .requested(let detail) = outcome else {
+            return expect(false, "expected requested, got \(outcome)")
+        }
+        expect(detail.contains("unverifiable"), "the outcome says so; got: \(detail)")
+        expect(origin.requestLines.first?.hasPrefix("POST ") ?? false, "sent as a POST")
+        expect(
+            origin.requests.first?.contains("Content-Length: 26") ?? false,
+            "carried the one-click body")
+    }
+
+    Harness.test("a sender that answers 500 falls back to its mailto target") {
+        guard let origin = StubHTTPServer(respond: { _ in
+            "HTTP/1.1 500 Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }) else { return expect(false, "could not start stub origin") }
+        defer { origin.stop() }
+
+        guard let target = ListUnsubscribe(
+            header: "<http://sender.invalid:\(origin.port)/unsub>, <mailto:off@sender.invalid>")
+        else { return expect(false, "could not parse header") }
+
+        let mailed = ResultBox<String>()
+        let engine = UnsubscribeEngine(
+            sendMail: { to, _, _, _ in mailed.value = to },
+            client: PinnedHTTPClient(resolve: { host in [loopbackPin(host)] }))
+        let outcome = runAsync { await engine.run(target) }
+        expect(outcome.isSuccess, "the mailto fallback carried it; got \(outcome)")
+        eq(mailed.value, "off@sender.invalid", "the fallback actually sent")
+    }
+}
+
 exit(Harness.finish())

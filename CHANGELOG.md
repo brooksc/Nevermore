@@ -43,6 +43,19 @@ All notable changes to Nevermore are recorded here. Format follows
 - The Mac App Store build does not include any of this. The sandbox there
   permits outgoing connections only, so the local server cannot run.
 
+### Fixed
+
+- **An unsubscribe link can no longer be aimed at your own network.** Nevermore
+  already refused to send to a private or local address, but it checked the
+  address and then let the system look the name up a second time to open the
+  connection — so a sender who controls their own DNS could answer with a public
+  address for the check and your router for the connection. The address that
+  passes the check is now the address the connection goes to, on every redirect
+  hop as well. Certificate checking is untouched: HTTPS connections are still
+  verified against the real hostname, and a wrong, expired or self-signed
+  certificate is still refused.
+
+
 ## [1.0.0] — 2026-08-01
 
 First Mac App Store release, and the version number catching up to what the app

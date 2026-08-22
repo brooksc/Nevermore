@@ -32,22 +32,22 @@ public struct UnsubscribeEngine: Sendable {
         _ to: String, _ subject: String, _ body: String, _ from: String?
     ) async throws -> Void
 
-    private let session: URLSession
+    /// Not `URLSession`: it resolves hostnames itself, which is the whole defect
+    /// (see `PinnedHTTPClient`). Injectable so tests can pin at a local server.
+    private let client: PinnedHTTPClient
     private let sendMail: MailSender
 
-    public init(sendMail: @escaping MailSender, session: URLSession? = nil) {
+    public init(sendMail: @escaping MailSender, client: PinnedHTTPClient = PinnedHTTPClient()) {
         self.sendMail = sendMail
-        self.session = session ?? Self.guardedSession
+        self.client = client
     }
 
-    /// A session whose redirects are re-validated by `DestinationGuard`, so a
-    /// public URL can't 30x-bounce into an internal host. Ephemeral: no cookies
-    /// or cache persisted from these one-off unsubscribe requests.
-    private static let guardedSession: URLSession = {
-        let config = URLSessionConfiguration.ephemeral
-        config.httpCookieStorage = nil
-        return URLSession(configuration: config, delegate: RedirectGuard(), delegateQueue: nil)
-    }()
+    /// The one message for every way a destination can be refused — private,
+    /// loopback, link-local, unresolvable, or not http(s). They are one thing to
+    /// the user, and spelling out which would tell a hostile sender which of
+    /// their probes landed.
+    private static let blockedDetail =
+        "unsubscribe URL resolves to a private or local address; blocked"
 
     /// Unsubscribe from one message's target.
     /// `fromAddress` is the send-as alias for mailto:, when the mail was
@@ -91,10 +91,11 @@ public struct UnsubscribeEngine: Sendable {
 
     // MARK: - HTTP
 
-    /// A 3xx surviving to the final response means `RedirectGuard` refused to
-    /// follow it — the only way a redirect reaches us unfollowed. Without this
-    /// it fell under `code < 400` and an SSRF attempt was recorded as a
-    /// successful unsubscribe, moving the sender out of the working list.
+    /// A 3xx surviving to the final response means `PinnedHTTPClient` refused to
+    /// follow it — it follows every redirect it is willing to, so the only way a
+    /// 3xx reaches us is that the next hop failed the guard. Without this it
+    /// fell under `code < 400` and an SSRF attempt was recorded as a successful
+    /// unsubscribe, moving the sender out of the working list.
     private static func blockedRedirect(_ code: Int) -> Outcome? {
         guard (300..<400).contains(code) else { return nil }
         return .failed(
@@ -102,33 +103,52 @@ public struct UnsubscribeEngine: Sendable {
     }
 
     private func oneClickPost(_ url: URL) async -> Outcome {
-        guard DestinationGuard.isAllowed(url) else {
-            Log.unsubscribe.problem("blocked one-click POST to non-public host: \(url.host ?? "?")")
-            return .failed(detail: "unsubscribe URL resolves to a private or local address; blocked")
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue(
-            "application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue(AppVersion.userAgent, forHTTPHeaderField: "User-Agent")
-        request.httpBody = Data("List-Unsubscribe=One-Click".utf8)
-        request.timeoutInterval = 30
+        // The guard runs inside the client, on the single lookup whose answer is
+        // also the address dialled. Checking here as well would be a second
+        // resolution — which is the bug this fix exists to remove.
+        let result = await client.send(
+            method: "POST",
+            url: url,
+            headers: [
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": AppVersion.userAgent,
+            ],
+            body: Data("List-Unsubscribe=One-Click".utf8))
 
-        do {
-            let (_, response) = try await session.data(for: request)
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        switch result {
+        case .success(let response):
             // A 2xx on a one-click POST means the request was *accepted*, not
             // that the unsubscribe took effect — we don't read the body, and
             // endpoints routinely 200 without acting. "Confirmed" is reserved
             // for a human verifying the sender's page (the browser flow). The
             // real safety net is reappearance detection, which fires regardless.
-            if let blocked = Self.blockedRedirect(code) { return blocked }
-            if code < 400 {
-                return .requested(detail: "one-click accepted (HTTP \(code)), unverifiable")
+            if let blocked = Self.blockedRedirect(response.statusCode) { return blocked }
+            if response.statusCode < 400 {
+                return .requested(
+                    detail: "one-click accepted (HTTP \(response.statusCode)), unverifiable")
             }
-            return .failed(detail: "endpoint returned HTTP \(code)")
-        } catch {
-            return .failed(detail: error.localizedDescription)
+            return .failed(detail: "endpoint returned HTTP \(response.statusCode)")
+        case .failure(let failure):
+            return Self.outcome(for: failure, url: url, verb: "one-click POST")
+        }
+    }
+
+    /// Map a transport-level failure onto the engine's vocabulary. A refused
+    /// destination and a broken connection are different things and must not
+    /// read the same, since only one of them means someone tried something.
+    private static func outcome(
+        for failure: PinnedHTTPClient.Failure, url: URL, verb: String
+    ) -> Outcome {
+        switch failure {
+        case .blocked(let host):
+            Log.unsubscribe.problem("blocked \(verb) to non-public host: \(host)")
+            return .failed(detail: blockedDetail)
+        case .tooManyRedirects:
+            return .failed(detail: "too many redirects")
+        case .malformedResponse:
+            return .failed(detail: "unreadable response from \(url.host ?? "the endpoint")")
+        case .transport(let message):
+            return .failed(detail: message)
         }
     }
 
@@ -152,42 +172,21 @@ public struct UnsubscribeEngine: Sendable {
     }
 
     private func get(_ url: URL) async -> Outcome {
-        guard DestinationGuard.isAllowed(url) else {
-            Log.unsubscribe.problem("blocked GET to non-public host: \(url.host ?? "?")")
-            return .failed(detail: "unsubscribe URL resolves to a private or local address; blocked")
-        }
-        var request = URLRequest(url: url)
-        request.setValue(AppVersion.userAgent, forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = 30
-        do {
-            let (_, response) = try await session.data(for: request)
-            let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            if let blocked = Self.blockedRedirect(code) { return blocked }
-            if code < 400 {
+        let result = await client.send(
+            method: "GET", url: url, headers: ["User-Agent": AppVersion.userAgent])
+
+        switch result {
+        case .success(let response):
+            if let blocked = Self.blockedRedirect(response.statusCode) { return blocked }
+            if response.statusCode < 400 {
                 // A GET only proves the page loaded, never that it unsubscribed —
                 // hence "requested", not "confirmed".
-                return .requested(detail: "page loaded (HTTP \(code)), unverifiable")
+                return .requested(
+                    detail: "page loaded (HTTP \(response.statusCode)), unverifiable")
             }
-            return .failed(detail: "page returned HTTP \(code)")
-        } catch {
-            return .failed(detail: error.localizedDescription)
+            return .failed(detail: "page returned HTTP \(response.statusCode)")
+        case .failure(let failure):
+            return Self.outcome(for: failure, url: url, verb: "GET")
         }
-    }
-}
-
-/// Re-checks every HTTP redirect target against `DestinationGuard`, so a public
-/// unsubscribe URL cannot 30x-redirect the request into a loopback/LAN host.
-/// Returning nil stops the redirect and surfaces the 3xx as the final response.
-private final class RedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    func urlSession(
-        _ session: URLSession, task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest
-    ) async -> URLRequest? {
-        guard let url = request.url, DestinationGuard.isAllowed(url) else {
-            Log.unsubscribe.problem(
-                "blocked unsubscribe redirect to non-public host: \(request.url?.host ?? "?")")
-            return nil
-        }
-        return request
     }
 }

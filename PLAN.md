@@ -319,7 +319,7 @@ Carried forward from the code review so they don't get faithfully reproduced:
 ## 9a. Build status
 
 **All milestones through the SwiftUI app are done** (updated 26 July 2026).
-`Packages/NevermoreKit` builds under Swift 6 strict concurrency; **336 tests
+`Packages/NevermoreKit` builds under Swift 6 strict concurrency; **367 tests
 pass**. The app is used daily against a live ~132,000-message mailbox.
 
 Measured on that mailbox:
@@ -371,6 +371,32 @@ build it. `swift build` fails without `DEVELOPER_DIR` pointing at Xcode.
 - ~~Alias detection source~~ — `Delivered-To` was kept, falling back to `To`.
   Filter labels were not used; they only exist for users who happen to have set
   them up.
+- ~~DNS rebinding beats `DestinationGuard`~~ — the guard now resolves once and
+  the addresses it validated are the only ones dialled. Unsubscribe requests no
+  longer go through `URLSession` at all; `PinnedHTTPClient` makes the connection
+  itself with `NWConnection`, against a literal IP endpoint, with the real
+  hostname set as SNI and in `Host:`. Trust evaluation is left at the default —
+  verified against badssl.com that a valid chain with the wrong hostname, an
+  expired certificate and a self-signed one are all still rejected.
+
+  Two earlier attempts are recorded because both look right and neither is.
+  *Rewriting the URL to the validated IP and setting `Host:`* loses SNI
+  completely — CFNetwork honours the header but sends no server name for an IP
+  literal, so CDN-fronted endpoints get the wrong certificate and the only way
+  to ship it is to weaken trust evaluation. *Routing `URLSession` through a
+  loopback `CONNECT` proxy* works and keeps TLS end-to-end, but a listener needs
+  `com.apple.security.network.server`, which `Nevermore.entitlements`
+  deliberately does not grant; it would have failed to bind in the App Store
+  build and broken unsubscribing there entirely. Outbound-only was the
+  constraint that decided the design.
+
+  Two things the hand-rolled client had to get right that `URLSession` did for
+  free, both found by measuring rather than reasoning: a host's *other*
+  addresses are still tried when the first is dead (pinning one address would
+  have turned a CDN PoP out of rotation into "unsubscribe doesn't work"), and a
+  timeout cancels the connection rather than merely reporting itself —
+  Network.framework ignores Swift task cancellation, so a 20s budget was
+  otherwise taking 30s.
 
 **Still open:**
 
@@ -388,9 +414,6 @@ build it. `swift build` fails without `DEVELOPER_DIR` pointing at Xcode.
   subset carrying the header". Closing the gap means either reading bodies
   (which the app's whole premise forbids) or a sender-wide `SEARCH FROM` delete
   that removes mail the app never displayed. Deliberately not done.
-- **DNS rebinding beats `DestinationGuard`.** It resolves the host, then
-  URLSession resolves independently, so a hostile resolver can answer public
-  then private. A real fix pins the validated IP and sets the `Host` header.
 - **Undo-trash always restores to INBOX.** IMAP has no "put it back where it
   was", so a message that was archived returns to the inbox.
 - **Concurrent IMAP connections.** Gmail throttles (commonly cited as ~15,
