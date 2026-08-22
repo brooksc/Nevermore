@@ -21,7 +21,10 @@ struct OnboardingSheet: View {
     enum Phase: Equatable {
         case entry
         case validating
-        case failed(String)
+        /// `authRelated` separates "the server rejected this credential" from
+        /// "the network fell over": only the first is worth answering with
+        /// app-password guidance.
+        case failed(String, authRelated: Bool)
     }
 
     /// The provider auto-detected from the typed domain, if any.
@@ -29,16 +32,29 @@ struct OnboardingSheet: View {
         email.contains("@") ? MailProvider.detect(forEmail: email) : nil
     }
 
-    /// The provider we'll actually connect with: detected domain wins, else the
-    /// manually-picked one.
+    /// The provider we'll actually connect with: for a re-auth, the one already
+    /// stored for that account (a custom domain's provider was picked when the
+    /// account was added, and nothing about the address reveals it a second
+    /// time); otherwise the detected domain, else the manually-picked one.
     private var provider: MailProvider {
-        detectedProvider ?? MailProvider.byID(manualProviderID) ?? .gmail
+        if let account = reauthAccount {
+            return MailProvider.resolved(
+                forEmail: account, storedID: model.storedProviderID(for: account))
+        }
+        return detectedProvider ?? MailProvider.byID(manualProviderID) ?? .gmail
     }
 
-    /// Whether the user must pick a provider (an email with an unrecognized domain).
+    /// Whether the user must pick a provider (an email with an unrecognized
+    /// domain). Never on a re-auth: that account's provider is already stored,
+    /// and the picker would be ignored.
     private var needsManualProvider: Bool {
-        email.contains("@") && detectedProvider == nil
+        reauthAccount == nil && email.contains("@") && detectedProvider == nil
     }
+
+    /// App-password guidance for the provider we'd connect with. All the wording
+    /// and every URL come from the kit, so they're testable and so the help page
+    /// itself can be corrected on the site without shipping a build.
+    private var guide: AppPasswordGuide { AppPasswordGuide.forProvider(provider) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -71,18 +87,33 @@ struct OnboardingSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                step(1, "Turn on two-factor authentication for your \(provider.displayName) account.")
-                step(2) {
-                    if let url = provider.appPasswordURL {
+                // Only some providers gate app passwords behind 2FA. Telling a
+                // Fastmail user to turn on two-factor first is a step they don't
+                // need and a reason to give up before starting.
+                if guide.requiresTwoFactor {
+                    step(1, "Turn on two-factor authentication for your \(provider.displayName) account — it won't issue an app password until you do.")
+                }
+                let createStep = guide.requiresTwoFactor ? 2 : 1
+                step(createStep) {
+                    if let url = guide.createURL {
                         HStack(spacing: 4) {
-                            Text("Create an app password at")
+                            // The provider's own noun for it: someone searching
+                            // Apple's settings for "app password" finds nothing.
+                            Text("Create an \(guide.credentialName.lowercased()) at")
                             Link(url.host ?? url.absoluteString, destination: url)
                         }
                     } else {
-                        Text("Create an app-specific password in your \(provider.displayName) security settings.")
+                        Text("Create an app password in your \(provider.displayName) security settings.")
                     }
                 }
-                step(3, "Enter it below. Spaces are fine — we'll handle them.")
+                step(createStep + 1, "Enter it below. Spaces are fine — we'll handle them.")
+
+                Link(destination: guide.helpPageURL) {
+                    Label(
+                        "Step-by-step guide for \(provider.displayName)",
+                        systemImage: "questionmark.circle")
+                }
+                .padding(.leading, 27)  // aligns with the step text, not the numbers
             }
             .font(.callout)
 
@@ -149,10 +180,27 @@ struct OnboardingSheet: View {
                 }
                 .font(.callout)
             }
-            if case .failed(let message) = phase {
-                Label(message, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red).font(.callout)
-                    .fixedSize(horizontal: false, vertical: true)
+            if case .failed(let message, let authRelated) = phase {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                    // A rejected credential is far more often the account
+                    // password than a mistyped app password, and the server
+                    // reports both identically — so name the likely cause
+                    // instead of leaving "authentication failed" to be guessed at.
+                    if authRelated {
+                        Text(guide.authFailureExplanation)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Link(destination: guide.helpPageURL) {
+                            Label(
+                                "How to create one for \(provider.displayName)",
+                                systemImage: "questionmark.circle")
+                        }
+                    }
+                }
+                .font(.callout)
             }
 
             HStack {
@@ -184,21 +232,16 @@ struct OnboardingSheet: View {
 
     private func submit() async {
         phase = .validating
-        // Re-auth keeps the account's existing provider; new accounts use the
-        // detected/picked one.
-        let chosen: MailProvider = {
-            if let account = reauthAccount {
-                return MailProvider.resolved(
-                    forEmail: account, storedID: model.storedProviderID(for: account))
-            }
-            return provider
-        }()
         do {
-            try await model.addAccount(email: email, appPassword: password, provider: chosen)
+            // `provider` already resolves re-auth to the account's stored one.
+            try await model.addAccount(email: email, appPassword: password, provider: provider)
             onDone()
         } catch {
             let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            phase = .failed(message)
+            let authRelated: Bool
+            if case MailBackendError.authenticationFailed = error { authRelated = true }
+            else { authRelated = false }
+            phase = .failed(message, authRelated: authRelated)
         }
     }
 

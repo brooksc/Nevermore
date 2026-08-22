@@ -5414,4 +5414,135 @@ Harness.suite("IMAPBackend.matched") {
     }
 }
 
+// MARK: - App-password guidance
+
+// The app password is the one thing the user must go and get before Nevermore
+// works at all, and every provider hides it somewhere different. What is pinned
+// here is that the *right* guidance reaches the screen: the provider detected
+// from the address, the provider's own noun for the credential, and a link
+// rather than an invented UI path where the flow could not be checked.
+Harness.suite("AppPasswordGuide") {
+    Harness.test("every detectable provider has its own guidance, not the fallback") {
+        for provider in MailProvider.known {
+            let guide = AppPasswordGuide.forProvider(provider)
+            eq(guide.providerID, provider.id, "\(provider.id) gets its own guide")
+            eq(guide.displayName, provider.displayName, "\(provider.id) name matches")
+        }
+    }
+
+    Harness.test("an address maps to the guidance for the provider hosting it") {
+        eq(AppPasswordGuide.forEmail("a@gmail.com").providerID, "gmail")
+        eq(AppPasswordGuide.forEmail("a@googlemail.com").providerID, "gmail")
+        eq(AppPasswordGuide.forEmail("a@me.com").providerID, "icloud")
+        eq(AppPasswordGuide.forEmail("a@icloud.com").providerID, "icloud")
+        eq(AppPasswordGuide.forEmail("a@ymail.com").providerID, "yahoo")
+        eq(AppPasswordGuide.forEmail("a@fastmail.fm").providerID, "fastmail")
+        eq(AppPasswordGuide.forEmail("a@aol.com").providerID, "aol")
+    }
+
+    // The connection default guesses Gmail for an unknown domain, which is fine
+    // for a host name — it is a guess the user can correct. *Instructions* that
+    // guess are not: they'd send someone to Google's website to look for a
+    // setting their provider keeps somewhere else entirely.
+    Harness.test("an unrecognized domain gets the generic page, never Gmail's") {
+        eq(AppPasswordGuide.forEmail("me@example.com").providerID, "imap")
+        eq(AppPasswordGuide.forEmail("not-an-address").providerID, "imap")
+        expect(
+            AppPasswordGuide.forEmail("me@example.com").steps.isEmpty,
+            "no steps are claimed for a provider we know nothing about")
+        expect(
+            AppPasswordGuide.generic.documentationURL == nil,
+            "and no provider documentation is invented for it either")
+    }
+
+    // Only Google and Apple gate the credential behind 2FA. Telling a Fastmail
+    // user to turn on two-factor authentication first adds a step they don't
+    // need to the exact screen where people give up.
+    Harness.test("two-factor is required only where the provider requires it") {
+        eq(AppPasswordGuide.gmail.requiresTwoFactor, true)
+        eq(AppPasswordGuide.icloud.requiresTwoFactor, true)
+        eq(AppPasswordGuide.yahoo.requiresTwoFactor, false)
+        eq(AppPasswordGuide.fastmail.requiresTwoFactor, false)
+        eq(AppPasswordGuide.aol.requiresTwoFactor, false)
+    }
+
+    // Searching Apple's settings for "app password" finds nothing — Apple calls
+    // it an app-specific password. The provider's own noun is most of the help.
+    Harness.test("each provider's own name for the credential is carried through") {
+        eq(AppPasswordGuide.icloud.credentialName, "App-Specific Password")
+        eq(AppPasswordGuide.fastmail.credentialName, "App Password")
+        eq(AppPasswordGuide.gmail.credentialName, "App password")
+    }
+
+    Harness.test("the console link is MailProvider's, so there is one place to fix it") {
+        for provider in MailProvider.known {
+            eq(
+                AppPasswordGuide.forProvider(provider).createURL, provider.appPasswordURL,
+                "\(provider.id) create link is not a second copy")
+        }
+        expect(AppPasswordGuide.generic.createURL == nil, "no console to link for a custom domain")
+    }
+
+    Harness.test("every guide points at a distinct page on the support site") {
+        var seen = Set<String>()
+        for guide in AppPasswordGuide.all {
+            let url = guide.helpPageURL
+            eq(url.scheme, "https", "\(guide.providerID) help page is https")
+            eq(url.host, "brooksc.github.io", "\(guide.providerID) help page is on the site")
+            expect(
+                url.lastPathComponent == "app-password-\(guide.providerID).html",
+                "\(guide.providerID) page name follows the convention: \(url.lastPathComponent)")
+            expect(seen.insert(url.absoluteString).inserted, "\(guide.providerID) page is not shared")
+        }
+        eq(AppPasswordGuide.all.count, 6, "five detected providers plus the generic IMAP page")
+    }
+
+    // Where a flow was checked against the provider's documentation, we say the
+    // steps; where it wasn't, we link. Either way there is always somewhere to
+    // send the user.
+    Harness.test("a provider with steps also cites the documentation they came from") {
+        for guide in AppPasswordGuide.all where !guide.steps.isEmpty {
+            expect(
+                guide.documentationURL != nil,
+                "\(guide.providerID) steps are attributable to a source")
+        }
+        for provider in MailProvider.known {
+            expect(
+                !AppPasswordGuide.forProvider(provider).steps.isEmpty,
+                "\(provider.id) has verified steps")
+        }
+    }
+
+    // Providers reject the account password with the same error they use for a
+    // mistyped app password, so a generic "check your credentials" sends people
+    // to retype the one thing that cannot work.
+    Harness.test("auth failure names the app-password policy as the likely cause") {
+        for provider in MailProvider.known {
+            let text = AppPasswordGuide.forProvider(provider).authFailureExplanation
+            expect(
+                text.contains(provider.displayName),
+                "\(provider.id) failure text names the provider")
+            expect(
+                text.lowercased().contains("account password"),
+                "\(provider.id) failure text names the mistake people actually make")
+        }
+        expect(
+            AppPasswordGuide.gmail.authFailureExplanation.contains("two-factor"),
+            "Gmail's answer includes the 2FA prerequisite")
+        expect(
+            !AppPasswordGuide.fastmail.authFailureExplanation.contains("two-factor"),
+            "Fastmail's does not, because Fastmail does not require it")
+    }
+
+    // The backend can't know which provider an account uses, so it must not
+    // offer provider-specific advice: this message used to tell every user,
+    // Fastmail subscribers included, to check Google's 2-Step Verification.
+    Harness.test("the backend's auth error stays provider-neutral") {
+        let text = MailBackendError.authenticationFailed("LOGIN failed").errorDescription ?? ""
+        expect(text.contains("LOGIN failed"), "the server's own answer survives")
+        expect(!text.contains("2-Step"), "no Google-specific advice for non-Google accounts")
+        expect(!text.lowercased().contains("workspace"), "and no Workspace-specific advice either")
+    }
+}
+
 exit(Harness.finish())
