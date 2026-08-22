@@ -214,18 +214,47 @@ public actor IMAPBackend: MailBackend {
         return windows
     }
 
+    /// The UIDs an extended search matched.
+    ///
+    /// `ExtendedSearchResult.all` is `nil` for "nothing matched", not just for
+    /// "the server didn't report it": on the ESEARCH path a server that finds
+    /// nothing omits the ALL datum, and on the plain-SEARCH fallback SwiftMail
+    /// nils out an empty set itself. The deprecated `search` returned an empty
+    /// set for that case, so collapsing `nil` to empty here keeps every caller
+    /// reading the way it always did — an absent answer must never be mistaken
+    /// for an unfinished one.
+    ///
+    /// Public and separate so a test can pin both directions, following
+    /// `NevermoreServer.listenerParameters()`. Nothing outside NevermoreKit has
+    /// a reason to call it, and it is the only public signature here that names
+    /// a SwiftMail type — but the alternative is a rule with no test, and the
+    /// two plausible "simplifications" of this line (`result.all!`, or treating
+    /// `nil` as an error) both fail the same way: discovery returns fewer
+    /// messages, sync reports success, and nobody finds out. That is worth one
+    /// symbol of API surface.
+    public static func matched(_ result: ExtendedSearchResult<UID>) -> UIDSet {
+        result.all ?? UIDSet()
+    }
+
     /// Search one date window, halving it on error until it fits within the
     /// library's command timeout *and* under swift-nio-imap's fixed 8 KB frame
     /// limit (a `SEARCH` whose one-line UID result exceeds that throws
     /// PayloadTooLargeError). Halves down to a one-hour floor — far below the
     /// point any personal account produces >1000 unsubscribe emails in a window.
+    ///
+    /// The halving stays even though ESEARCH returns the match set as compacted
+    /// ranges rather than one UID per number, which makes the frame limit much
+    /// harder to hit: SwiftMail falls back to a plain `SEARCH` on any server
+    /// that doesn't advertise ESEARCH, and the 60s timeout is unaffected either
+    /// way. Nothing about the window strategy is safe to relax on the strength
+    /// of a capability the next server might not have.
     private func searchWindow(
         _ window: (start: Date, end: Date),
         on server: IMAPServer,
         depth: Int
     ) async throws -> [UInt32] {
         do {
-            let uids: UIDSet = try await server.search(
+            let result: ExtendedSearchResult<UID> = try await server.extendedSearch(
                 criteria: [
                     .header("List-Unsubscribe", ""),
                     .not(.flagged),
@@ -233,7 +262,7 @@ public actor IMAPBackend: MailBackend {
                     .before(window.end),
                 ]
             )
-            return uids.toArray().map(\.value)
+            return Self.matched(result).toArray().map(\.value)
         } catch {
             let span = window.end.timeIntervalSince(window.start)
             guard depth < 14, span > 3600 else { throw error }
@@ -431,8 +460,9 @@ public actor IMAPBackend: MailBackend {
 
         var restored = 0
         for messageID in ids {
-            let uids: UIDSet = try await server.search(
+            let result: ExtendedSearchResult<UID> = try await server.extendedSearch(
                 criteria: [.header("Message-ID", messageID)])
+            let uids = Self.matched(result)
             guard !uids.isEmpty else { continue }
             try await server.move(messages: uids, to: config.inboxMailbox)
             restored += uids.count

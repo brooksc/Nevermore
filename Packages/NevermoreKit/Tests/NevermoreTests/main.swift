@@ -1,6 +1,8 @@
 import Foundation
 import Network
 import NevermoreKit
+// For ExtendedSearchResult/UID/UIDSet, which IMAPBackend.matched(_:) is stated in.
+import SwiftMail
 
 // Thin forwarders: binding these as `let` loses both the generic parameter and
 // the `line: Int = #line` default, so they have to be functions.
@@ -5383,6 +5385,32 @@ Harness.suite("BacklogOffer") {
         // A toast has no room for the question, so the escalation's button has
         // to carry the count the sheet's question would have carried.
         eq(escalated.toastActionLabel, "Trash 12 and Ignore")
+    }
+}
+
+// MARK: - Extended search results
+
+// The nil-vs-empty rule that replaced SwiftMail's deprecated `search`. Both
+// directions are pinned because getting either wrong fails silently: a window
+// that wrongly reads as "no matches" is indistinguishable from a genuinely
+// empty date window, so discovery stores fewer messages and still reports
+// success. There is no test here that reaches a real server — this pins the
+// result *interpretation* only, not that the search itself is correct.
+Harness.suite("IMAPBackend.matched") {
+    // ESEARCH omits the ALL datum entirely when nothing matched, so a server
+    // that found nothing answers COUNT 0 and no ALL. That is an answer, not a
+    // missing one, and it must read as an empty set rather than a crash.
+    Harness.test("a result with no ALL datum is no matches, not a failure") {
+        let result = ExtendedSearchResult<UID>(count: 0, all: nil)
+        expect(IMAPBackend.matched(result).isEmpty, "a nil ALL collapses to an empty set")
+    }
+
+    Harness.test("a populated result round-trips its UIDs unchanged") {
+        let result = ExtendedSearchResult<UID>(
+            count: 4, min: UID(10), max: UID(40), all: UIDSet(ranges: 10...12, 40...40))
+        eq(
+            IMAPBackend.matched(result).toArray().map(\.value), [10, 11, 12, 40],
+            "every matched UID survives, in order")
     }
 }
 

@@ -56,7 +56,14 @@ let package = Package(
         // Convert to swift-testing when Xcode becomes a hard requirement (M5).
         .executableTarget(
             name: "NevermoreTests",
-            dependencies: ["NevermoreKit"],
+            // SwiftMail is declared, not just inherited through NevermoreKit:
+            // IMAPBackend.matched(_:) is stated in SwiftMail's types, so the
+            // suite covering it imports them directly. A transitive module
+            // happens to be importable today and is not promised to stay so.
+            dependencies: [
+                "NevermoreKit",
+                .product(name: "SwiftMail", package: "SwiftMail"),
+            ],
             path: "Tests/NevermoreTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
