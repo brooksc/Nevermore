@@ -3404,11 +3404,14 @@ actor StubActions: MCPActions {
     }
 
     func propose(summary: String?, requests: [AgentProposalRequest]) async -> AgentActionOutcome {
-        note("propose", requests.map(\.senderId).joined(separator: ","))
+        note(
+            "propose",
+            requests.map { "\($0.senderId)|\($0.recommendation.rawValue)" }
+                .joined(separator: ","))
         let items = requests.map {
             SenderProposal.Item(
                 groupKey: $0.senderId, senderName: $0.senderId, senderEmail: "x@\($0.senderId)",
-                reason: $0.reason)
+                reason: $0.reason, recommendation: $0.recommendation)
         }
         return .proposal(
             AgentProposalBuilder.build(
@@ -3528,7 +3531,9 @@ Harness.suite("MCP write routes") {
         // the 40, and an agent that wasn't told would go on to report on 15
         // senders nobody ever looked at.
         let actions = StubActions()
-        let senders = (0 ..< 40).map { ["sender_id": "domain:s\($0)", "reason": "r\($0)"] }
+        let senders = (0 ..< 40).map {
+            ["sender_id": "domain:s\($0)", "reason": "r\($0)", "recommendation": "unsubscribe"]
+        }
         let response = await mcpWrite(
             "/mcp/proposal/create", ["summary": "the 2026 job search", "senders": senders],
             actions: actions)
@@ -3547,7 +3552,10 @@ Harness.suite("MCP write routes") {
     asyncTest("a proposal under the cap says so too, rather than saying nothing") {
         let response = await mcpWrite(
             "/mcp/proposal/create",
-            ["senders": [["sender_id": "domain:a", "reason": "unread since March"]]],
+            ["senders": [
+                ["sender_id": "domain:a", "reason": "unread since March",
+                 "recommendation": "unsubscribe"]
+            ]],
             actions: StubActions())
         let json = mcpJSON(response)
         eq(json["truncated"] as? Bool, false)
@@ -3564,7 +3572,10 @@ Harness.suite("MCP write routes") {
         let actions = StubActions()
         let response = await mcpWrite(
             "/mcp/proposal/create",
-            ["senders": [["sender_id": "domain:a", "reason": "ok"], ["sender_id": "domain:b"]]],
+            ["senders": [
+                ["sender_id": "domain:a", "reason": "ok", "recommendation": "ignore"],
+                ["sender_id": "domain:b", "recommendation": "ignore"],
+            ]],
             actions: actions)
         eq(response.statusCode, 400)
         eq(await actions.verbs(), [], "and nothing was proposed")
@@ -4224,6 +4235,234 @@ Harness.suite("Browser queue over MCP") {
             expect(status.note.contains("Queueing sends nothing"), "the note is always there")
             expect(status.note.contains("confirmed"), "and says which state means unsubscribed")
         }
+    }
+}
+
+// MARK: - The action a proposal recommends (TASK-52)
+
+/// Found in use: an agent proposed two cold-outreach senders with reasons
+/// beginning "IGNORE, do not unsubscribe", and both were unsubscribed, because
+/// the row's primary button said Unsubscribe and `u` was already in the fingers.
+/// Prose cannot override a button, so the recommendation is data now.
+Harness.suite("A proposal carries the action, not prose about it") {
+    Harness.test("an item keeps the action the agent chose, through a round trip") {
+        for action in RecommendedAction.allCases {
+            let item = SenderProposal.Item(
+                groupKey: "domain:a", senderName: "A", senderEmail: "a@a", reason: "why",
+                recommendation: action)
+            let data = try! JSONEncoder().encode(item)
+            let back = try! JSONDecoder().decode(SenderProposal.Item.self, from: data)
+            eq(back.recommendation, action, action.rawValue)
+        }
+    }
+
+    Harness.test("a proposal stored before recommendations existed still opens") {
+        // The stored proposal survives a relaunch, so the decoder has to cope
+        // with rows written by the previous build. Unsubscribe is what those
+        // rows already meant; the difference is that the row now says so.
+        let legacy = """
+            {"groupKey":"domain:a","senderName":"A","senderEmail":"a@a","reason":"unread"}
+            """
+        let item = try! JSONDecoder().decode(
+            SenderProposal.Item.self, from: Data(legacy.utf8))
+        eq(item.recommendation, .unsubscribe)
+        eq(item.reason, "unread")
+    }
+
+    Harness.test("the contradiction check finds only the rows that disagree") {
+        let proposal = SenderProposal(items: [
+            SenderProposal.Item(
+                groupKey: "domain:a", senderName: "A", senderEmail: "a@a", reason: "recurring",
+                recommendation: .unsubscribe),
+            SenderProposal.Item(
+                groupKey: "domain:b", senderName: "B", senderEmail: "b@b", reason: "cold outreach",
+                recommendation: .ignore),
+            SenderProposal.Item(
+                groupKey: "domain:c", senderName: "C", senderEmail: "c@c", reason: "one-off",
+                recommendation: .trash),
+        ])
+        let all: Set<String> = ["domain:a", "domain:b", "domain:c"]
+        eq(
+            proposal.items(contradicting: .unsubscribe, in: all).map(\.groupKey),
+            ["domain:b", "domain:c"])
+        // Only the selection is asked about: unsubscribing from the one sender
+        // that *was* recommended for it must not stop to ask about the others.
+        expect(proposal.items(contradicting: .unsubscribe, in: ["domain:a"]).isEmpty)
+        // And a sender that is not in the proposal at all is not its business.
+        expect(proposal.items(contradicting: .unsubscribe, in: ["domain:zz"]).isEmpty)
+    }
+
+    Harness.test("the override warning names the sender and repeats the agent's words") {
+        let items = [
+            SenderProposal.Item(
+                groupKey: "domain:b", senderName: "Cold Outreach Co", senderEmail: "b@b",
+                reason: "Cold outreach — unsubscribing confirms the address is live.",
+                recommendation: .ignore)
+        ]
+        let message = ProposalOverrideWarning.message(for: items)
+        expect(message.contains("Cold Outreach Co"), message)
+        expect(
+            message.contains("Cold outreach — unsubscribing confirms the address is live."),
+            "the agent's reason, verbatim: \(message)")
+        expect(message.contains("Ignore"), "and what was recommended instead: \(message)")
+        expect(message.contains("cannot be taken back"), "and why this one is different")
+        expect(ProposalOverrideWarning.title(count: 1).contains("this sender"))
+        expect(ProposalOverrideWarning.title(count: 3).contains("3 of these"))
+    }
+}
+
+Harness.suite("propose_selection requires an action") {
+    asyncTest("the three recommendations reach the action layer intact") {
+        for action in RecommendedAction.allCases {
+            let actions = StubActions()
+            let response = await mcpWrite(
+                "/mcp/proposal/create",
+                [
+                    "senders": [
+                        ["sender_id": "domain:a", "reason": "r", "recommendation": action.rawValue]
+                    ]
+                ],
+                actions: actions)
+            eq(response.statusCode, 200, action.rawValue)
+            eq(await actions.details(of: "propose"), ["domain:a|\(action.rawValue)"])
+        }
+    }
+
+    asyncTest("a sender with no recommendation is refused rather than assumed to mean unsubscribe") {
+        // The defect, in one test. Defaulting here is what turned "IGNORE, do
+        // not unsubscribe" into two unsubscribes.
+        let actions = StubActions()
+        let response = await mcpWrite(
+            "/mcp/proposal/create",
+            [
+                "senders": [
+                    ["sender_id": "domain:a", "reason": "r", "recommendation": "ignore"],
+                    ["sender_id": "domain:b", "reason": "r"],
+                ]
+            ],
+            actions: actions)
+        eq(response.statusCode, 400)
+        eq(await actions.verbs(), [], "and nothing was proposed")
+        let message = String(decoding: response.body, as: UTF8.self)
+        expect(message.contains("will not assume unsubscribe"), message)
+        for action in RecommendedAction.allCases {
+            expect(message.contains(action.rawValue), "and lists \(action.rawValue)")
+        }
+    }
+
+    asyncTest("a recommendation Nevermore does not have is refused, with the list") {
+        let actions = StubActions()
+        let response = await mcpWrite(
+            "/mcp/proposal/create",
+            ["senders": [["sender_id": "domain:a", "reason": "r", "recommendation": "delete_all"]]],
+            actions: actions)
+        eq(response.statusCode, 400)
+        eq(await actions.verbs(), [])
+        expect(
+            String(decoding: response.body, as: UTF8.self).contains("not a recommendation"),
+            "says the value was the problem")
+    }
+
+    Harness.test("the tool says when each action is appropriate, and warns off the default") {
+        let tool = MCPToolCatalog.tools.first { $0.name == "propose_selection" }!
+        for action in RecommendedAction.allCases {
+            expect(tool.description.contains(action.rawValue), "describes \(action.rawValue)")
+        }
+        expect(
+            tool.description.contains("cold outreach and one-off senders are ignored or trashed"),
+            "carries the standing rule")
+        expect(
+            tool.description.contains("not enough"),
+            "and says that putting it in the reason will not do")
+        let schema =
+            (try? JSONSerialization.jsonObject(with: Data(tool.schemaJSON.utf8)))
+            as? [String: Any] ?? [:]
+        let senders = (schema["properties"] as? [String: Any])?["senders"] as? [String: Any]
+        let item = senders?["items"] as? [String: Any]
+        eq(
+            (item?["required"] as? [String])?.sorted(),
+            ["reason", "recommendation", "sender_id"])
+        let field = (item?["properties"] as? [String: Any])?["recommendation"] as? [String: Any]
+        eq(field?["enum"] as? [String], RecommendedAction.allCases.map(\.rawValue))
+    }
+}
+
+Harness.suite("get_proposal_status reports followed or overrode") {
+    let sent = SenderProposal(items: [
+        SenderProposal.Item(
+            groupKey: "domain:a", senderName: "A", senderEmail: "a@a", reason: "recurring",
+            recommendation: .unsubscribe),
+        SenderProposal.Item(
+            groupKey: "domain:b", senderName: "B", senderEmail: "b@b", reason: "cold outreach",
+            recommendation: .ignore),
+        SenderProposal.Item(
+            groupKey: "domain:c", senderName: "C", senderEmail: "c@c", reason: "one-off",
+            recommendation: .trash),
+        SenderProposal.Item(
+            groupKey: "domain:d", senderName: "D", senderEmail: "d@d", reason: "wrong about this",
+            recommendation: .ignore),
+    ])
+
+    Harness.test("following, overriding, striking out and not deciding are four answers") {
+        let decisions = AgentProposalDecisions.build(
+            sent: sent,
+            humanActions: ["domain:a": .unsubscribe, "domain:b": .unsubscribe],
+            stillUnderReview: ["domain:c"])
+        eq(decisions.count, 4)
+        eq(decisions[0].humanAction, "unsubscribe")
+        eq(decisions[0].followedRecommendation, true)
+        // The case this whole task is about: recommended ignore, unsubscribed.
+        eq(decisions[1].recommended, "ignore")
+        eq(decisions[1].humanAction, "unsubscribe")
+        eq(decisions[1].followedRecommendation, false)
+        eq(decisions[2].humanAction, AgentProposalDecision.undecided)
+        eq(decisions[2].followedRecommendation, nil, "undecided is neither")
+        eq(decisions[3].humanAction, AgentProposalDecision.removed)
+        eq(decisions[3].followedRecommendation, nil, "struck out is neither")
+    }
+
+    Harness.test("the override note names them and says not to re-propose") {
+        let decisions = AgentProposalDecisions.build(
+            sent: sent, humanActions: ["domain:b": .unsubscribe], stillUnderReview: [])
+        let overrides = AgentProposalDecisions.overrides(in: decisions)
+        eq(overrides.map(\.senderId), ["domain:b"])
+        let note = AgentProposalDecisions.overrideNote(overrides) ?? ""
+        expect(note.contains("B (recommended ignore, the human chose unsubscribe)"), note)
+        expect(note.contains("considered disagreement"), note)
+        expect(
+            AgentProposalDecisions.overrideNote([]) == nil,
+            "and there is no note when nothing was overridden")
+    }
+
+    Harness.test("the status serialises decisions in the snake case the wire uses") {
+        let status = AgentProposalStatus(
+            state: AgentProposalStatus.inProgress, proposalId: "p", createdAt: nil, summary: nil,
+            proposedCount: 4, remainingCount: 1, removedByHuman: [], outcomes: [],
+            decisions: AgentProposalDecisions.build(
+                sent: sent, humanActions: ["domain:b": .unsubscribe],
+                stillUnderReview: ["domain:c"]),
+            note: "n")
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let json =
+            (try? JSONSerialization.jsonObject(with: try! encoder.encode(status)))
+            as? [String: Any] ?? [:]
+        let decisions = json["decisions"] as? [[String: Any]] ?? []
+        eq(decisions.count, 4)
+        eq(decisions[1]["sender_id"] as? String, "domain:b")
+        eq(decisions[1]["recommended"] as? String, "ignore")
+        eq(decisions[1]["human_action"] as? String, "unsubscribe")
+        eq(decisions[1]["followed_recommendation"] as? Bool, false)
+        eq(decisions[2]["human_action"] as? String, AgentProposalDecision.undecided)
+    }
+
+    Harness.test("get_proposal_status tells the agent what an override means") {
+        let tool = MCPToolCatalog.tools.first { $0.name == "get_proposal_status" }!
+        expect(tool.description.contains("decisions"), tool.description)
+        expect(tool.description.contains("overrode"), "and names the case")
+        expect(
+            tool.description.contains("considered disagreement"),
+            "and says what to make of it")
     }
 }
 

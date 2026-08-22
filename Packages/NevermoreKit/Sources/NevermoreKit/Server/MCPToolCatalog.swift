@@ -256,7 +256,19 @@ public enum MCPToolCatalog {
                 and `truncated` in the response, because the human only ever sees what \
                 survived the cap. Nothing happens to any sender when you call this. A \
                 reason is required for every sender: a row nobody can see a reason for \
-                can only be rubber-stamped, which defeats the review.
+                can only be rubber-stamped, which defeats the review. A \
+                `recommendation` is required too, and it is the field that decides \
+                what the row offers: `unsubscribe` for \
+                \(RecommendedAction.unsubscribe.guidance); `ignore` for \
+                \(RecommendedAction.ignore.guidance); `trash` for \
+                \(RecommendedAction.trash.guidance). Do not recommend unsubscribe as \
+                a default — an unsubscribe request confirms to the sender that the \
+                address is live and read by a person, so cold outreach and one-off \
+                senders are ignored or trashed, never unsubscribed, and the exposure \
+                is only worth it against mail that would otherwise keep arriving. \
+                Nevermore refuses a sender with no recommendation rather than \
+                assuming one; putting "do not unsubscribe" in the reason is not \
+                enough, because the row acts on the recommendation, not the prose.
                 """,
             schemaJSON: """
                 {
@@ -269,10 +281,15 @@ public enum MCPToolCatalog {
                       "maxItems": \(SenderProposal.maxItems),
                       "items": {
                         "type": "object",
-                        "required": ["sender_id", "reason"],
+                        "required": ["sender_id", "reason", "recommendation"],
                         "properties": {
                           "sender_id": {"type": "string", "description": "The id from list_senders."},
-                          "reason": {"type": "string", "description": "One line, in your own words, shown verbatim in the row. This is what makes your judgement checkable."}
+                          "reason": {"type": "string", "description": "One line, in your own words, shown verbatim in the row. This is what makes your judgement checkable."},
+                          "recommendation": {
+                            "type": "string",
+                            "enum": ["unsubscribe", "ignore", "trash"],
+                            "description": "What you mean should happen to this sender, and what the row will lead with. unsubscribe: \(RecommendedAction.unsubscribe.guidance). ignore: \(RecommendedAction.ignore.guidance). trash: \(RecommendedAction.trash.guidance). There is no default; a sender without one is refused."
+                          }
                         }
                       }
                     }
@@ -290,8 +307,13 @@ public enum MCPToolCatalog {
                 that has actually happened, each carrying Nevermore's own distinction \
                 between confirmed, requested, failed and needs_manual. 'requested' \
                 means the request was accepted, never that the sender honoured it — \
-                do not report it as unsubscribed. The ledger is per app run, so a \
-                relaunch empties it; the durable record is unsubscribe_history.
+                do not report it as unsubscribed. `decisions` says, per sender, what \
+                you recommended against what the human actually did, and whether \
+                they followed you or overrode you — an override was made \
+                deliberately, with your reason on screen, so read it as considered \
+                disagreement rather than a reason to propose the sender again. The \
+                ledger is per app run, so a relaunch empties it; the durable record \
+                is unsubscribe_history.
                 """,
             schemaJSON: """
                 {"type": "object", "properties": {}}

@@ -246,6 +246,93 @@ public enum AgentProposalBuilder {
     }
 }
 
+/// What the human did about one proposed sender, against what the agent asked
+/// for (TASK-52).
+///
+/// The feedback the recommendation makes possible: an agent that recommended
+/// ignore and reads back `human_action: unsubscribe` has been told, per sender,
+/// that its judgement was overruled — which is a different and more useful fact
+/// than the row merely having left the queue.
+public struct AgentProposalDecision: Sendable, Encodable, Equatable {
+    /// The human is still deciding.
+    public static let undecided = "undecided"
+    /// Struck out of the proposal without acting: the agent was wrong about
+    /// this row, and the human said so.
+    public static let removed = "removed_from_proposal"
+
+    public let senderId: String
+    public let senderName: String
+    /// `unsubscribe`, `ignore` or `trash`.
+    public let recommended: String
+    /// One of those three, or `undecided` / `removed_from_proposal`.
+    public let humanAction: String
+    /// Nil while the row is undecided or was struck out — neither is following
+    /// the recommendation, and neither is overriding it.
+    public let followedRecommendation: Bool?
+
+    public init(
+        senderId: String, senderName: String, recommended: String, humanAction: String,
+        followedRecommendation: Bool?
+    ) {
+        self.senderId = senderId
+        self.senderName = senderName
+        self.recommended = recommended
+        self.humanAction = humanAction
+        self.followedRecommendation = followedRecommendation
+    }
+}
+
+/// Turns a sent proposal plus what the human did into per-sender decisions.
+///
+/// In NevermoreKit rather than in the app's action layer so it is testable: the
+/// app knows *which* action retired each row, and this is the part that has to
+/// get "followed" and "overrode" the right way round.
+public enum AgentProposalDecisions {
+    public static func build(
+        sent: SenderProposal,
+        humanActions: [String: RecommendedAction],
+        stillUnderReview: Set<String>
+    ) -> [AgentProposalDecision] {
+        sent.items.map { item in
+            let taken = humanActions[item.groupKey]
+            let action: String
+            if let taken {
+                action = taken.rawValue
+            } else if stillUnderReview.contains(item.groupKey) {
+                action = AgentProposalDecision.undecided
+            } else {
+                action = AgentProposalDecision.removed
+            }
+            return AgentProposalDecision(
+                senderId: item.groupKey,
+                senderName: item.senderName,
+                recommended: item.recommendation.rawValue,
+                humanAction: action,
+                followedRecommendation: taken.map { $0 == item.recommendation })
+        }
+    }
+
+    /// How many recommendations the human went against, so a note can say it
+    /// once rather than leaving an agent to count.
+    public static func overrides(in decisions: [AgentProposalDecision]) -> [AgentProposalDecision] {
+        decisions.filter { $0.followedRecommendation == false }
+    }
+
+    /// Appended to the status note whenever anything was overridden. An agent
+    /// that keeps recommending what the human keeps overruling should be reading
+    /// this, and "N overridden" with no instruction reads as noise.
+    public static func overrideNote(_ overrides: [AgentProposalDecision]) -> String? {
+        guard !overrides.isEmpty else { return nil }
+        let names = overrides.map { "\($0.senderName) (recommended \($0.recommended), the human "
+            + "chose \($0.humanAction))" }.joined(separator: "; ")
+        return
+            "The human went against the recommendation on \(overrides.count) sender"
+            + "\(overrides.count == 1 ? "" : "s"): \(names). They were shown the recommendation "
+            + "and the reason and decided otherwise, so treat it as a considered disagreement "
+            + "rather than a mistake to correct or repeat the proposal about."
+    }
+}
+
 /// Where the human got to with the proposal.
 public struct AgentProposalStatus: Sendable, Encodable, Equatable {
     /// `none` — nothing was ever proposed in this session.
@@ -279,13 +366,17 @@ public struct AgentProposalStatus: Sendable, Encodable, Equatable {
     public let removedByHuman: [String]
     /// Per sender, for everything that has happened to any of them.
     public let outcomes: [AgentOutcome]
+    /// Per sender, what was recommended against what the human did — including
+    /// the rows nobody has decided yet.
+    public let decisions: [AgentProposalDecision]
     public let note: String
 
     public init(
         state: String, proposalId: String?, createdAt: String?, summary: String?,
         proposedCount: Int, remainingCount: Int, removedByHuman: [String],
-        outcomes: [AgentOutcome], note: String
+        outcomes: [AgentOutcome], decisions: [AgentProposalDecision] = [], note: String
     ) {
+        self.decisions = decisions
         self.state = state
         self.proposalId = proposalId
         self.createdAt = createdAt
@@ -399,10 +490,15 @@ public enum AgentActionOutcome: Sendable {
 public struct AgentProposalRequest: Sendable, Equatable {
     public let senderId: String
     public let reason: String
+    /// What the agent means should happen. Never inferred from anything else —
+    /// see `RecommendedAction`.
+    public let recommendation: RecommendedAction
 
-    public init(senderId: String, reason: String) {
+    public init(senderId: String, reason: String, recommendation: RecommendedAction = .unsubscribe)
+    {
         self.senderId = senderId
         self.reason = reason
+        self.recommendation = recommendation
     }
 }
 

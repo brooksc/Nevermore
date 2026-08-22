@@ -19,7 +19,12 @@ All notable changes to Nevermore are recorded here. Format follows
   what can go now that a situation has ended.
 - **A Proposed collection** where an assistant's suggestions wait for you. It
   appears only when something is in it, shows the assistant's reason on every
-  row, and acts on nothing until you say so.
+  row, and acts on nothing until you say so. Every row leads with the action the
+  assistant recommends — unsubscribe, ignore or trash — and its button does that
+  thing, so an assistant telling you *not* to unsubscribe from a cold sender is
+  no longer a sentence competing with a button that says otherwise.
+  Unsubscribing anyway is still yours to do; you are asked first, with the
+  assistant's reason in front of you.
 - **A browser queue**, so the senders that publish only a web form can be worked
   through in one sitting instead of one at a time.
 

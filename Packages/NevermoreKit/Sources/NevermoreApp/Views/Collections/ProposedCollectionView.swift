@@ -95,45 +95,91 @@ struct ProposedCollectionView: View {
             + " — review before acting."
     }
 
+    // MARK: - Recommendation
+
+    /// What the agent means, at the head of the row and in words.
+    ///
+    /// Colour carries no meaning on its own here — the word is always there —
+    /// because the distinction that matters (unsubscribe versus not) has to
+    /// survive both Dark Mode and colour-blindness.
+    private func recommendationBadge(_ action: RecommendedAction) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: action.symbolName)
+            Text(action.badgeTitle)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(action == .unsubscribe ? Tokens.brandBlue : .secondary)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(
+            Capsule().fill(
+                (action == .unsubscribe ? Tokens.brandBlue : Color.secondary).opacity(0.12)))
+        .frame(width: 108, alignment: .leading)
+        .accessibilityLabel("The agent recommends: \(action.badgeTitle)")
+    }
+
     // MARK: - Row
 
     private func row(_ row: AppModel.ProposedRow) -> some View {
         HStack(alignment: .top, spacing: 12) {
-            if let sender = row.sender {
-                MethodIcon(method: sender.method, size: 18)
-            } else {
-                Image(systemName: "questionmark.circle")
-                    .foregroundStyle(.secondary)
-                    .help("This sender's messages are no longer in the mailbox.")
-            }
+            // The row leads with what the agent means (TASK-52). It used to lead
+            // with the unsubscribe method, which said how the app *could*
+            // unsubscribe from a sender the agent may well have been asking it
+            // not to — the method is still here, next to the count, where it
+            // answers a question rather than making a suggestion.
+            recommendationBadge(row.recommendation)
+
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.name).fontWeight(.semibold).lineLimit(1)
                 Text(row.email).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
-            .frame(width: 210, alignment: .leading)
+            .frame(width: 190, alignment: .leading)
 
-            // The agent's words, verbatim, in the widest part of the row. Two
-            // lines: a reason that needs more than that is one the agent should
-            // have written shorter, and truncating is better than a list whose
-            // rows are all different heights.
+            // The agent's words, verbatim, in the widest part of the row — and
+            // in the primary colour at body size, because this is the only thing
+            // that makes the agent's judgement checkable and it was being read
+            // as a caption and skipped (TASK-52). Three lines rather than two:
+            // the reasons that matter are the ones arguing against the obvious
+            // action, and those are the long ones.
             Text(row.reason)
                 .font(.callout)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
+                .foregroundStyle(.primary)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
                 .help(row.reason)
 
             VStack(alignment: .trailing, spacing: 4) {
-                if let sender = row.sender {
-                    Text("\(sender.count) msgs · \(sender.relativeAge)")
-                        .font(.caption).foregroundStyle(.secondary)
-                } else {
-                    Text("No messages left")
-                        .font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    if let sender = row.sender {
+                        Text("\(sender.count) msgs · \(sender.relativeAge)")
+                            .font(.caption).foregroundStyle(.secondary)
+                        MethodIcon(method: sender.method, size: 14)
+                    } else {
+                        Image(systemName: "questionmark.circle")
+                            .foregroundStyle(.secondary)
+                        Text("No messages left")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .help("This sender's messages are no longer in the mailbox.")
+                    }
                 }
-                Button("Remove") { model.removeFromProposal([row.id]) }
+                HStack(spacing: 6) {
+                    // Doing what was recommended is the one-click path; anything
+                    // else is a keystroke or a menu away, and an unsubscribe
+                    // against a recommendation stops to ask.
+                    Button(row.recommendation.buttonTitle) {
+                        model.actOnRecommendation(row.id, onUnsubscribe: onUnsubscribe)
+                    }
                     .controlSize(.small)
-                    .help("Take this sender out of the proposal. Nothing else changes.")
+                    .disabled(row.sender == nil)
+                    .help(
+                        "What the agent recommended for this sender: "
+                            + row.recommendation.guidance + ".")
+                    Button("Remove") { model.removeFromProposal([row.id]) }
+                        .controlSize(.small)
+                        .help("Take this sender out of the proposal. Nothing else changes.")
+                }
             }
         }
         .padding(.vertical, 4)

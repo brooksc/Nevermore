@@ -57,7 +57,8 @@ final class AgentActions: MCPActions {
                     groupKey: id.storageKey,
                     senderName: group.displayName,
                     senderEmail: group.latest?.sender.address ?? id.key,
-                    reason: request.reason))
+                    reason: request.reason,
+                    recommendation: request.recommendation))
         }
         guard !items.isEmpty else {
             return .refusal(
@@ -99,6 +100,7 @@ final class AgentActions: MCPActions {
         // would teach it the reverse of what happened. The outcome ledger is the
         // discriminator — a sender that was acted on has one, a sender the human
         // declined does not.
+        let humanActions = model.proposalActions
         let actedKeys = model.proposalActedKeys
         let gone = sent == nil ? [] : sentKeys.filter { !remaining.contains($0) }
         let removed = gone.filter { !actedKeys.contains($0) }
@@ -118,6 +120,15 @@ final class AgentActions: MCPActions {
         } else {
             state = AgentProposalStatus.edited
         }
+        // Per sender, what was recommended against what was done (TASK-52).
+        // Empty only when nothing was ever proposed in this run — a decision
+        // exists for every row, including the ones nobody has got to yet.
+        let decisions = sent.map {
+            AgentProposalDecisions.build(
+                sent: $0, humanActions: humanActions, stillUnderReview: remaining)
+        } ?? []
+        let overrideNote = AgentProposalDecisions.overrideNote(
+            AgentProposalDecisions.overrides(in: decisions))
         return .status(
             AgentProposalStatus(
                 state: state,
@@ -128,7 +139,9 @@ final class AgentActions: MCPActions {
                 remainingCount: remaining.count,
                 removedByHuman: removed,
                 outcomes: outcomes,
-                note: Self.statusNote(state: state)))
+                decisions: decisions,
+                note: [Self.statusNote(state: state), overrideNote]
+                    .compactMap { $0 }.joined(separator: " ")))
     }
 
     private static func statusNote(state: String) -> String {

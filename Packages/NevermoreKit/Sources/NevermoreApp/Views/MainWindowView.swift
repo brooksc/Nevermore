@@ -58,6 +58,25 @@ struct MainWindowView: View {
         } message: { pending in
             Text("This trashes \(pending.messageCount) messages from \(pending.senderCount) sender\(pending.senderCount == 1 ? "" : "s"). They stay recoverable in your Trash folder.")
         }
+        // Unsubscribing from a sender the agent said not to (TASK-52). Never a
+        // block: it names the senders, repeats the agent's own reason, and lets
+        // the user go ahead — what it stops is the override happening silently
+        // as the second half of a keystroke.
+        .confirmationDialog(
+            model.pendingProposalOverride?.title ?? "",
+            isPresented: Binding(
+                get: { model.pendingProposalOverride != nil },
+                set: { if !$0 { model.pendingProposalOverride = nil } }),
+            presenting: model.pendingProposalOverride
+        ) { override in
+            Button(ProposalOverrideWarning.confirmTitle, role: .destructive) {
+                model.pendingProposalOverride = nil
+                proceedWithUnsubscribe(override.ids, alsoDelete: override.alsoDelete)
+            }
+            Button("Cancel", role: .cancel) { model.pendingProposalOverride = nil }
+        } message: { override in
+            Text(override.message)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .unsubscribeSelected)) { _ in
             beginUnsubscribe(model.selection)
         }
@@ -297,6 +316,12 @@ struct MainWindowView: View {
     }
 
     private func beginUnsubscribe(_ ids: Set<GroupID>) {
+        // Every user-started unsubscribe comes through here — the row, the
+        // inspector, the Actions menu and `u` — so this is where an unsubscribe
+        // that contradicts an agent's recommendation is stopped and asked about
+        // (TASK-52). Doing it in the Proposed view would have left the menu and
+        // the inspector as two ways round it.
+        guard model.mayUnsubscribeFromProposal(ids, alsoDelete: false) else { return }
         let plan = model.plan(for: ids)
         guard !plan.isEmpty else { return }
         immediateDelete = false
@@ -319,9 +344,21 @@ struct MainWindowView: View {
     /// Recoverable: the messages go to the provider's Trash, and ⌘Z restores
     /// them for batches under the undo limit.
     private func beginUnsubscribeAndDelete(_ ids: Set<GroupID>) {
+        guard model.mayUnsubscribeFromProposal(ids, alsoDelete: true) else { return }
         let plan = model.plan(for: ids)
         guard !plan.isEmpty else { return }
         immediateDelete = true
+        unsubOrigin = .user
+        unsubTargets = plan
+    }
+
+    /// The unsubscribe the override dialog was asked about, once the user has
+    /// said they mean it. Goes straight to the sheet: the question the guard
+    /// exists to ask has been asked and answered.
+    private func proceedWithUnsubscribe(_ ids: Set<GroupID>, alsoDelete: Bool) {
+        let plan = model.plan(for: ids)
+        guard !plan.isEmpty else { return }
+        immediateDelete = alsoDelete
         unsubOrigin = .user
         unsubTargets = plan
     }

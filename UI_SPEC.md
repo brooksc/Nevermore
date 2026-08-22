@@ -118,8 +118,9 @@ secondary-styled numbers. No action buttons live here.
 - **Manual only** — senders lacking a target; these need a browser visit (`hand.raised`)
 
 **REVIEW** — section hidden entirely when there is no proposal
-- **Proposed** — senders an external AI agent has put forward over MCP, with the
-  agent's one-line reason on each row (`sparkles.rectangle.stack`). Accent pill,
+- **Proposed** — senders an external AI agent has put forward over MCP, each row
+  led by the action the agent recommends and carrying its one-line reason
+  (`sparkles.rectangle.stack`). Accent pill,
   like Reappeared: it is a queue waiting on the user, not a standing total.
   **The row exists only while a proposal does**, and goes when the proposal is
   dismissed or emptied — most users never connect an MCP client, and a
@@ -458,13 +459,27 @@ already exists. It leads with a banner naming the agent's summary and when the
 proposal was made, and carrying `Remove from Proposal` (for the selection) and
 `Dismiss Proposal`.
 
-Each row shows the sender, the agent's **one-line reason**, and the message
-count. The reason is in the row and not the inspector on purpose: reviewing
-twenty-five rows without seeing why each was picked is rubber-stamping rather
-than review, and this review is the safety mechanism the whole MCP feature rests
-on. A sender whose mail has been trashed since the proposal was made keeps its
-row — with its actions disabled — so what the human reviews is the proposal that
-was actually made.
+Each row **leads with the action the agent recommends** — Unsubscribe, Ignore or
+Trash, as a labelled badge — then the sender, the agent's **one-line reason**,
+the message count and unsubscribe method, and a button that does the recommended
+thing. The recommendation is a required field on the proposal rather than a
+sentence in the reason, because a row's affordances are what people act on: an
+agent writing "do not unsubscribe" into a row whose primary button said
+Unsubscribe got two senders unsubscribed (TASK-52). Unsubscribing from a sender
+the agent recommended against is still possible from anywhere in the app, but it
+raises a confirmation naming the senders and repeating the agent's reason first —
+never a block, since the agent is often wrong; what it stops is the override
+happening as the tail of a habitual keystroke. Ignoring or trashing against a
+recommendation is not guarded: both are local and undoable, while an unsubscribe
+is neither.
+
+The reason is set at body size in the primary colour, up to three lines: it is in
+the row and not the inspector on purpose, because reviewing twenty-five rows
+without seeing why each was picked is rubber-stamping rather than review, and
+this review is the safety mechanism the whole MCP feature rests on. A sender
+whose mail has been trashed since the proposal was made keeps its row — with its
+actions disabled — so what the human reviews is the proposal that was actually
+made.
 
 Dismissing acts on nothing: no unsubscribe, no ignore, no trash.
 

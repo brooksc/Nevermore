@@ -288,10 +288,15 @@ the stored headers, so an agent can tell you which senders will need a browser
 without attempting anything.
 
 Thirteen write tools, all of them narrow. `propose_selection` is the main one: it
-fills a **Proposed** collection with up to 25 senders and the agent's one-line
-reason for each, and brings the window forward so you can go through them with
-the same keyboard triage as any other list. `get_proposal_status` tells the
-agent what you did with it. `ignore` / `unignore`, `set_classification`,
+fills a **Proposed** collection with up to 25 senders, the agent's one-line
+reason for each, and — required, never assumed — the action it recommends:
+unsubscribe, ignore, or trash. The row leads with that action and its button
+does it, so an agent that says "ignore, do not unsubscribe" is not proposing
+into a row whose main button says otherwise. Unsubscribing from a sender it
+recommended against is still yours to do, but you are asked first, with the
+agent's reason in front of you. The window comes forward so you can go through
+the list with the same keyboard triage as any other. `get_proposal_status` tells
+the agent what you did with it, per sender, including where you overrode it. `ignore` / `unignore`, `set_classification`,
 `start_sync`, `set_grouping` and `forget_unsubscribe_record` are local to your
 Mac and run without asking. `queue_for_browser` collects the senders nothing
 automated can finish into a queue you work through in one sitting, and
