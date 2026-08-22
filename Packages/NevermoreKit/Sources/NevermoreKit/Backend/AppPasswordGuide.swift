@@ -52,15 +52,10 @@ public struct AppPasswordGuide: Sendable, Hashable {
         self.credentialName = credentialName
         self.requiresTwoFactor = requiresTwoFactor
         self.documentationURL = documentationURL
-        self.helpPageURL = Self.siteBase.appendingPathComponent(helpPage)
+        self.helpPageURL = SupportSite.home.appendingPathComponent(helpPage)
         self.steps = steps
         self.caveat = caveat
     }
-
-    /// The published support site. The help pages live in `docs/`, which is what
-    /// GitHub Pages serves from — so they are fixable without shipping a build,
-    /// which matters because providers move these settings.
-    public static let siteBase = URL(string: "https://brooksc.github.io/Nevermore/")!
 
     // MARK: - Per-provider guidance
 

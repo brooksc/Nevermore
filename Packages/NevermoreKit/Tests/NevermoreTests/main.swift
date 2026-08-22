@@ -5545,4 +5545,72 @@ Harness.suite("AppPasswordGuide") {
     }
 }
 
+// The Help menu links pages rather than restating them, so that help can be
+// fixed without shipping a build. A link to a page that isn't there is worse
+// than no link at all, and nothing in a menu item will tell you — so the checks
+// that can be made here are made here: the URLs are on the site, and each one
+// names a file that exists in `docs/`, which is what GitHub Pages publishes.
+Harness.suite("Support site links") {
+    /// The repo root, from this file's own path.
+    let root = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()  // NevermoreTests
+        .deletingLastPathComponent()  // Tests
+        .deletingLastPathComponent()  // NevermoreKit
+        .deletingLastPathComponent()  // Packages
+        .deletingLastPathComponent()  // repo root
+
+    Harness.test("every linked page is a real file in docs/") {
+        for url in SupportSite.all where url != SupportSite.home {
+            let file = root.appending(path: "docs").appending(path: url.lastPathComponent)
+            expect(
+                FileManager.default.fileExists(atPath: file.path),
+                "\(url.lastPathComponent) is published at \(file.path)")
+        }
+        // The site root is a directory, served as index.html.
+        expect(
+            FileManager.default.fileExists(atPath: root.appending(path: "docs/index.html").path),
+            "the site root has an index")
+    }
+
+    // The whole point of linking the site is that someone without a GitHub
+    // account — which is most people — can read it. PRIVACY.md rendered on
+    // github.com was the previous destination and does not clear that bar.
+    Harness.test("the links go to the site, not to GitHub") {
+        for url in SupportSite.all {
+            eq(url.scheme, "https", "\(url.lastPathComponent) is https")
+            eq(url.host, "brooksc.github.io", "\(url.lastPathComponent) is on the published site")
+            expect(!url.path.contains("/blob/"), "\(url.lastPathComponent) is not a repo blob URL")
+        }
+    }
+
+    // AppPasswordGuide predates this list and used to carry its own copy of the
+    // base URL. Two copies is how the app ends up linking a site that moved.
+    Harness.test("the per-provider guides share the one base URL") {
+        for guide in AppPasswordGuide.all {
+            expect(
+                guide.helpPageURL.absoluteString.hasPrefix(SupportSite.home.absoluteString),
+                "\(guide.providerID) page hangs off SupportSite.home")
+        }
+        expect(
+            AppPasswordGuide.generic.helpPageURL != SupportSite.appPasswords,
+            "the index and the generic guide are different pages")
+    }
+
+    // The index is what the Help menu links, because a menu has no address in
+    // hand to pick a provider with. It is only useful if it leads on to the
+    // per-provider pages the sheets link.
+    Harness.test("the app-passwords index links every provider guide") {
+        guard let html = try? String(
+            contentsOf: root.appending(path: "docs/app-passwords.html"), encoding: .utf8) else {
+            expect(false, "could not read docs/app-passwords.html")
+            return
+        }
+        for guide in AppPasswordGuide.all {
+            expect(
+                html.contains(guide.helpPageURL.lastPathComponent),
+                "the index links \(guide.helpPageURL.lastPathComponent)")
+        }
+    }
+}
+
 exit(Harness.finish())

@@ -65,17 +65,23 @@ struct AppCommands: Commands {
             Button("Keyboard Shortcuts") { model.showShortcuts = true }
                 .keyboardShortcut("?", modifiers: .command)
             Divider()
-            // The App Store requires a support URL anyway; an app that holds a
-            // mail credential should also make it easy to find out who wrote it
-            // and read the source.
-            Button("Frequently Asked Questions") { open("\(Self.website)faq.html") }
-            Button("Nevermore Website") { open(Self.website) }
-            Button("Privacy Policy") {
-                open("https://github.com/brooksc/Nevermore/blob/main/PRIVACY.md")
-            }
-            Button("Report an Issue…") {
-                open("https://github.com/brooksc/Nevermore/issues/new")
-            }
+            // The four pages someone stuck actually needs, in the order they
+            // get stuck: a question about what the app did, a password that
+            // won't work, a worry about what leaves the Mac, and then a person
+            // to write to. Every one is a page on the site, so it can be fixed
+            // without shipping a build and needs no GitHub account to read.
+            //
+            // The site's own home page is deliberately not a fifth item: it
+            // sells the app to someone who hasn't got it, and all four pages
+            // carry a link back to it anyway. Nor are the six per-provider
+            // app-password guides listed individually — from a menu there is no
+            // address in hand to pick the right one, so this links their index
+            // and lets the user choose. The add-account sheet, which does know
+            // the provider, already links that provider's page directly.
+            Button("Frequently Asked Questions") { open(SupportSite.faq) }
+            Button("Setting Up an App Password") { open(SupportSite.appPasswords) }
+            Button("Privacy Policy") { open(SupportSite.privacy) }
+            Button("Nevermore Support") { open(SupportSite.support) }
         }
 
         // Actions — the app's verbs
@@ -138,10 +144,6 @@ struct AppCommands: Commands {
         }
     }
 
-    /// Where the Help menu's links point. One place, so the marketing site and
-    /// the FAQ can't drift apart from the app that links to them.
-    static let website = "https://brooksc.github.io/Nevermore/"
-
     private func showAboutPanel() {
         let credits = NSAttributedString(
             string: """
@@ -163,8 +165,9 @@ struct AppCommands: Commands {
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
-    private func open(_ urlString: String) {
-        guard let url = URL(string: urlString) else { return }
+    /// Opens a page in the default browser. Only ever from a menu item the user
+    /// picked — nothing here opens a window on its own.
+    private func open(_ url: URL) {
         NSWorkspace.shared.open(url)
     }
 

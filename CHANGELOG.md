@@ -40,6 +40,15 @@ All notable changes to Nevermore are recorded here. Format follows
 - **A browser queue**, so the senders that publish only a web form can be worked
   through in one sitting instead of one at a time.
 
+### Changed
+
+- **The Help menu now points at help.** It links the FAQ, the app-password
+  guides, the privacy policy and support — all pages on the site rather than
+  files in a source repository, so they read properly without a GitHub account
+  and can be corrected without shipping a new build. Reporting a problem now
+  goes to the support page and its email address instead of an issue tracker
+  that asked you to sign up first.
+
 ### Notes
 
 - **There is no bulk unsubscribe over MCP, and there will not be one.**
