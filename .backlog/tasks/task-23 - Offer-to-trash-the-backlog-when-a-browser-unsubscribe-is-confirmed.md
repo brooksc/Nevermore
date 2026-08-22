@@ -1,9 +1,10 @@
 ---
 id: TASK-23
 title: Offer to trash the backlog when a browser unsubscribe is confirmed
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-08-10 01:46'
+updated_date: '2026-08-22 22:23'
 labels:
   - product
 dependencies: []
@@ -37,7 +38,32 @@ Suggested shape:
 <!-- AC:BEGIN -->
 - [ ] #1 Every browser-sheet exit that records a confirmed unsubscribe offers deletion within that same interaction
 - [ ] #2 The auto-detected confirmation banner offers delete, not just Mark Confirmed
-- [ ] #3 The offer names the message count
-- [ ] #4 Escalations from Reappeared offer trash and ignore, matching that view's wording
+- [x] #3 The offer names the message count
+- [x] #4 Escalations from Reappeared offer trash and ignore, matching that view's wording
 - [ ] #5 Nothing is deleted without being asked; the toast remains only as a fallback
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Branch `task-23-fix`, commit a0b40cc. 375 tests pass (367 before, 8 added).
+
+Most of the shape had already landed with TASK-47 (f3d4df2): the sheet's result step, the banner routing into it, and the escalation wording. What was missing was that none of it was testable, and one exit walked past the question.
+
+What this commit adds:
+- `NevermoreKit/Domain/BacklogOffer.swift` — the offer as a value: count, escalation, question, accept/decline labels, `accept` (.trash vs .trashAndIgnore), and the toast fallback strings. `init?` returns nil when there is no mail left, so "nothing to offer" is one decision rather than a scattered `> 0`.
+- The sheet reads all copy off it; `WebUnsubscribeSheet.backlogQuestion`/`deleteLabel` are gone.
+- `AppModel.offerBacklogDelete(_:isEscalation:)`, the toast fallback, and `recordManual`'s toast now share that wording.
+- Closing the sheet while the offer is on screen now falls back to the toast. Answering "Keep Messages" does not — declining is answered, and re-offering would be the nag.
+
+On the trash threshold: the accepted offer trashes directly rather than going through `requestTrash`. `pendingTrash`'s dialog is attached to `MainWindowView`, which also presents this sheet, so during a queue sitting (sheet stays open) the alert would never appear and the trash would silently not happen. The offer itself is the confirmation instead, which is only defensible while it says what that dialog says — `BacklogOffer.namesWhatItWillDo` is that invariant and every offer in the tests is held to it (count + destination).
+
+AC verification:
+- #1 not ticked — three confirmed exits (banner, footer, close dialog) all funnel through `confirm()` into the result step, verified by reading `WebUnsubscribeSheet.swift`, not by running the UI.
+- #2 not ticked — same reason; the banner's "Mark Confirmed" calls `confirm()`, which shows the result step rather than dismissing. On-screen, unverified.
+- #3 ticked — tested (`BacklogOffer` suite, "the offer names the message count", "every offer states the count and where the mail goes").
+- #4 ticked — tested: escalation yields "Trash and Ignore" and `.trashAndIgnore`; the string matches `CollectionViews.swift:150` (Reappeared row), checked by grep.
+- #5 not ticked — nothing in the kit deletes, and the sheet only trashes from a button press, but proving "nothing is deleted without being asked" needs the app running. The toast fallback exists and is now reachable from exactly one exit.
+
+Noted, not changed: `AppModel.recordManualAndDelete` (:1965) has no callers — it was the old close-dialog's "Yes, and Delete Their Messages". Left in place rather than deleted as unrelated cleanup.
+<!-- SECTION:NOTES:END -->
