@@ -319,7 +319,7 @@ Carried forward from the code review so they don't get faithfully reproduced:
 ## 9a. Build status
 
 **All milestones through the SwiftUI app are done** (updated 26 July 2026).
-`Packages/NevermoreKit` builds under Swift 6 strict concurrency; **390 tests
+`Packages/NevermoreKit` builds under Swift 6 strict concurrency; **394 tests
 pass**. The app is used daily against a live ~132,000-message mailbox.
 
 Measured on that mailbox:

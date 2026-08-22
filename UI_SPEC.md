@@ -310,7 +310,12 @@ Enter Full Screen
 
 **Window** — standard, with tabbing.
 
-**Help** — `Nevermore Help`, `Privacy and Data Handling`, `Report an Issue…`.
+**Help** — `Check for Updates…` (Developer ID build only) ·
+`How Nevermore Works` · `Keyboard Shortcuts ⌘?` — then the support site:
+`Frequently Asked Questions` · `Setting Up an App Password` ·
+`Privacy Policy` · `Nevermore Support`. The site links open the published
+pages, which can be corrected without shipping a build and need no GitHub
+account to read.
 
 ### Shortcut summary
 
