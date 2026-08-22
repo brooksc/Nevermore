@@ -1,7 +1,7 @@
 ---
 id: TASK-49
 title: Removing an account leaves its write-ahead log behind
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-21 01:13'
 updated_date: '2026-08-22 03:37'

@@ -3,7 +3,7 @@ id: TASK-52
 title: >-
   A proposal row should carry the action the agent means, not just prose about
   it
-status: In Progress
+status: Done
 assignee:
   - task-52-recommendation
 created_date: '2026-08-22 02:32'

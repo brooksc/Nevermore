@@ -3,7 +3,7 @@ id: TASK-28
 title: >-
   Unsubscribe results sheet hides most of its content, and all of its actions,
   below a silent scroll
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-09 18:58'
 updated_date: '2026-08-22 03:39'
