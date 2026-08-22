@@ -67,34 +67,82 @@ public enum Keychain {
     ///
     /// Measured, not assumed: a binary that isn't on the item's ACL gets
     /// `errSecAuthFailed` here, not the `errSecInteractionNotAllowed` you'd
-    /// expect from the name of the flag. So anything other than "read it" or
-    /// "no such item" counts as a prompt — which also means an unforeseen error
-    /// fails safe, showing an unnecessary explanation rather than letting an
-    /// unexplained system dialog ambush the user.
+    /// expect from the name of the flag. Re-measured on macOS 27: still
+    /// `errSecAuthFailed`. So the read status can only be trusted to say
+    /// "readable" or "not readable", never why.
     ///
-    /// `SecKeychainSetUserInteractionAllowed` is deprecated (SecKeychain as a
-    /// whole is), but the ACL dialog it governs only exists for the file-based
-    /// login keychain — which is exactly where this item lives — so the flag
-    /// still applies. The flag is process-global; keep the window narrow.
+    /// The probe runs in two steps so that "no item" and "item I can't read"
+    /// can never be confused for one another:
+    ///
+    /// 1. An attributes-only read. The ACL guards *decrypting the data*, not
+    ///    reading attributes, so this answers "does an item exist" without any
+    ///    possibility of a dialog. Measured: a binary that is not on the item's
+    ///    ACL still gets `errSecSuccess` here.
+    /// 2. Only if one exists, a data read with user interaction suppressed.
+    ///
+    /// Suppression is still `SecKeychainSetUserInteractionAllowed`, which is
+    /// deprecated along with the rest of SecKeychain. There is no modern
+    /// replacement for *this* dialog: the per-item keys
+    /// (`kSecUseAuthenticationUI`, and `LAContext.interactionNotAllowed` behind
+    /// `kSecUseAuthenticationContext`) reach only the data-protection keychain
+    /// — Apple says so in SecItem.h about the same mechanism's older spelling:
+    /// "on macOS, this attribute only applies to items stored in the Data
+    /// Protection keychain. Legacy keychain items will still activate UI if
+    /// needed." Measured here too: against an item this binary is not on the
+    /// ACL of, adding `kSecUseAuthenticationUI` changes the returned status not
+    /// at all. Swapping the toggle for those keys would not suppress the
+    /// dialog; it would *cause* the one this function exists to predict.
+    ///
+    /// `kSecUseAuthenticationUISkip` is passed anyway — it is the one spelling
+    /// that is not itself deprecated, it is per-item rather than process-wide,
+    /// and it costs nothing (measured: inert on this item today). If the item
+    /// ever moves to the data-protection keychain, it, and not the toggle, is
+    /// what will do the work. Step 1 is what makes it safe to pass: `Skip`
+    /// reports an unreadable item as `errSecItemNotFound`, which on its own
+    /// would read as "nothing saved" and silently predict "no prompt".
+    ///
+    /// The toggle is process-global, so the window is kept narrow and restored
+    /// on every path out.
     public static func readWouldPrompt(for account: String) -> Bool {
+        withUserInteractionSuppressed {
+            var query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
+                kSecReturnAttributes as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne,
+            ]
+            var attributes: CFTypeRef?
+            let exists = SecItemCopyMatching(query as CFDictionary, &attributes)
+            if exists == errSecItemNotFound { return false }  // nothing saved to ask about
+
+            query[kSecReturnAttributes as String] = nil
+            query[kSecReturnData as String] = true
+            query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+            var result: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &result)
+            Log.app.detail(
+                "keychain prompt probe for \(account): exists \(exists), read \(status)")
+            // Anything but a clean read counts as a prompt, so an unforeseen
+            // error fails safe — an unnecessary explanation rather than an
+            // unexplained system dialog ambushing the user.
+            return status != errSecSuccess
+        }
+    }
+
+    /// Runs `body` with the process-wide keychain interaction flag off, so a
+    /// read that *would* put up the ACL dialog fails instead of showing it.
+    ///
+    /// The one call site for the deprecated API, and marked deprecated itself
+    /// so the compiler stops repeating what the comment above already says. It
+    /// is a direct call rather than a `dlsym` lookup on purpose: if Apple ever
+    /// does remove the symbol, that should break the build here, loudly, and
+    /// not turn into a dialog appearing on a user's screen.
+    @available(macOS, deprecated: 10.10, message: "SecKeychain has no modern equivalent here")
+    private static func withUserInteractionSuppressed(_ body: () -> Bool) -> Bool {
         SecKeychainSetUserInteractionAllowed(false)
         defer { SecKeychainSetUserInteractionAllowed(true) }
-
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        Log.app.detail("keychain prompt probe for \(account): status \(status)")
-        switch status {
-        case errSecSuccess: return false  // readable without asking anyone
-        case errSecItemNotFound: return false  // nothing saved — nothing to ask about
-        default: return true
-        }
+        return body()
     }
 
     public static func delete(for account: String) {

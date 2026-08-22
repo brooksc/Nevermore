@@ -1,7 +1,7 @@
 ---
 id: TASK-6
 title: Replace deprecated SecKeychainSetUserInteractionAllowed
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-09 18:51'
 updated_date: '2026-08-22 22:51'
