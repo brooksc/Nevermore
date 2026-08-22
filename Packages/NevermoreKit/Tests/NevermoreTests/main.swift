@@ -4238,7 +4238,6 @@ Harness.suite("Browser queue over MCP") {
     }
 }
 
-<<<<<<< HEAD
 // MARK: - Removing an account takes the whole database with it
 
 Harness.suite("Account removal leaves no database file behind") {
@@ -4460,7 +4459,9 @@ Harness.suite("UnsubscribeReport") {
             expect(UnsubscribeReport.order.contains(bucket), "\(bucket) renders nowhere")
         }
         eq(UnsubscribeReport.order.count, UnsubscribeReportBucket.allCases.count)
-=======
+    }
+}
+
 // MARK: - The action a proposal recommends (TASK-52)
 
 /// Found in use: an agent proposed two cold-outreach senders with reasons
@@ -4686,7 +4687,6 @@ Harness.suite("get_proposal_status reports followed or overrode") {
         expect(
             tool.description.contains("considered disagreement"),
             "and says what to make of it")
->>>>>>> task-52-fix
     }
 }
 

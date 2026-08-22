@@ -33,42 +33,15 @@ All notable changes to Nevermore are recorded here. Format follows
 - **There is no bulk unsubscribe over MCP, and there will not be one.**
   Unsubscribing is irreversible and goes to a third party, so a set of senders
   is unsubscribed only after you have reviewed that exact set in Nevermore and
-  confirmed it. An assistant proposes; you decide.
+  confirmed it, and that confirmation is bound to those senders, good once, and
+  expires. An assistant proposes; you decide.
+- Trashing a sender's messages on an assistant's behalf always asks you first,
+  even below the threshold that lets your own trash go through silently.
 - Connecting an assistant sends sender names and subject lines to that
   assistant's AI model, which may be cloud-hosted. Nothing else about the app
   changes: still no server, no account, no telemetry. See [PRIVACY.md](PRIVACY.md).
 - The Mac App Store build does not include any of this. The sandbox there
   permits outgoing connections only, so the local server cannot run.
-
-### Added
-
-- **An MCP server**, off by default, so an AI agent can read and classify your
-  senders while every action that reaches a sender stays with you. Nine read
-  tools —
-  orientation, filtered sender lists, search, per-sender detail with the parsed
-  unsubscribe targets, subject lines, unsubscribe history, reappeared senders,
-  and the decisions recorded under a context label. Senders are partitioned by
-  how they can be unsubscribed from, so you learn which will need a browser
-  without anything being attempted. Connected through `nevermore-mcp`, a bridge
-  that ships with the direct download only; see the README.
-- **A Proposed collection**, where an agent puts a set of senders — at most 25,
-  each with its one-line reason — for you to go through with the usual keyboard
-  triage. Proposing does nothing to a sender; you decide, and the agent is told
-  what you decided.
-- **A deliberately narrow write surface for agents.** Hiding a sender, recording
-  a classification, regrouping and starting a sync run on their own, because
-  they are local to your Mac and reversible. Unsubscribing from one sender, or
-  trashing a sender's messages, raises the same confirmation your own keystroke
-  would — trash always asks, even below the threshold that lets your own trash
-  go through silently. **There is no bulk unsubscribe over MCP and there will
-  not be one:** a set of senders is unsubscribed only after you have reviewed
-  that exact set in the app and confirmed it, and the confirmation is bound to
-  those senders, good once, and expires. Outcomes come back to the agent per
-  sender, keeping the app's own distinction between *requested* and *confirmed*.
-- Turning it on sends sender names and **subject lines** to whichever AI model
-  the connected client runs, which is usually cloud-hosted and someone else's.
-  That is the one thing Nevermore does that isn't local, and PRIVACY.md now says
-  so rather than leaving it to be discovered.
 
 ## [1.0.0] — 2026-08-01
 
