@@ -1,6 +1,8 @@
 import Foundation
 import Network
 import NevermoreKit
+// For SecKeychainGetUserInteractionAllowed, which the Keychain probe toggles.
+import Security
 // For ExtendedSearchResult/UID/UIDSet, which IMAPBackend.matched(_:) is stated in.
 import SwiftMail
 
@@ -5412,6 +5414,46 @@ Harness.suite("IMAPBackend.matched") {
             IMAPBackend.matched(result).toArray().map(\.value), [10, 11, 12, 40],
             "every matched UID survives, in order")
     }
+}
+
+// MARK: - Keychain prompt prediction
+
+// These run against the maintainer's real login keychain, so they are
+// deliberately read-only: nothing here adds, updates or deletes an item. The
+// account name is one no keychain can hold an item for.
+//
+// What is therefore *not* covered here, and was verified by hand instead (see
+// TASK-6): the case the function exists for — an item that exists but whose ACL
+// excludes this binary. Reproducing it needs two differently signed binaries
+// and a real item, and getting it wrong puts a system dialog on the screen.
+Harness.suite("Keychain.readWouldPrompt") {
+    let absent = "no-such-account@invalid.invalid"
+
+    Harness.test("an account with nothing saved needs no explanation") {
+        expect(
+            !Keychain.readWouldPrompt(for: absent),
+            "no stored item means no dialog to warn about")
+    }
+
+    Harness.test("an account with nothing saved has no password") {
+        eq(Keychain.appPassword(for: absent), nil)
+    }
+
+    // The suppression flag is process-wide: leaving it off would make every
+    // later keychain read in the app fail silently instead of prompting.
+    Harness.test("the probe restores user interaction on the way out") {
+        _ = Keychain.readWouldPrompt(for: absent)
+        expect(userInteractionAllowed(), "interaction is back on after the probe")
+    }
+}
+
+/// Reads back the process-wide flag the probe toggles. The getter is deprecated
+/// with the rest of SecKeychain, and warns here for the same reason the setter
+/// warns in Keychain.swift: there is no modern spelling of this flag.
+func userInteractionAllowed() -> Bool {
+    var state: DarwinBoolean = false
+    guard SecKeychainGetUserInteractionAllowed(&state) == errSecSuccess else { return false }
+    return state.boolValue
 }
 
 exit(Harness.finish())
