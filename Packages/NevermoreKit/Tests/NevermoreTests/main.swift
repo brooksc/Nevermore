@@ -5307,4 +5307,83 @@ Harness.suite("UnsubscribeEngine over a pinned client") {
     }
 }
 
+// MARK: - The backlog offer after a confirmed browser unsubscribe (TASK-23)
+
+Harness.suite("BacklogOffer") {
+    Harness.test("a sender with nothing left to clear is not offered anything") {
+        expect(
+            BacklogOffer(senderName: "Acme", messageCount: 0, isEscalation: false) == nil,
+            "no mail, no offer")
+        expect(
+            BacklogOffer(senderName: "Acme", messageCount: -1, isEscalation: true) == nil,
+            "and a count that cannot happen is still not an offer")
+    }
+
+    Harness.test("the offer names the message count") {
+        guard let offer = BacklogOffer(senderName: "Acme", messageCount: 42, isEscalation: false)
+        else { return expect(false, "expected an offer") }
+        expect(offer.question.contains("42"), "the question says how many: \(offer.question)")
+        eq(offer.acceptLabel, "Delete 42 Messages")
+    }
+
+    Harness.test("one message reads as one message") {
+        guard let offer = BacklogOffer(senderName: "Acme", messageCount: 1, isEscalation: false)
+        else { return expect(false, "expected an offer") }
+        eq(offer.acceptLabel, "Delete 1 Message")
+        expect(offer.question.contains("1 message from"), "singular noun: \(offer.question)")
+        expect(offer.question.contains("is still in your mailbox"), "singular verb agreement")
+    }
+
+    Harness.test("an escalation offers trash and ignore, in the Reappeared row's words") {
+        guard let offer = BacklogOffer(senderName: "Acme", messageCount: 9, isEscalation: true)
+        else { return expect(false, "expected an offer") }
+        eq(offer.acceptLabel, "Trash and Ignore")
+        eq(offer.accept, .trashAndIgnore)
+        expect(offer.question.contains("kept mailing"), "says why: \(offer.question)")
+        expect(offer.question.contains("9"), "and still names the count: \(offer.question)")
+    }
+
+    Harness.test("a first-time unsubscribe trashes without ignoring") {
+        eq(
+            BacklogOffer(senderName: "Acme", messageCount: 9, isEscalation: false)?.accept,
+            .trash)
+    }
+
+    // The in-sheet offer stands in for the Settings trash-confirmation dialog
+    // instead of being followed by one, which is only honest while it says what
+    // that dialog says.
+    Harness.test("every offer states the count and where the mail goes") {
+        for count in [1, 2, 17, 1_000] {
+            for escalation in [false, true] {
+                guard let offer = BacklogOffer(
+                    senderName: "Acme", messageCount: count, isEscalation: escalation)
+                else { return expect(false, "expected an offer") }
+                expect(
+                    offer.namesWhatItWillDo,
+                    "\(count)/\(escalation) describes itself: \(offer.question)")
+                expect(
+                    offer.question.contains("Trash"),
+                    "and names the destination: \(offer.question)")
+            }
+        }
+    }
+
+    Harness.test("declining is offered as plainly as accepting") {
+        guard let offer = BacklogOffer(senderName: "Acme", messageCount: 3, isEscalation: false)
+        else { return expect(false, "expected an offer") }
+        eq(offer.declineLabel, "Keep Messages")
+    }
+
+    Harness.test("the toast fallback carries the count in its button") {
+        guard let plain = BacklogOffer(senderName: "Acme", messageCount: 12, isEscalation: false),
+            let escalated = BacklogOffer(senderName: "Acme", messageCount: 12, isEscalation: true)
+        else { return expect(false, "expected offers") }
+        eq(plain.toastMessage, "Unsubscribed from Acme")
+        eq(plain.toastActionLabel, "Delete 12 Messages")
+        // A toast has no room for the question, so the escalation's button has
+        // to carry the count the sheet's question would have carried.
+        eq(escalated.toastActionLabel, "Trash 12 and Ignore")
+    }
+}
+
 exit(Harness.finish())

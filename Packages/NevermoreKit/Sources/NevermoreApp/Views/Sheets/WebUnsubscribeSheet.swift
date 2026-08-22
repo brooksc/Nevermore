@@ -97,11 +97,18 @@ struct WebUnsubscribeSheet: View {
     /// the window for twelve seconds while the user was looking at the list,
     /// and closing the sheet felt like it should have been the answer.
     private func close() {
-        if recorded {
-            dismiss()
-        } else {
+        guard recorded else {
             askOutcome = true
+            return
         }
+        // Closing on the result step leaves the backlog question unanswered —
+        // "not now" rather than "keep them". The toast is the fallback for that
+        // one exit, and only for it: re-offering after an explicit Keep Messages
+        // would be the nag this task exists to remove, not a second chance.
+        if showingResult, offer != nil {
+            model.offerBacklogDelete(current.id, isEscalation: current.isEscalation)
+        }
+        dismiss()
     }
 
     /// The sender's page said it worked.
@@ -117,7 +124,7 @@ struct WebUnsubscribeSheet: View {
         // The delete offer used to be a twelve-second toast in the status bar
         // while attention was on the sheet closing (TASK-23). It belongs in the
         // interaction that just happened.
-        if current.messageCount > 0 || current.queue != nil {
+        if offer != nil || current.queue != nil {
             showingResult = true
         } else {
             advance()
@@ -232,28 +239,31 @@ struct WebUnsubscribeSheet: View {
                 .font(.system(size: 44)).foregroundStyle(.green)
             Text("Unsubscribed from \(current.name)").font(.title3.weight(.semibold))
 
-            if current.messageCount > 0 {
-                Text(backlogQuestion).font(.callout).foregroundStyle(.secondary)
+            if let offer {
+                Text(offer.question).font(.callout).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center).frame(width: 420)
                 HStack(spacing: 10) {
-                    Button("Keep Messages") { advance() }
-                    Button(deleteLabel) {
+                    Button(offer.declineLabel) { advance() }
+                    Button(offer.acceptLabel) {
                         // Captured now: `advance` swaps `current` underneath.
                         let id = current.id
-                        let escalation = current.isEscalation
+                        let accept = offer.accept
                         advance()
+                        // No second confirmation: the button above named the
+                        // count and where the mail goes, which is what the
+                        // Settings trash dialog exists to say
+                        // (`BacklogOffer.namesWhatItWillDo`).
                         Task {
-                            if escalation {
-                                await model.trashAndIgnore(id)
-                            } else {
-                                await model.deleteMessages(for: [id])
+                            switch accept {
+                            case .trash: await model.deleteMessages(for: [id])
+                            case .trashAndIgnore: await model.trashAndIgnore(id)
                             }
                         }
                     }
                     .buttonStyle(.borderedProminent)
                 }
             } else {
-                Text("There is no mail left from this sender to clear.")
+                Text(BacklogOffer.nothingToClear)
                     .font(.callout).foregroundStyle(.secondary)
                 Button((current.queue?.remaining ?? 0) > 0 ? "Next Sender" : "Done") { advance() }
                     .buttonStyle(.borderedProminent)
@@ -263,24 +273,13 @@ struct WebUnsubscribeSheet: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var backlogQuestion: String {
-        let count = current.messageCount.formatted()
-        if current.isEscalation {
-            // A sender that already ignored one unsubscribe is the one you most
-            // want gone, and this is the wording the Reappeared row uses.
-            return "\(current.name) kept mailing after the last unsubscribe. "
-                + "\(count) of their messages are still in your mailbox."
-        }
-        return "\(count) message\(current.messageCount == 1 ? "" : "s") from this sender "
-            + "\(current.messageCount == 1 ? "is" : "are") still in your mailbox. "
-            + "Deleted mail moves to your provider's Trash."
-    }
-
-    private var deleteLabel: String {
-        current.isEscalation
-            ? "Trash and Ignore"
-            : "Delete \(current.messageCount.formatted()) Message"
-                + (current.messageCount == 1 ? "" : "s")
+    /// The backlog question for the sender on screen, or nil when they have no
+    /// mail left to clear.
+    private var offer: BacklogOffer? {
+        BacklogOffer(
+            senderName: current.name,
+            messageCount: current.messageCount,
+            isEscalation: current.isEscalation)
     }
 
     // MARK: - Footer

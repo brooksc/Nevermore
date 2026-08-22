@@ -1951,13 +1951,29 @@ final class AppModel {
         // succeeds; the manual flow didn't offer it at all, so finishing in the
         // browser left every message behind with no hint that deleting was even
         // an option. Offer, don't assume — this is the user's mail.
-        guard offerDelete, confirmed, !group.messages.isEmpty else { return }
-        let count = group.messages.count
-        showToast(
-            "Unsubscribed from \(group.displayName)",
-            actionLabel: "Delete \(count.formatted()) Message\(count == 1 ? "" : "s")"
-        ) { [weak self] in
-            await self?.trash([id])
+        guard offerDelete, confirmed else { return }
+        offerBacklogDelete(id, isEscalation: false)
+    }
+
+    /// Offer to clear a sender's backlog from the status bar.
+    ///
+    /// The browser sheet asks this in the sheet, where the user is looking, and
+    /// this is the fallback for the one exit that leaves the question unanswered:
+    /// closing the sheet on the result step. Deliberately not fired when the user
+    /// answered "Keep Messages" — an offer that comes back after being declined
+    /// is a nag, and the user has already said no.
+    func offerBacklogDelete(_ id: GroupID, isEscalation: Bool) {
+        guard let group = self.group(for: id),
+            let offer = BacklogOffer(
+                senderName: group.displayName,
+                messageCount: group.messages.count,
+                isEscalation: isEscalation)
+        else { return }
+        showToast(offer.toastMessage, actionLabel: offer.toastActionLabel) { [weak self] in
+            switch offer.accept {
+            case .trash: await self?.trash([id])
+            case .trashAndIgnore: await self?.trashAndIgnore(id)
+            }
         }
     }
 
