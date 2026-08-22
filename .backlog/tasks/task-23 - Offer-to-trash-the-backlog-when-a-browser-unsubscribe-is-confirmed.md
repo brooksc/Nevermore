@@ -1,7 +1,7 @@
 ---
 id: TASK-23
 title: Offer to trash the backlog when a browser unsubscribe is confirmed
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-08-10 01:46'
 updated_date: '2026-08-22 22:23'
