@@ -8,6 +8,18 @@ All notable changes to Nevermore are recorded here. Format follows
 
 ### Added
 
+- **Guided app-password setup, for the provider you actually use.** The sign-in
+  screen now asks for the credential by your provider's own name — an
+  app-specific password on iCloud, an app password on Gmail — mentions
+  two-factor authentication only where the provider requires it first, and links
+  to a step-by-step page for that provider. There is a page for Gmail, iCloud,
+  Yahoo, Fastmail, AOL, and one for custom domains, on the support site so they
+  can be corrected when a provider moves the setting.
+- **A failed sign-in says what usually causes it.** Providers reject your
+  ordinary account password with exactly the same error as a mistyped app
+  password, so "authentication failed" sent people back to retype the one thing
+  that cannot work. The message now names the app-password policy as the likely
+  cause and links the guide for that provider.
 - **Demo mode seeds an unsubscribe history**, so Reappeared is no longer always
   empty for someone meeting the app through the demo.
 - **An MCP server, so an AI assistant can help you triage senders.** Off by

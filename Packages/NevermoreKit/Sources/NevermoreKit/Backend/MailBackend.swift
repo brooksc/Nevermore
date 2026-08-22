@@ -33,13 +33,11 @@ public enum MailBackendError: Error, LocalizedError {
         case .notConnected:
             return "Not connected to the mail server."
         case .authenticationFailed(let detail):
-            // Workspace admins can disable app passwords org-wide, which
-            // surfaces here as a plain auth failure.
-            return """
-                Sign-in failed: \(detail)
-                Check that 2-Step Verification is on and the app password is current. \
-                Workspace administrators can disable app passwords for the whole organisation.
-                """
+            // Just the server's answer. What to do about it depends entirely on
+            // the provider — 2-Step Verification and org-wide policy are Google's
+            // words, not Fastmail's — so the advice lives in `AppPasswordGuide`
+            // and is added by whoever knows which provider this account uses.
+            return "Sign-in failed: \(detail)"
         case .mailboxUnavailable(let name):
             return "Could not open the mailbox '\(name)'."
         case .sendFailed(let detail):

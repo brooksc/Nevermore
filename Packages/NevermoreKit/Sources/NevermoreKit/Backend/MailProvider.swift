@@ -42,7 +42,10 @@ public struct MailProvider: Sendable, Hashable, Identifiable {
     public static let icloud = MailProvider(
         id: "icloud", displayName: "iCloud Mail",
         imapHost: "imap.mail.me.com", smtpHost: "smtp.mail.me.com",
-        appPasswordURL: URL(string: "https://appleid.apple.com/account/manage"),
+        // account.apple.com, not appleid.apple.com: Apple's own app-specific
+        // password documentation (HT102654) names the former, and the latter is
+        // now only a redirect to it.
+        appPasswordURL: URL(string: "https://account.apple.com/account/manage"),
         domains: ["icloud.com", "me.com", "mac.com"])
 
     public static let yahoo = MailProvider(
