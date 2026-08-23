@@ -1,4 +1,5 @@
 import Foundation
+import SwiftMail
 
 /// Header fields the sync asks IMAP for beyond the fixed set, and the switches
 /// that decide whether it asks.
@@ -32,4 +33,34 @@ public enum SyncHeaderFields {
     public static var optional: [String] {
         fetchesAuthenticationResults ? [authenticationResults] : []
     }
+
+    /// The per-message attributes the sync requests, beside the header fields.
+    ///
+    /// Named here rather than written inline at the call site so the one thing
+    /// that decides TASK-29's cost is stated in one place and can be asserted
+    /// against.
+    ///
+    /// **`RFC822.SIZE` is not one of the switches above, and deliberately not.**
+    ///
+    /// TASK-29 shows what senders cost in storage, and the obvious worry is that
+    /// it repeats TASK-30's problem: another field on every message, at a price
+    /// only TASK-36 can measure on a mailbox nobody here has. It does not, and
+    /// the reason is structural rather than a judgement about what is
+    /// affordable.
+    ///
+    /// `attributes` is `.slim`, which SwiftMail defines as
+    /// `[.envelope, .internalDate, .flags, .size]`. `.size` *is* `RFC822.SIZE`.
+    /// The sync has been asking the server for it, and SwiftMail has been
+    /// parsing it into `MessageInfo.size`, since before TASK-29 existed —
+    /// `IMAPBackend.convert` simply threw the value away. Reading it changes no
+    /// FETCH command, adds no header field, and moves no extra bytes: the
+    /// request is identical before and after, which is a fact about the code
+    /// rather than a measurement, and `SyncHeaderFieldsSuite` asserts it.
+    ///
+    /// So there is nothing here for TASK-36 to price. What TASK-29 *does* cost
+    /// is a nullable column and a backfill gap: messages stored before the value
+    /// was kept have no size until they are fetched again, and incremental sync
+    /// only re-reads a two-day overlap. That gap is visible in the UI as
+    /// "Unknown" rather than papered over — see `SenderStorage`.
+    public static let attributes: FetchMessageInfoOptions = .slim
 }

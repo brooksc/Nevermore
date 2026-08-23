@@ -112,6 +112,15 @@ Nevermore is the opposite shape:
   answered yes. Senders whose unsubscribe is simply handled by a bulk-mail
   provider get a note explaining that and nothing more, because that is how most
   legitimate mail works and a warning that fires on everything is worthless.
+- **What each sender costs you in storage.** A *Size* column totals the messages
+  Nevermore holds for each sender, and the table sorts by it — so the twelve
+  senders eating three gigabytes of a fifteen-gigabyte free tier are one click
+  from the top of the list, and one keystroke from being trashed. The size comes
+  from IMAP `RFC822.SIZE`, which is metadata like every other field the app
+  reads: it is how big a message is, never what is in it, and it arrives in the
+  fetch the app was already making. Sizes are rounded rather than reported to
+  the byte, a sender whose messages have no size on file reads *Unknown* rather
+  than a misleading zero, and a total that leaves messages out says *at least*.
 - **Trash with undo.** Messages move to your provider's Trash and `⌘Z` puts
   them back.
 - **Sync counts that add up.** A sync always finds more messages on the server
@@ -170,7 +179,7 @@ drag Nevermore to Applications. Signed and notarized by Apple.
 ```bash
 cd Packages/NevermoreKit
 swift build                       # build everything
-swift test                        # run the test suite (523 tests)
+swift test                        # run the test suite (549 tests)
 ./make-app.sh release             # produce a signed Nevermore.app
 ./make-dmg.sh --notarize          # produce a notarized, stapled DMG
 ```

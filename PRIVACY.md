@@ -33,9 +33,18 @@ It reads **message headers only** — never message bodies. Specifically:
 | `List-ID`, `Auto-Submitted`, `Precedence` | Bulk-mail signals |
 | `Delivered-To` / `To` | So a `mailto:` unsubscribe is sent from the address the mail was delivered to |
 | `Message-ID` | To find a message again in Trash if you undo, and to open it in webmail |
+| `RFC822.SIZE` | To tell you what a sender is costing you in mailbox storage |
 
 Headers are fetched with IMAP `BODY.PEEK`, which means **reading them does not
 mark your mail as read**.
+
+`RFC822.SIZE` is worth a word, because "the app reads message sizes" can sound
+like a change of posture. It is not one. The size is a count of octets the
+server keeps alongside the message; it says how big a message is and nothing at
+all about what is in it, and reading it involves no part of the body. It is also
+not a new request: it is part of the same IMAP fetch the app has always made, so
+nothing extra is asked of your provider or sent over the wire. Headers-only
+holds exactly as before.
 
 ## What is stored, and where
 

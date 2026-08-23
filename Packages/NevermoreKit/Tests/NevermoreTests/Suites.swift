@@ -6480,3 +6480,283 @@ struct SenderForecastTests {
         eq(SenderForecast.make(for: group, now: reportNow), makeForecast(messages))
     }
 }
+
+// MARK: - What senders cost in storage (TASK-29)
+
+@Suite("Per-sender storage totals")
+struct SenderStorageTotalsTests {
+    @Test("a fully measured sender totals its messages") func aFullyMeasuredSenderTotalsItsMessages() {
+        let storage = sizedGroup("a.com", [1_000, 2_000, 3_500]).storage
+        eq(storage.knownBytes, 6_500)
+        eq(storage.knownMessages, 3)
+        eq(storage.unknownMessages, 0)
+        expect(!storage.isUnknown)
+        expect(!storage.isPartial)
+    }
+
+    // The whole point of the type. A sender with no sizes on file must not
+    // render as "0 bytes", which reads as "this sender costs you nothing" —
+    // the opposite of what an unmeasured sender may turn out to be.
+    @Test("an unmeasured sender is Unknown, never zero") func anUnmeasuredSenderIsUnknownNeverZero() {
+        let storage = sizedGroup("a.com", [nil, nil]).storage
+        expect(storage.isUnknown)
+        eq(storage.unknownMessages, 2)
+        eq(storage.summary(locale: enUS), "Unknown")
+        expect(!storage.summary(locale: enUS).contains("0"))
+        expect(!storage.summary(locale: enUS).contains("byte"))
+    }
+
+    @Test("a partly measured sender reports a floor, not a total") func aPartlyMeasuredSenderReportsAFloorNotATotal() {
+        let storage = sizedGroup("a.com", [4_000, nil, 6_000, nil]).storage
+        expect(storage.isPartial)
+        eq(storage.knownBytes, 10_000)
+        eq(storage.knownMessages, 2)
+        eq(storage.unknownMessages, 2)
+        expect(storage.summary(locale: enUS).hasPrefix("at least "))
+    }
+
+    @Test("the caveat names the messages left out") func theCaveatNamesTheMessagesLeftOut() {
+        let caveat = sizedGroup("a.com", [4_000, nil, nil]).storage.caveat ?? ""
+        expect(caveat.contains("2 messages"), caveat)
+        expect(caveat.contains("no size on file"), caveat)
+    }
+
+    // A total that counts only what is still in the mailbox is not a total of
+    // what the sender has ever cost. Trashed mail is gone, and saying so is the
+    // difference between a measurement and a boast.
+    @Test("even a complete total says it counts only stored messages") func evenACompleteTotalSaysItCountsOnlyStoredMessages() {
+        let caveat = sizedGroup("a.com", [4_000, 6_000]).storage.caveat ?? ""
+        expect(caveat.contains("already deleted"), caveat)
+        expect(!caveat.contains("no size on file"), caveat)
+    }
+
+    @Test("an unmeasured sender's caveat explains where sizes come from") func anUnmeasuredSendersCaveatExplainsWhereSizesComeFrom() {
+        let caveat = sizedGroup("a.com", [nil]).storage.caveat ?? ""
+        expect(caveat.contains("1 message"), caveat)
+        // Points at the deliberate control that already exists rather than
+        // offering to run it here: a full re-sync is minutes of work on a large
+        // mailbox and is not a side effect a tooltip should propose.
+        expect(caveat.contains("Settings ▸ Full Resync"), caveat)
+        expect(!caveat.contains("Click"), caveat)
+    }
+
+    @Test("a single message group pluralises correctly") func aSingleMessageGroupPluralisesCorrectly() {
+        let caveat = sizedGroup("a.com", [4_000, nil]).storage.caveat ?? ""
+        expect(caveat.contains("1 message with"), caveat)
+        expect(!caveat.contains("1 messages"), caveat)
+    }
+}
+
+@Suite("Combining storage across senders")
+struct CombiningStorageAcrossSendersTests {
+    @Test("a selection sums bytes and unknowns together") func aSelectionSumsBytesAndUnknownsTogether() {
+        let total = SenderStorage.combining([
+            sizedGroup("a.com", [1_000, nil]).storage,
+            sizedGroup("b.com", [2_000, 3_000]).storage,
+        ])
+        eq(total.knownBytes, 6_000)
+        eq(total.knownMessages, 3)
+        eq(total.unknownMessages, 1)
+        // One unmeasured message anywhere makes the whole total a floor.
+        expect(total.isPartial)
+    }
+
+    @Test("combining nothing is not the same as combining zeroes") func combiningNothingIsNotTheSameAsCombiningZeroes() {
+        let empty = SenderStorage.combining([SenderStorage]())
+        eq(empty, SenderStorage.none)
+        expect(empty.isUnknown)
+        eq(empty.summary(locale: enUS), "Unknown")
+    }
+
+    @Test("combining only unmeasured senders stays unknown") func combiningOnlyUnmeasuredSendersStaysUnknown() {
+        let total = SenderStorage.combining([
+            sizedGroup("a.com", [nil]).storage, sizedGroup("b.com", [nil, nil]).storage,
+        ])
+        expect(total.isUnknown)
+        eq(total.unknownMessages, 3)
+        eq(total.summary(locale: enUS), "Unknown")
+    }
+
+    @Test("none is an identity for +") func noneIsAnIdentityForPlus() {
+        let one = sizedGroup("a.com", [7, nil]).storage
+        eq(one + .none, one)
+        eq(.none + one, one)
+    }
+}
+
+@Suite("Presenting a size")
+struct PresentingASizeTests {
+    // AC #4. RFC822.SIZE is the server's octet count for the message as it
+    // would transmit it, which is not exactly what the account is billed for.
+    // Rounding to a couple of significant figures is what keeps the app from
+    // dressing an approximation up as an audit.
+    @Test("sizes are rounded, not reported to the byte") func sizesAreRoundedNotReportedToTheByte() {
+        eq(SenderStorage.format(bytes: 3_149_217_744, locale: enUS), "3.15 GB")
+        eq(SenderStorage.format(bytes: 1_000_000, locale: enUS), "1 MB")
+        expect(!SenderStorage.format(bytes: 3_149_217_744, locale: enUS).contains("217"))
+    }
+
+    // The 1000-based scale, because a mail provider's quota is quoted that way:
+    // a "15 GB" free tier is 15 x 10^9, not 15 x 2^30. Using the binary scale
+    // would understate how much of the quota a sender is eating.
+    @Test("a gigabyte is the same gigabyte the provider quotes") func aGigabyteIsTheSameGigabyteTheProviderQuotes() {
+        eq(SenderStorage.format(bytes: 15_000_000_000, locale: enUS), "15 GB")
+    }
+
+    @Test("the floor qualifier is attached to the size, not buried") func theFloorQualifierIsAttachedToTheSizeNotBuried() {
+        let partial = sizedGroup("a.com", [1_000_000, nil]).storage
+        eq(partial.summary(locale: enUS), "at least 1 MB")
+        let whole = sizedGroup("b.com", [1_000_000]).storage
+        eq(whole.summary(locale: enUS), "1 MB")
+    }
+}
+
+@Suite("Sorting senders by size")
+struct SortingSendersBySizeTests {
+    @Test("largest first puts the biggest sender at the top") func largestFirstPutsTheBiggestSenderAtTheTop() {
+        let groups = [
+            sizedGroup("small.com", [1_000]),
+            sizedGroup("big.com", [9_000_000]),
+            sizedGroup("mid.com", [50_000]),
+        ]
+        eq(
+            groups.sorted { $0.storage.sortKey > $1.storage.sortKey }.map(\.id.key),
+            ["big.com", "mid.com", "small.com"])
+    }
+
+    // Not an accident of Int being zero-initialised: an unmeasured sender is
+    // ranked where the app is making no claim about it, and the row still reads
+    // "Unknown" rather than pretending to be the smallest sender there is.
+    @Test("an unmeasured sender ranks last, and still reads Unknown") func anUnmeasuredSenderRanksLastAndStillReadsUnknown() {
+        let unknown = sizedGroup("unknown.com", [nil, nil])
+        let groups = [unknown, sizedGroup("small.com", [1_000])]
+        let order = groups.sorted { $0.storage.sortKey > $1.storage.sortKey }
+        eq(order.map(\.id.key), ["small.com", "unknown.com"])
+        eq(order.last?.storage.summary(locale: enUS), "Unknown")
+    }
+
+    @Test("a partly measured sender ranks on what is known") func aPartlyMeasuredSenderRanksOnWhatIsKnown() {
+        // 5 MB measured plus 900 unmeasured messages could really be the
+        // largest sender in the mailbox. It ranks below the 9 MB one anyway,
+        // because ranking it higher would be a guess. The "at least" in the
+        // cell is what tells the user the ordering may be understating it.
+        let partial = sizedGroup("partial.com", [5_000_000] + Array(repeating: nil, count: 900))
+        let known = sizedGroup("known.com", [9_000_000])
+        eq(
+            [partial, known].sorted { $0.storage.sortKey > $1.storage.sortKey }.map(\.id.key),
+            ["known.com", "partial.com"])
+        expect(partial.storage.summary(locale: enUS).hasPrefix("at least"))
+    }
+}
+
+@Suite("Message size storage and fetch")
+struct MessageSizeStorageAndFetchTests {
+    // The claim TASK-29 rests on, stated as a test rather than a comment.
+    //
+    // Unlike Authentication-Results, RFC822.SIZE needed no new field and no
+    // measurement from TASK-36: `.slim` is what the sync has always requested
+    // and `.size` *is* RFC822.SIZE, so the value was already crossing the wire
+    // and being parsed into MessageInfo.size — IMAPBackend just discarded it.
+    // If somebody narrows the attribute set, this fails and says why.
+    @Test("the fetch already asks for RFC822.SIZE, so reading it costs nothing new") func theFetchAlreadyAsksForRFC822SizeSoReadingItCostsNothingNew() {
+        eq(SyncHeaderFields.attributes, FetchMessageInfoOptions.slim)
+        expect(SyncHeaderFields.attributes.contains(.size))
+        // And no header field was added to pay for it: the header list is still
+        // exactly what TASK-30 left behind.
+        expect(SyncHeaderFields.optional.isEmpty)
+    }
+
+    @Test("a size survives a store round-trip") func aSizeSurvivesAStoreRoundTrip() {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([makeMessage(1, from: "a@x.com", byteSize: 123_456)])
+            eq(try store.allMessages().first?.byteSize, 123_456)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    // NULL is "not known", and it has to come back as nil rather than 0 — the
+    // store is where a zero would be introduced if anywhere.
+    @Test("an unknown size round-trips as unknown, not as zero") func anUnknownSizeRoundTripsAsUnknownNotAsZero() {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([makeMessage(1, from: "a@x.com", byteSize: nil)])
+            let read = try store.allMessages().first
+            expect(read?.byteSize == nil, "got \(String(describing: read?.byteSize))")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    // AC #3, the honest half. There is no bulk backfill: a row stored before
+    // sizes were kept stays unknown until that message is fetched again, and
+    // incremental sync only re-reads a two-day overlap. What this proves is that
+    // a re-fetch *does* fill it in, so the gap closes for real rather than
+    // needing the cache thrown away.
+    @Test("re-syncing a message fills in a size it did not have") func reSyncingAMessageFillsInASizeItDidNotHave() {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([makeMessage(1, from: "a@x.com", byteSize: nil)])
+            try store.upsert([makeMessage(1, from: "a@x.com", byteSize: 90_000)])
+            eq(try store.allMessages().first?.byteSize, 90_000)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    // The COALESCE, and the reason for it: a message's size does not change
+    // after delivery, so a fetch that omits it should leave the stored value
+    // alone rather than replacing a fact with a blank.
+    @Test("a sync that reports no size does not erase one already stored") func aSyncThatReportsNoSizeDoesNotEraseOneAlreadyStored() {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([makeMessage(1, from: "a@x.com", byteSize: 90_000)])
+            try store.upsert([makeMessage(1, from: "a@x.com", byteSize: nil)])
+            eq(try store.allMessages().first?.byteSize, 90_000)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    @Test("sizes reach the group total through the store") func sizesReachTheGroupTotalThroughTheStore() {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([
+                makeMessage(1, from: "n@a.com", byteSize: 1_000),
+                makeMessage(2, from: "n@a.com", byteSize: 2_000),
+                makeMessage(3, from: "n@a.com", byteSize: nil),
+            ])
+            let groups = Grouping().group(try store.allMessages())
+            let storage = SenderStorage.combining(groups.map(\.storage))
+            eq(storage.knownBytes, 3_000)
+            eq(storage.unknownMessages, 1)
+        } catch { expect(false, "threw: \(error)") }
+    }
+}
+
+@Suite("The demo mailbox has sizes")
+struct TheDemoMailboxHasSizesTests {
+    // Demo mode is what an App Review reviewer sees, so the storage column has
+    // to have something in it — and has to show the honest states too, not just
+    // the flattering one.
+    @Test("demo senders differ by orders of magnitude") func demoSendersDifferByOrdersOfMagnitude() {
+        let groups = Grouping().group(DemoData.messages())
+        let sizes = groups.map(\.storage).filter { !$0.isUnknown }.map(\.knownBytes)
+        expect(sizes.count > 10, "only \(sizes.count) measured senders")
+        expect((sizes.max() ?? 0) > 50 * (sizes.min() ?? 1), "sizes too uniform")
+    }
+
+    @Test("the demo shows a partial total as well as complete ones") func theDemoShowsAPartialTotalAsWellAsCompleteOnes() {
+        let storages = Grouping().group(DemoData.messages()).map(\.storage)
+        expect(storages.contains { $0.isPartial }, "no partly measured sender")
+        expect(storages.contains { !$0.isPartial && !$0.isUnknown }, "no fully measured sender")
+    }
+
+    @Test("the demo mailbox is worth clearing out") func theDemoMailboxIsWorthClearingOut() {
+        let total = SenderStorage.combining(
+            Grouping().group(DemoData.messages()).map(\.storage))
+        // The premise of the feature: the number has to land in a unit a person
+        // reacts to. The demo is ~90 messages, so it will not reach gigabytes
+        // and should not be inflated until it does — but it must not read in
+        // kilobytes either, or the column looks like it is measuring nothing.
+        expect(total.knownBytes > 10_000_000, "only \(total.knownBytes) bytes")
+        let summary = total.summary(locale: enUS)
+        expect(summary.hasSuffix(" MB") || summary.hasSuffix(" GB"), summary)
+        // And it is a floor, because some demo senders are deliberately
+        // unmeasured — the state a real mailbox is in the day this ships.
+        expect(summary.hasPrefix("at least "), summary)
+    }
+}

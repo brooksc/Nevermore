@@ -30,6 +30,16 @@ public struct EmailMessage: Hashable, Sendable, Identifiable {
     /// until TASK-36 has measured what asking for it costs on a real mailbox.
     /// See `SyncHeaderFields`.
     public let authentication: AuthenticationResults?
+    /// IMAP `RFC822.SIZE` — the server's octet count for this message (TASK-29).
+    ///
+    /// Metadata, not content: how big the message is, never what is in it. The
+    /// sync gets it without asking for anything extra, because it is part of the
+    /// attribute set the fetch already requests — see `SyncHeaderFields.messageSize`.
+    ///
+    /// Nil where no size is on file: a message stored before the app read sizes,
+    /// or a server that did not report one. Nil is not zero, and must never be
+    /// shown as zero — `SenderStorage` is what enforces that.
+    public let byteSize: Int?
 
     public var id: MessageUID { uid }
     public var canUnsubscribe: Bool { unsubscribe != nil }
@@ -44,7 +54,8 @@ public struct EmailMessage: Hashable, Sendable, Identifiable {
         deliveredTo: String = "",
         messageId: String = "",
         listID: String? = nil,
-        authentication: AuthenticationResults? = nil
+        authentication: AuthenticationResults? = nil,
+        byteSize: Int? = nil
     ) {
         self.uid = uid
         self.sender = sender
@@ -56,6 +67,7 @@ public struct EmailMessage: Hashable, Sendable, Identifiable {
         self.messageId = messageId
         self.listID = listID
         self.authentication = authentication
+        self.byteSize = byteSize
     }
 }
 

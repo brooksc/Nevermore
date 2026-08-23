@@ -60,13 +60,30 @@ struct StatusBarView: View {
             // in, and to read "0 selected" for an Unsubscribed row whose
             // messages are gone.
             if model.selectedCount == 0 {
-                Text("\(model.visibleIDs.count) senders · \(model.totalMessages) messages")
+                let storage = model.visibleStorage
+                Text(
+                    "\(model.visibleIDs.count) senders · \(model.totalMessages) messages"
+                        + size(storage))
+                    .help(storage.caveat ?? "")
             } else {
                 let msgs = model.selectedGroups.reduce(0) { $0 + $1.total }
-                Text("\(model.selectedCount) selected · \(msgs) messages")
+                let storage = model.selectedStorage
+                Text("\(model.selectedCount) selected · \(msgs) messages" + size(storage))
                     .foregroundStyle(.primary)
+                    .help(storage.caveat ?? "")
             }
         }
+    }
+
+    /// The storage clause of a counts line, or nothing at all.
+    ///
+    /// Omitted rather than shown as "Unknown" when no size is on file: the
+    /// status bar is a running summary, and a collection that has never been
+    /// re-synced would otherwise carry a permanent apology in it. The Size
+    /// column is where a per-sender unknown has to be stated, because there a
+    /// blank could be mistaken for zero.
+    private func size(_ storage: SenderStorage) -> String {
+        storage.isUnknown ? "" : " · \(storage.summary())"
     }
 
     @ViewBuilder

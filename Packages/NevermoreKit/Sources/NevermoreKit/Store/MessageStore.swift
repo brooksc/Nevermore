@@ -162,6 +162,32 @@ public final class MessageStore: Sendable {
                 t.add(column: "authResults", .text)
             }
         }
+
+        // IMAP RFC822.SIZE, so the app can say what a sender costs in storage
+        // (TASK-29). Unlike v6 this column is written from the day it lands:
+        // the fetch already asks for the attribute, so every sync from now on
+        // supplies a value.
+        //
+        // If you came here to find out what this field costs to fetch: nothing.
+        // The FETCH command is unchanged. `IMAPBackend.fetch` asks for `.slim`,
+        // which SwiftMail defines as `[.envelope, .internalDate, .flags,
+        // .size]`, and `.size` is RFC822.SIZE — the server has been sending it
+        // on every sync since long before this column existed, and `convert`
+        // was discarding it. No header field was added and there is nothing
+        // here for TASK-36 to price. `SyncHeaderFields.attributes` is where
+        // that is stated in full, and a test asserts it.
+        //
+        // Nullable, and it has to be. Rows already in an existing database were
+        // written before the value was kept, and forward-only migrations mean
+        // there is nothing to backfill them from — incremental sync re-reads
+        // only a two-day overlap, so an old row stays NULL until a full
+        // re-sync. NULL therefore means "not known", which is a different
+        // statement from 0 and is presented differently.
+        m.registerMigration("v7-message-size") { db in
+            try db.alter(table: "message") { t in
+                t.add(column: "byteSize", .integer)
+            }
+        }
         return m
     }
 
@@ -206,8 +232,8 @@ public final class MessageStore: Sendable {
                         INSERT INTO message
                           (uid, senderAddress, senderHost, senderName, subject, receivedAt,
                            isUnread, unsubscribeRaw, unsubscribePost, deliveredTo, syncedAt,
-                           messageId, listId, authResults)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           messageId, listId, authResults, byteSize)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(uid) DO UPDATE SET
                           isUnread = excluded.isUnread,
                           syncedAt = excluded.syncedAt,
@@ -222,7 +248,13 @@ public final class MessageStore: Sendable {
                           -- fetched when SyncHeaderFields says so, so a sync
                           -- with it off supplies NULL, and letting NULL win
                           -- would throw away a verdict already on file.
-                          authResults = COALESCE(excluded.authResults, message.authResults)
+                          authResults = COALESCE(excluded.authResults, message.authResults),
+                          -- COALESCE for the same reason: a server that answers
+                          -- one fetch without RFC822.SIZE should not erase a
+                          -- size an earlier fetch did report. A message's size
+                          -- does not change once it has been delivered, so the
+                          -- older value is as good as a new one.
+                          byteSize = COALESCE(excluded.byteSize, message.byteSize)
                         """,
                     arguments: [
                         Int(m.uid.value), m.sender.address, m.sender.host, m.sender.displayName,
@@ -241,6 +273,7 @@ public final class MessageStore: Sendable {
                         // reason as the unsubscribe one: a parser fix then
                         // reaches rows already written.
                         m.authentication?.raw,
+                        m.byteSize,
                     ])
             }
             let after = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM message") ?? 0
@@ -310,7 +343,8 @@ public final class MessageStore: Sendable {
             deliveredTo: row["deliveredTo"] ?? "",
             messageId: row["messageId"] ?? "",
             listID: row["listId"],
-            authentication: AuthenticationResults(header: row["authResults"])
+            authentication: AuthenticationResults(header: row["authResults"]),
+            byteSize: row["byteSize"]
         )
     }
 

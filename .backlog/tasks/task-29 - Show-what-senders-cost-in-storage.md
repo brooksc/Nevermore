@@ -5,7 +5,7 @@ status: Done
 assignee:
   - task-29-storage
 created_date: '2026-08-10 01:49'
-updated_date: '2026-08-23 20:39'
+updated_date: '2026-08-23 20:42'
 labels:
   - product
 dependencies:
@@ -144,4 +144,29 @@ a message is, never what is in it, and no extra request is made. Repeated in
 
 Docs updated: `PRIVACY.md`, `README.md` (Features), `UI_SPEC.md` §5,
 `CHANGELOG.md` Unreleased.
+
+## The backfill product call, made
+
+Sizes appear on new mail and fill in only on a full re-sync. No bulk backfill
+exists and none was invented — migrations are forward-only, so a row written
+before this change has nothing to backfill from.
+
+**The feature does not offer to trigger a re-sync.** A full re-sync is minutes of
+work on a large mailbox and that decision belongs to the deliberate control that
+already exists at `Settings ▸ Full Resync…` (`SettingsView.swift:103` →
+`AppModel.fullResync()`, verified present). What the feature does instead is make
+the state legible rather than silent, since a Size column that is mostly blank on
+an established mailbox reads as broken: every unmeasured cell says "Unknown", and
+its caveat — in the tooltip and in the inspector's Storage line — says how many
+messages have no size, that sizes arrive with new mail, and names
+`Settings ▸ Full Resync` as where the rest come from. Naming the control is not
+offering it; there is no button here that starts one. A test asserts both halves:
+the caveat names the control, and it does not tell the user to click anything.
+
+One judgement worth flagging: the status bar omits the size clause entirely when
+nothing in the collection is measured, rather than printing "Unknown" there. A
+running summary that carried a permanent apology seemed worse than one that says
+nothing, and the per-sender column is where an unknown has to be stated because
+there a blank could be mistaken for zero. That is a judgement about a surface I
+could not look at.
 <!-- SECTION:NOTES:END -->
