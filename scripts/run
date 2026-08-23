@@ -1,0 +1,85 @@
+#!/bin/bash
+# Build Nevermore from the current source and launch it.
+#
+#   scripts/run                 # debug build, host arch, launch
+#   scripts/run release         # release build, launch
+#   scripts/run --no-launch     # build only, print the bundle path
+#
+# Any further arguments are passed to the app itself.
+#
+# Debug + host-arch is the default because it is the fast edit/run loop; a
+# release build is universal and takes considerably longer.
+set -euo pipefail
+
+CONFIG=debug
+LAUNCH=1
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    debug | release)
+      CONFIG=$1
+      shift
+      ;;
+    --no-launch)
+      LAUNCH=0
+      shift
+      ;;
+    *) break ;;
+  esac
+done
+
+cd "$(dirname "$0")/../Packages/NevermoreKit"
+
+# This is a fanless machine. Unbounded builds saturate every core, throttle, and
+# finish slower than a capped build while making the GUI unusable — so the local
+# loop leaves headroom. Override with NEVERMORE_JOBS if you are on something with
+# a fan. make-app.sh passes this through and defaults to unbounded, so CI is
+# unaffected.
+export NEVERMORE_JOBS=${NEVERMORE_JOBS:-6}
+
+echo "Building ($CONFIG, $(uname -m), -j $NEVERMORE_JOBS)…" >&2
+echo "A first build, or the first after a dependency change, takes a few minutes." >&2
+START=$SECONDS
+
+# make-app.sh prints progress and the finished bundle path to stdout, so the
+# path is the last line. `tee /dev/stderr` keeps that progress visible while it
+# happens — capturing stdout alone means several silent minutes with no sign
+# the build is alive, which reads as a hung script.
+APP=$(NEVERMORE_ARCHS=${NEVERMORE_ARCHS:-native} nice -n 10 ./make-app.sh "$CONFIG" | tee /dev/stderr | tail -1)
+
+echo "Built in $((SECONDS - START))s: $APP" >&2
+
+if [ "$LAUNCH" -eq 0 ]; then
+  echo "$APP"
+  exit 0
+fi
+
+# Quit any copy already running so the launch below is the build we just made,
+# not the old one the Dock still holds open. Several bundles share this bundle
+# id — the DMG build, the sandboxed build, a Sparkle-installed copy in
+# ~/Applications — and `open` on a running bundle id just activates whatever is
+# already up.
+osascript -e 'quit app "Nevermore"' 2>/dev/null || true
+sleep 1
+
+open "$APP" ${1+--args "$@"}
+
+# Confirm the thing that came up is the thing just built, since a stale
+# instance that refused to quit would otherwise look like a successful launch.
+sleep 3
+if pgrep -f "$APP/Contents/MacOS/Nevermore" >/dev/null; then
+  VERSION=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$APP/Contents/Info.plist")
+  BUILD=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$APP/Contents/Info.plist")
+  echo "Running: $VERSION ($BUILD)" >&2
+  # The local server, if it is switched on, holds a port from 8775-8779 — and
+  # the suite's port-binding tests bind those same ports for real. So a running
+  # app makes `swift test` fail in a way that looks like a code regression and
+  # is not. Said here because that has cost time more than once.
+  if [ -f "$HOME/.nevermore-mcp-token" ]; then
+    echo "Note: the local server is on, so it holds a port in 8775-8779." >&2
+    echo "      Quit Nevermore before 'swift test', or those tests will fail." >&2
+  fi
+else
+  echo "WARNING: that bundle is not running. Another copy may have taken the" >&2
+  echo "         launch — check with: pgrep -lf Nevermore.app/Contents/MacOS" >&2
+fi

@@ -18,8 +18,17 @@ if [ "${NEVERMORE_ARCHS:-}" = "native" ]; then
   ARCH_FLAGS=()
 fi
 
-BIN_DIR=$(swift build --product NevermoreApp -c "$CONFIG" "${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"}" --show-bin-path)
-swift build --product NevermoreApp -c "$CONFIG" "${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"}"
+# Left unbounded unless asked. A CI runner should use every core it is paying
+# for; a fanless laptop should not, because saturating all of them throttles the
+# machine and finishes slower than a capped build would. `scripts/run` sets this
+# for the local edit/run loop, and nothing else does.
+JOB_FLAGS=()
+if [ -n "${NEVERMORE_JOBS:-}" ]; then
+  JOB_FLAGS=(-j "$NEVERMORE_JOBS")
+fi
+
+BIN_DIR=$(swift build --product NevermoreApp -c "$CONFIG" "${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"}" "${JOB_FLAGS[@]+"${JOB_FLAGS[@]}"}" --show-bin-path)
+swift build --product NevermoreApp -c "$CONFIG" "${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"}" "${JOB_FLAGS[@]+"${JOB_FLAGS[@]}"}"
 
 # Version comes from the VERSION file, and the build number from the commit
 # count — monotonic, reproducible from any checkout, nothing to maintain by

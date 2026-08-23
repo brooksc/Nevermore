@@ -13,7 +13,8 @@ Everything runs from `Packages/NevermoreKit` — the repo root holds only the
 Tuist manifest for the App Store target.
 
 ```bash
-./run                             # build (debug, host arch) and launch the app
+scripts/run                       # build (debug, host arch) and launch the app
+scripts/run --no-launch           # build only, print the bundle path
 cd Packages/NevermoreKit
 swift build                       # build everything
 swift test                        # the test suite — 479 tests
@@ -22,8 +23,19 @@ swift run nevermore-probe         # CLI harness against a real mailbox, no UI
 ./make-dmg.sh --notarize          # notarized, stapled DMG
 ```
 
-`./run` launches a GUI app on a machine shared with the user — ask before
-running it.
+`scripts/run` launches a GUI app on a machine shared with the user — ask before
+running it. `--no-launch` is the way to check a build compiles and signs without
+putting anything on screen.
+
+It caps parallelism (`NEVERMORE_JOBS`, default 6) because this is a fanless
+machine: an unbounded build saturates every core, throttles, and finishes slower
+while making the GUI unusable. `make-app.sh` defaults to unbounded, so CI keeps
+every core it is paying for.
+
+**Quit the app before `swift test`.** If the local server is on it holds a port
+in 8775–8779, and the suite's port-binding tests bind those for real — so a
+running app makes them fail in a way that reads as a code regression. `scripts/run`
+says so on launch when it sees the token file.
 
 **Tests use swift-testing in a real `.testTarget`** (TASK-19; they were an
 executable with a hand-rolled harness until then). `Tests/NevermoreTests/`
