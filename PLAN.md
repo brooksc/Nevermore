@@ -403,9 +403,20 @@ build it. `swift build` fails without `DEVELOPER_DIR` pointing at Xcode.
 **Still open:**
 
 - **Messages located but not stored.** Discovery finds more UIDs than the store
-  keeps. Expected causes are the user's own sent mail and headers whose only
-  target uses an unsupported scheme, but the split has never been measured.
-  Worth instrumenting so the UI's counts can be explained.
+  keeps. The instrumentation now exists (TASK-7): every located UID is
+  attributed to one of six reasons — `notFetched`, `noUnsubscribeHeader`,
+  `unsupportedScheme`, `unusableTarget`, `ownMail`, `duplicateUID` — plus rows
+  the store already had, and the arithmetic is checked (`SyncAttribution`,
+  `unaccounted` should be zero). It surfaces in the sync log line, in
+  `nevermore-probe`, and behind "Last synced…" in the status bar.
+  **The split itself is still unmeasured**: taking it needs a real mailbox, and
+  the two suspected causes — own sent mail, unsupported schemes — remain a
+  hypothesis with a counter attached. Run the probe against a real account and
+  write the numbers here.
+  One thing to watch when it is run: on a first full sync `filterOutOwnMail`
+  has only the primary address to match against, because `sendAsAddresses()`
+  is called *after* the sync completes. So a first run's `ownMail` figure is a
+  floor, and an incremental run's is the honest one.
 - **`PayloadTooLargeError` root cause.** An incremental run once failed with
   this before two changes landed together — raising `responseBufferLimit` to
   32 MB and switching to date-based search. It hasn't recurred, but **which fix

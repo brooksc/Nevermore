@@ -768,6 +768,10 @@ final class AppModel {
     /// must not claim a status like "all caught up" — nothing has loaded yet.
     private(set) var hasLoadedOnce = false
 
+    /// What the last sync located and what became of it. Nil until one runs;
+    /// not persisted, because it describes a run rather than the mailbox.
+    private(set) var lastSyncAttribution: SyncAttribution?
+
     private func reloadFromStore() async {
         guard let store else { return }
         do {
@@ -843,12 +847,18 @@ final class AppModel {
                 // rather than leaving the UI looking idle.
                 syncState = .connecting
                 let token = try store.syncToken()
-                let (messages, newToken) = try await backend.changes(since: token) {
+                var result = try await backend.changes(since: token) {
                     [weak self] phase in
                     Task { @MainActor in self?.apply(phase) }
                 }
-                try store.upsert(messages)
-                try store.setSyncToken(newToken)
+                let messages = result.messages
+                result.attribution.record(try store.upsert(messages))
+                try store.setSyncToken(result.token)
+                // Kept so the status bar can answer "where did the rest go?".
+                // Only the last sync's: an incremental run's numbers describe
+                // that run, and summing them across runs would describe none.
+                lastSyncAttribution = result.attribution
+                Log.sync.event(result.attribution.summary)
                 sendAsAddresses = try await backend.sendAsAddresses()
                 await reloadFromStore()
                 seedDemoHistoryIfNeeded()

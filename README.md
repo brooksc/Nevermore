@@ -114,6 +114,10 @@ Nevermore is the opposite shape:
   legitimate mail works and a warning that fires on everything is worthless.
 - **Trash with undo.** Messages move to your provider's Trash and `⌘Z` puts
   them back.
+- **Sync counts that add up.** A sync always finds more messages on the server
+  than it keeps — your own sent mail is in there, and so are senders whose only
+  unsubscribe link uses a scheme no app can open. Click *Last synced…* in the
+  status bar and it accounts for the difference, a line and a count per reason.
 - **Alias-aware.** Send-as addresses are inferred from your Sent folder, so
   `mailto:` unsubscribes go out from the address the mail was delivered to.
 - **Multi-account**, with per-account databases.

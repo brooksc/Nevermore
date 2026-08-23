@@ -8,6 +8,17 @@ All notable changes to Nevermore are recorded here. Format follows
 
 ### Added
 
+- **The sync now accounts for every message it finds and does not keep.** A sync
+  has always located more messages on the server than it stored, and the app
+  could not say why — it showed both numbers and explained neither. Click *Last
+  synced…* in the status bar for the breakdown: how many the server matched, how
+  many were added, how many were already known, and a line per reason for the
+  rest — your own sent mail, an unsubscribe link in a scheme the app cannot
+  open, a header nothing usable could be read from, messages the server no
+  longer had by the time we asked for them. The same breakdown goes to the log
+  on every sync, and it checks its own arithmetic: anything it cannot explain is
+  reported as unaccounted rather than quietly absorbed.
+
 - **Nevermore now argues against its own main feature where the mail warrants
   it.** Unsubscribing tells a sender the address is live and read by a person,
   and that cannot be taken back — worth it for a real subscription, and exactly
