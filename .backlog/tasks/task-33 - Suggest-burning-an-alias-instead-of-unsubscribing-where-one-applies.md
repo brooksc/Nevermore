@@ -1,9 +1,10 @@
 ---
 id: TASK-33
 title: 'Suggest burning an alias instead of unsubscribing, where one applies'
-status: To Do
+status: On Hold
 assignee: []
 created_date: '2026-08-10 01:49'
+updated_date: '2026-08-23 03:15'
 labels:
   - product
 dependencies: []
@@ -26,3 +27,15 @@ It cannot disable the alias itself; that lives in the provider. Deep link and ex
 - [ ] #2 Suggestion appears only where an alias plausibly exists
 - [ ] #3 Links to the provider where the alias is managed
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: claude
+created: 2026-08-23 03:15
+---
+Parked. The idea is sound and costs no new data — Delivered-To is already stored per message, so grouping senders by the alias they arrived on is presentation over what is on disk. It is also the one instrument in the app that needs no cooperation from the sender: burning an alias cannot be ignored the way an unsubscribe can.
+
+Held because its value is unknown until built. It only pays off if several senders cluster on one burnable alias, and PLAN.md records five send-as addresses inferred from the maintainer's mailbox without saying how the senders distribute across them. It could be a feature that fires twice and then stays quiet. Worth revisiting once TASK-7's instrumentation makes that distribution visible, which would answer the question without building the feature to find out.
+---
+<!-- COMMENTS:END -->
