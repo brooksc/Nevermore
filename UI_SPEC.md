@@ -290,7 +290,20 @@ Every feature must be reachable here. Items enable/disable based on selection.
 
 **Edit**
 Standard `Undo ⌘Z` / `Redo ⇧⌘Z` / Cut / Copy / Paste · `Select All ⌘A` ·
-`Deselect All ⇧⌘A` · `Find ⌘F`
+`Deselect All ⇧⌘A` · `Find ⌘F` · `Smart Selection ▸`
+
+`Smart Selection` sits in Edit rather than Actions because every item in it
+fills the selection and stops: `Never Opened` · `Rarely Opened` ·
+`Nothing in a Year` · `One-Click Capable`. Each is a rule over figures the sync
+already stored, applied to the rows on screen and to that collection only — a
+rule run in Ignored selects ignored senders and nothing else. There is
+deliberately no item here that acts. The whole menu is disabled in Unsubscribed,
+whose rows are past attempts rather than senders.
+
+It selects at most 50 rows and says so ("the first 50 of 312 matching"). The cap
+is the point rather than a limitation: reviewing the list before acting is the
+safety mechanism, and nobody reviews 400 rows. Running the rule again after
+acting picks up the next 50.
 
 **Actions** *(custom menu — the app's verbs)*
 `Unsubscribe ⌘U` · `Unsubscribe and Delete… ⇧⌘U` ·
@@ -371,6 +384,10 @@ passwords disabled by a Workspace administrator*; network unreachable.
   send-as alias, a caution that the request may be rejected.
 - **Buttons:** `Unsubscribe` (default) · `Unsubscribe and Delete Messages` ·
   `Cancel`. Verbs, never Yes/No.
+- **Always shown for a smart selection.** "Ask before unsubscribing" is a
+  preference about a selection built row by row, where this sheet repeats what
+  the user already knows. When a rule filled the selection, this sheet is the
+  first sight of it, so neither the setting nor the `⇧U` keystroke skips it.
 
 ### 9.3 Unsubscribe progress
 

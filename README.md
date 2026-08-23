@@ -87,6 +87,12 @@ Nevermore is the opposite shape:
   delete without a confirmation, `v` open the newest message in your browser,
   `i` ignore, `d` trash, `?` for the full list. Every action advances to the
   next sender, so a mailbox can be cleared without touching the mouse.
+- **Smart selections.** *Edit → Smart Selection* fills the selection from what
+  the sync already knows: never opened, rarely opened, nothing in a year, or
+  one-click capable. It selects and stops — up to 50 senders at a time, so the
+  list stays something you can actually read before you press the button. A
+  selection a rule filled always shows the confirmation sheet, even if you have
+  turned confirmations off.
 - **Trash with undo.** Messages move to your provider's Trash and `⌘Z` puts
   them back.
 - **Alias-aware.** Send-as addresses are inferred from your Sent folder, so

@@ -76,7 +76,22 @@ final class AppModel {
                 selection, in: visibleIDs, collectionChanged: true)
         }
     }
-    var selection: Set<GroupID> = []
+    var selection: Set<GroupID> = [] {
+        didSet {
+            guard oldValue != selection else { return }
+            // Every other route to the selection — a click, ⌘A, keyboard triage,
+            // pruning after a search — makes it the user's own again. Only
+            // `applySmartSelection` sets the flag back, immediately after
+            // assigning, so this can't strand it on a selection a rule filled.
+            selectionIsSmart = false
+        }
+    }
+
+    /// Whether the current selection was filled by a smart-selection rule rather
+    /// than picked row by row. Read by the unsubscribe sheet: a selection the
+    /// user has not yet looked at always gets the confirm step, whatever
+    /// "Ask before unsubscribing" says. See `UnsubscribeConfirmation`.
+    private(set) var selectionIsSmart = false
     /// Narrowing the search can hide a selected row. Drop it rather than keep a
     /// selection the list no longer shows — the same rule a collection switch
     /// follows, and what stops "N selected" counting rows that aren't there.
@@ -1500,6 +1515,59 @@ final class AppModel {
     /// Why it can't, for the disabled control's tooltip — nil when it can.
     func reason(_ action: SelectionAction) -> String? {
         action.unavailability(in: selectionContext)
+    }
+
+    // MARK: - Smart selections
+
+    /// Why a smart selection can't run in the collection on screen — nil when it
+    /// can. Unsubscribed is the one list whose rows aren't senders: it lists
+    /// durable records that outlive the mail they were recorded for, so every
+    /// rule below (volume, read share, age, one-click) has nothing to read.
+    var smartSelectionUnavailability: String? {
+        switch rowSource {
+        case .senders, .proposals: nil
+        case .history:
+            "Unsubscribed lists past attempts, not senders — there's nothing here to select by volume or age."
+        }
+    }
+
+    /// The visible list in display order, in the form the rules read.
+    ///
+    /// Built from `visibleIDs` rather than from `groups`, so it is the rows on
+    /// screen and in the order they are on screen — the cap takes a prefix, and
+    /// a prefix of some other order would select rows the user has to hunt for.
+    private var smartSelectionCandidates: [SmartSelectionCandidate] {
+        // One pass to index the groups: `group(for:)` is a linear scan, and
+        // calling it per row is quadratic on a mailbox with a thousand senders.
+        let byID = Dictionary(groups.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return visibleIDs.compactMap { id in
+            guard let group = byID[id] else { return nil }
+            return SmartSelectionCandidate(
+                id: id,
+                state: state(of: group),
+                messageCount: group.total,
+                unreadPercent: group.unreadPercent,
+                lastReceived: group.newest,
+                isOneClick: group.unsubscribeSource?.unsubscribe?.supportsOneClick == true)
+        }
+    }
+
+    /// Fill the selection from a rule, and say what it came to.
+    ///
+    /// This is the whole feature: it selects and stops. Nothing is sent, nothing
+    /// is trashed, and the user reaches an action the same way they would from a
+    /// selection they made by hand — including its confirmation.
+    func applySmartSelection(_ rule: SmartSelection) {
+        guard smartSelectionUnavailability == nil else { return }
+        let result = rule.select(from: smartSelectionCandidates, in: collection)
+        // Replace rather than add to what was selected. A rule that quietly
+        // unioned with a leftover selection would describe a set that matches no
+        // stated rule, which is the one thing the summary line can't say.
+        selection = Set(result.ids)
+        // Set after assigning, because assigning clears it. An empty result
+        // leaves nothing to confirm, so it doesn't count as a smart selection.
+        selectionIsSmart = !result.ids.isEmpty
+        showToast(result.summary, undoLabel: nil, undo: nil)
     }
 
     // MARK: - Actions: ignore / trash / forget

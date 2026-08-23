@@ -38,11 +38,20 @@ public enum TrashConfirmation {
 /// confirms regardless: the MCP route answers `awaiting_confirmation`, and that
 /// answer has to be true in every configuration of the app rather than in most
 /// of them.
+/// (continued) A smart selection (TASK-26) is the same argument one step in.
+/// The preference is about a selection made row by row, where the confirm sheet
+/// tells the user what they already know. When a rule filled the selection, the
+/// confirm sheet is the *first* place anyone sees which senders it picked — and
+/// it can be fifty of them. Reviewing the list is the entire safety mechanism a
+/// smart selection relies on, so skipping it would turn a menu item plus one
+/// keystroke into fifty live requests nobody looked at.
 public enum UnsubscribeConfirmation {
-    public static func requiresPrompt(origin: ActionOrigin, askBeforeUnsubscribe: Bool) -> Bool {
+    public static func requiresPrompt(
+        origin: ActionOrigin, askBeforeUnsubscribe: Bool, selectionWasAutomatic: Bool = false
+    ) -> Bool {
         switch origin {
         case .agent: true
-        case .user: askBeforeUnsubscribe
+        case .user: askBeforeUnsubscribe || selectionWasAutomatic
         }
     }
 }

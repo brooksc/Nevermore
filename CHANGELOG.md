@@ -8,6 +8,14 @@ All notable changes to Nevermore are recorded here. Format follows
 
 ### Added
 
+- **Smart selections, under Edit → Smart Selection.** Four rules over figures
+  the sync already stored — never opened, rarely opened, nothing in a year,
+  one-click capable — that fill the selection from the rows on screen and then
+  stop. They respect the collection you are standing in, select at most 50
+  senders so the list is still one you can read, and tell you how many matched
+  in total. Nothing is sent, trashed, or hidden until you pick an action and
+  confirm it; a selection a rule filled always shows the confirmation sheet,
+  even with confirmations turned off.
 - **Guided app-password setup, for the provider you actually use.** The sign-in
   screen now asks for the credential by your provider's own name — an
   app-specific password on iCloud, an app password on Gmail — mentions

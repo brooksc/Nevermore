@@ -5657,5 +5657,167 @@ Harness.suite("Support site links") {
     }
 }
 
+// MARK: - Smart selections (TASK-26)
+
+// A smart selection decides what a batch of live unsubscribe requests will be
+// aimed at, so every rule is checked at its boundary rather than in the middle.
+// The rules are in the kit and take plain numbers; the menu that calls them is
+// app-target and isn't reachable from here.
+Harness.suite("SmartSelection") {
+    let now = Date(timeIntervalSince1970: 1_750_000_000)
+    func daysAgo(_ n: Int) -> Date { now.addingTimeInterval(-Double(n) * 86_400) }
+
+    func candidate(
+        _ key: String,
+        state: SenderState = SenderState(),
+        count: Int = 20,
+        unreadPercent: Double = 100,
+        lastReceived: Date? = nil,
+        oneClick: Bool = false
+    ) -> SmartSelectionCandidate {
+        SmartSelectionCandidate(
+            id: GroupID(kind: .domain, key: key),
+            state: state,
+            messageCount: count,
+            unreadPercent: unreadPercent,
+            lastReceived: lastReceived ?? now,
+            isOneClick: oneClick)
+    }
+
+    // The task's starting set said "0% read" with no floor. A floor is the
+    // difference between "you never open these" and "this arrived on Tuesday".
+    Harness.test("never opened needs enough messages to be evidence") {
+        expect(
+            SmartSelection.neverOpened.matches(
+                candidate("a", count: SmartSelection.minimumVolume), now: now),
+            "at the floor, nothing read, matches")
+        expect(
+            !SmartSelection.neverOpened.matches(
+                candidate("b", count: SmartSelection.minimumVolume - 1), now: now),
+            "one below the floor doesn't")
+        expect(
+            !SmartSelection.neverOpened.matches(
+                candidate("c", count: 40, unreadPercent: 97.5), now: now),
+            "one message read out of forty is not 'never'")
+    }
+
+    Harness.test("rarely opened is a share of a real volume") {
+        expect(
+            SmartSelection.rarelyOpened.matches(
+                candidate("a", count: 100, unreadPercent: 91), now: now),
+            "9 read out of 100 is rarely")
+        expect(
+            !SmartSelection.rarelyOpened.matches(
+                candidate("b", count: 100, unreadPercent: 90), now: now),
+            "exactly 10% read is not under 10%")
+        expect(
+            !SmartSelection.rarelyOpened.matches(
+                candidate("c", count: SmartSelection.highVolume - 1, unreadPercent: 100), now: now),
+            "below the volume threshold, the share means little")
+    }
+
+    Harness.test("dormant is a year of silence, at the boundary") {
+        expect(
+            SmartSelection.dormant.matches(
+                candidate("a", lastReceived: daysAgo(SmartSelection.dormantDays + 1)), now: now),
+            "a year and a day ago is dormant")
+        expect(
+            !SmartSelection.dormant.matches(
+                candidate("b", lastReceived: daysAgo(SmartSelection.dormantDays - 1)), now: now),
+            "a day short of a year is not")
+        expect(
+            !SmartSelection.dormant.matches(candidate("c", lastReceived: now), now: now),
+            "mail that arrived today is not")
+    }
+
+    // The point of this rule is that a whole batch can finish without a browser,
+    // which is knowable from the stored RFC 8058 header alone.
+    Harness.test("one-click selects only senders that published the token") {
+        expect(
+            SmartSelection.oneClick.matches(candidate("a", oneClick: true), now: now),
+            "one-click sender matches")
+        expect(
+            !SmartSelection.oneClick.matches(candidate("b", oneClick: false), now: now),
+            "a web-only sender does not")
+    }
+
+    // The invariant the collection switch and the search field both maintain:
+    // selection ⊆ the visible list. A rule that returned a sender who isn't in
+    // this collection would select a row the list doesn't show.
+    Harness.test("a smart selection never leaves the collection it ran in") {
+        let ordinary = candidate("ordinary.com")
+        let ignored = candidate("ignored.com", state: SenderState(isIgnored: true))
+        let pool = [ordinary, ignored]
+
+        let inAll = SmartSelection.neverOpened.select(from: pool, in: .allSenders, now: now)
+        eq(inAll.ids, [ordinary.id], "All Senders picks the sender that lives there")
+
+        let inIgnored = SmartSelection.neverOpened.select(from: pool, in: .ignored, now: now)
+        eq(inIgnored.ids, [ignored.id], "Ignored picks only the ignored sender")
+    }
+
+    // Reviewability is the safety mechanism, so the cap is part of the rule
+    // rather than a detail of the view.
+    Harness.test("the selection is capped, and says so") {
+        let pool = (0..<(SmartSelection.maxSelected + 10)).map { candidate("s\($0).com") }
+        let result = SmartSelection.neverOpened.select(from: pool, in: .allSenders, now: now)
+
+        eq(result.ids.count, SmartSelection.maxSelected, "fills to the cap and no further")
+        eq(result.matched, pool.count, "but reports how many actually matched")
+        expect(result.wasCapped, "and knows it was capped")
+        expect(
+            result.summary.contains("\(pool.count)"),
+            "the summary names the full match count, not just the selected one")
+        eq(
+            result.ids, Array(pool.prefix(SmartSelection.maxSelected).map(\.id)),
+            "the kept rows are the first ones in display order")
+    }
+
+    Harness.test("an uncapped selection doesn't claim to be capped") {
+        let pool = [candidate("a.com"), candidate("b.com")]
+        let result = SmartSelection.neverOpened.select(from: pool, in: .allSenders, now: now)
+        expect(!result.wasCapped, "two rows is under the cap")
+        expect(result.summary.contains("2 senders"), "the summary counts them")
+    }
+
+    // An empty result must not read as an empty screen. Selecting nothing and
+    // saying nothing is how a user concludes the menu item is broken.
+    Harness.test("no matches is stated, not silent") {
+        let pool = [candidate("a.com", count: 1)]
+        let result = SmartSelection.neverOpened.select(from: pool, in: .allSenders, now: now)
+        expect(result.ids.isEmpty, "nothing matched")
+        expect(!result.wasCapped, "nothing to cap")
+        expect(
+            result.summary.contains(SmartSelection.neverOpened.title),
+            "and the message names the rule that found nothing")
+    }
+
+    // AC #4. "Ask before unsubscribing" is a preference about a selection the
+    // user built row by row. A rule-filled selection has never been looked at,
+    // so the confirm sheet is the first sight of it and cannot be skipped.
+    Harness.test("a rule-filled selection always reaches the confirm step") {
+        expect(
+            UnsubscribeConfirmation.requiresPrompt(
+                origin: .user, askBeforeUnsubscribe: false, selectionWasAutomatic: true),
+            "confirmations off does not skip a selection the user hasn't seen")
+        expect(
+            !UnsubscribeConfirmation.requiresPrompt(
+                origin: .user, askBeforeUnsubscribe: false, selectionWasAutomatic: false),
+            "a hand-made selection still honours the preference")
+        expect(
+            UnsubscribeConfirmation.requiresPrompt(
+                origin: .agent, askBeforeUnsubscribe: false, selectionWasAutomatic: false),
+            "and an agent still always confirms")
+    }
+
+    // Every rule is offered in a menu; a case added without a title or a help
+    // line would ship a blank menu item.
+    Harness.test("every rule can describe itself") {
+        for rule in SmartSelection.allCases {
+            expect(!rule.title.isEmpty, "\(rule.rawValue) has a title")
+            expect(!rule.help.isEmpty, "\(rule.rawValue) explains its rule")
+        }
+    }
+}
 
 exit(Harness.finish())

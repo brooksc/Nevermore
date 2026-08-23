@@ -59,9 +59,14 @@ struct UnsubscribeFlow: View {
             // asked, and that has to be true in every configuration of the app —
             // including the one where the user turned confirmations off for
             // their own keystrokes.
+            // A selection a rule filled has never been looked at — this sheet is
+            // where it gets looked at, so neither the setting nor the ⇧U
+            // keystroke may skip past it. See `UnsubscribeConfirmation`.
+            let fromRule = model.selectionIsSmart
             let mustAsk = UnsubscribeConfirmation.requiresPrompt(
-                origin: origin, askBeforeUnsubscribe: AppSettings.askBeforeUnsubscribe)
-            if immediateDelete, origin == .user {
+                origin: origin, askBeforeUnsubscribe: AppSettings.askBeforeUnsubscribe,
+                selectionWasAutomatic: fromRule)
+            if immediateDelete, origin == .user, !fromRule {
                 start(delete: true)
             } else if !mustAsk {
                 start(delete: AppSettings.deleteIsDefault)
