@@ -170,7 +170,7 @@ drag Nevermore to Applications. Signed and notarized by Apple.
 ```bash
 cd Packages/NevermoreKit
 swift build                       # build everything
-swift test                        # run the test suite (479 tests)
+swift test                        # run the test suite (494 tests)
 ./make-app.sh release             # produce a signed Nevermore.app
 ./make-dmg.sh --notarize          # produce a notarized, stapled DMG
 ```
