@@ -51,6 +51,13 @@ struct SettingsView: View {
                 Text("Trashing is recoverable — messages go to your Trash folder and ⌘Z untrashes them.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            // Gated on `canImport(Sparkle)` inside Updater.swift, not on
+            // NEVERMORE_MAS: the question here is whether an updater exists to
+            // switch on or off, and the answer is exactly whether Sparkle was
+            // linked. The local-server section below asks the other question —
+            // "is this the sandboxed store build" — because its feature is
+            // present in the sources either way.
+            AutomaticUpdatesSection()
         }
         .formStyle(.grouped)
     }

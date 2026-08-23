@@ -1,7 +1,7 @@
 # Privacy Policy
 
 **Nevermore for macOS**
-_Last updated: 20 August 2026_
+_Last updated: 22 August 2026_
 
 ## The short version
 
@@ -133,9 +133,12 @@ The Mac App Store version contains no updater at all — Apple's rules forbid it
 and Sparkle is compiled out of that build. It updates through the App Store like
 any other app.
 
-The first time you run it, the app asks whether to check for updates
-automatically. Decline and it makes no outbound request of its own at all, until
-you pick **Check for Updates…** from the Help menu yourself.
+Sparkle asks whether to check automatically shortly after you first run the app,
+and **Settings ▸ General ▸ Software updates** holds the same switch, so you can
+change your answer at any time. With it off, the app makes no outbound request
+of its own at all, until you pick **Check for Updates…** from the Help menu
+yourself. The Mac App Store version has no such setting, because it has no
+updater.
 
 ## Third parties
 
