@@ -341,6 +341,25 @@ the honest value depends on the France answer, and getting a plist key wrong is
 harder to notice than answering four questions from this list. Answer them here
 each time until TASK-10 is decided.
 
+### 9.6. Age rating, when the questionnaire is offered
+
+Apple replaced the old 4+/9+/12+/17+ tiers with 4+/9+/13+/16+/18+ and required
+every developer to re-answer an expanded questionnaire. Re-answer it rather than
+carrying a rating forward, because the mapping changed underneath:
+
+- **Unrestricted web access is 16+**, not 18+. The app's in-app browser opens
+  pages the sender published, so this one is a yes.
+- **18+ needs** frequent alcohol, tobacco or drug references, frequent sexual
+  content or nudity, frequent realistic violence, or gambling. Every one of
+  these is no.
+
+If the listing shows 18+ after answering honestly, check whether it is the
+*French* display of a 17+ global rating — ANFR requires that — rather than the
+global rating itself. See TASK-3 for the code change that would let the web
+access answer become no; it is not worth doing unless the rating is genuinely
+wrong after re-answering, because restricting navigation risks breaking
+unsubscribe flows that legitimately cross hosts.
+
 ### 10. App Review notes
 
 Paste something close to this into the review notes — the first two points are

@@ -1,10 +1,10 @@
 ---
 id: TASK-3
 title: Get the age rating down from 18+
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-09 18:50'
-updated_date: '2026-08-23 17:46'
+updated_date: '2026-08-23 20:06'
 labels:
   - store
 dependencies: []
@@ -27,7 +27,7 @@ Needs testing against real senders first: some unsubscribe flows legitimately re
 - [ ] #1 Navigation policy restricted to the initial host and its redirect chain
 - [ ] #2 Tested against a sample of real senders, including multi-host flows
 - [ ] #3 Age rating questionnaire re-answered and the listing shows 4+
-- [ ] #4 App Review notes updated to match
+- [x] #4 App Review notes updated to match
 <!-- AC:END -->
 
 ## Comments
@@ -47,5 +47,17 @@ That reorders the work. The first step is to re-answer the updated questionnaire
 That matters because the code change is not cheap or safe: restricting WebUnsubscribeSheet to the target host and its redirect chain risks breaking legitimate unsubscribe flows that cross hosts, which is why the task already said it needs testing against real senders. It has also become entangled since — TASK-4 replaced the unsubscribe transport with a pinned NWConnection client, so anything done to navigation policy now has to be reconciled with that.
 
 Sources: https://developer.apple.com/help/app-store-connect/reference/app-information/age-ratings-values-and-definitions/ and https://developer.apple.com/news/?id=ks775ehf
+---
+
+author: claude
+created: 2026-08-23 20:06
+---
+Closed without the code change, at the maintainer's direction and on the evidence above: the rating work moves into the submission runbook (MAS-RELEASE.md §9.6) rather than staying an open engineering task.
+
+Apple's documentation puts unrestricted web access at 16+. 18+ requires frequent drug or alcohol references, sexual content, realistic violence, or gambling, and this app answers no to all four. So the listing's 18+ is most likely a rating produced under the retired 4+/9+/12+/17+ scheme — or the French display of a 17+ global rating, which ANFR requires. Re-answering the current questionnaire is the whole fix, and it costs nothing.
+
+Criterion 1 (restrict navigation to the initial host and its redirect chain) is deliberately not done. It was always the risky half: unsubscribe flows legitimately cross hosts, and breaking one is worse than the rating. It has also become entangled with TASK-4, which replaced the transport with a pinned NWConnection client. If a re-answered questionnaire still produces a rating worth fighting, re-open this with that as the starting point rather than the assumption.
+
+Criterion 3 asked for 4+. That was never reachable while the app opens sender-published pages, and pretending otherwise would mean answering the questionnaire dishonestly. 16+ is the honest floor unless the navigation restriction lands.
 ---
 <!-- COMMENTS:END -->

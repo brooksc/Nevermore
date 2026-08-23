@@ -260,8 +260,20 @@ skipped and most likely to be broken.
 
 ### After
 
-18. Bump `VERSION` to the next patch with a `-dev` suffix so a stray dev build
-    is never mistaken for the release.
+Nothing. There used to be a step here — bump `VERSION` to the next patch with a
+`-dev` suffix, so a stray dev build could not be mistaken for the release — and
+it was never once done in three releases. It is dropped rather than enforced
+(TASK-14), because what it guarded against is already guarded better:
+
+- Build numbers are commit counts, so a local build reads `1.0.0 (93)` where the
+  release reads `1.0.0 (49)`, and `scripts/run` prints that on every launch.
+- `notarize.sh` refuses to release when `VERSION` disagrees with the git tag.
+- Both release paths refuse a version the changelog says nothing about.
+
+Adopting the suffix instead would have meant teaching `make-app.sh`, the tag
+guard and the changelog guard to strip it, to make a distinction the build number
+already makes. A step nobody performs is worse than no step, because it makes the
+rest of this list look optional.
 
 ---
 
