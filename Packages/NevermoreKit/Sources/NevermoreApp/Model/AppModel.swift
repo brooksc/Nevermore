@@ -983,9 +983,14 @@ final class AppModel {
         /// rubber-stamping, and the reason is the only thing that makes the
         /// agent's judgement checkable.
         let reason: String
-        /// What the agent means should happen to this sender. The row leads
-        /// with it (TASK-52).
+        /// What should happen to this sender: what the agent recommended,
+        /// unless the app's own reading of the headers vetoes an unsubscribe
+        /// (TASK-52's slot, TASK-30's evidence).
         let recommendation: RecommendedAction
+        /// Set only when the app overrode the agent — the headline of what it
+        /// found, so the row can say why the badge disagrees with the reason
+        /// underneath it.
+        let providerNote: String?
         let name: String
         let email: String
         /// Nil once the sender's messages are gone — trashed since the proposal
@@ -1002,10 +1007,14 @@ final class AppModel {
             let row = proposed.group.map {
                 SenderRow(group: $0, priorOutcome: outcome(for: $0.id))
             }
+            let verdict = proposed.group.map(SenderTrustVerdict.of) ?? .none
+            let effective = verdict.recommendation(given: proposed.item.recommendation)
             return ProposedRow(
                 id: proposed.id,
                 reason: proposed.item.reason,
-                recommendation: proposed.item.recommendation,
+                recommendation: effective,
+                providerNote: effective == proposed.item.recommendation
+                    ? nil : verdict.headline?.title,
                 // Prefer what the sender is called now; fall back to what the
                 // agent was looking at when it proposed them.
                 name: row?.name ?? proposed.item.senderName,
@@ -1217,8 +1226,7 @@ final class AppModel {
 
     var pendingProposalOverride: ProposalOverride?
 
-    /// Whether an unsubscribe started from the Proposed collection may go ahead
-    /// now, or has to be confirmed first.
+    /// Whether an unsubscribe may go ahead now, or has to be confirmed first.
     ///
     /// This is the fix for the defect: `u` is muscle memory and Unsubscribe is
     /// the primary button everywhere else in the app, so a proposal that says
@@ -1236,16 +1244,50 @@ final class AppModel {
     /// Asked wherever the unsubscribe was started, not only in Proposed: a
     /// sender under review is under review in All Senders too, and a warning
     /// you could step around by changing lists would not be one.
-    func mayUnsubscribeFromProposal(_ ids: Set<GroupID>, alsoDelete: Bool) -> Bool {
-        guard let proposal, !ids.isEmpty else { return true }
-        let against = proposal.items(
-            contradicting: .unsubscribe, in: Set(ids.map(\.storageKey)))
-        guard !against.isEmpty else { return true }
+    ///
+    /// TASK-30 widened it from "the agent objected" to "anyone objected". The
+    /// app's own reading of the headers gets the *same* dialog rather than one
+    /// of its own: two confirmations in a row to unsubscribe from one sender
+    /// would teach the user to dismiss confirmations, which is the habit this
+    /// whole mechanism exists to interrupt.
+    func mayUnsubscribe(_ ids: Set<GroupID>, alsoDelete: Bool) -> Bool {
+        guard !ids.isEmpty else { return true }
+
+        // Both objections in one list, agent first: it is the one the user asked
+        // for, and the one that has a sender-specific reason attached.
+        var objections: [UnsubscribeObjection] = []
+        var alreadyNamed = Set<String>()
+        if let proposal {
+            let against = proposal.items(
+                contradicting: .unsubscribe, in: Set(ids.map(\.storageKey)))
+            alreadyNamed = Set(against.map(\.groupKey))
+            objections += against.map {
+                UnsubscribeObjection(
+                    senderName: $0.senderName, recommendation: $0.recommendation,
+                    reason: $0.reason, source: .agent)
+            }
+        }
+        // One line per sender, not one per objecting party: a row already saying
+        // "ignore, the agent thinks this is cold outreach" does not get a second
+        // line saying the same thing in the app's voice.
+        for id in ids.sorted(by: { $0.storageKey < $1.storageKey })
+        where !alreadyNamed.contains(id.storageKey) {
+            guard let group = group(for: id) else { continue }
+            let verdict = SenderTrustVerdict.of(group)
+            guard let headline = verdict.headline, let action = verdict.recommendedAction
+            else { continue }
+            objections.append(
+                UnsubscribeObjection(
+                    senderName: group.displayName, recommendation: action,
+                    reason: headline.title, source: .mailProvider))
+        }
+
+        guard !objections.isEmpty else { return true }
         pendingProposalOverride = ProposalOverride(
             ids: ids,
             alsoDelete: alsoDelete,
-            title: ProposalOverrideWarning.title(count: against.count),
-            message: ProposalOverrideWarning.message(for: against))
+            title: UnsubscribeExposureWarning.title(for: objections),
+            message: UnsubscribeExposureWarning.message(for: objections))
         return false
     }
 
@@ -1255,7 +1297,10 @@ final class AppModel {
     func actOnRecommendation(_ id: GroupID, onUnsubscribe: (Set<GroupID>) -> Void) {
         guard let item = proposal?.items.first(where: { $0.groupKey == id.storageKey })
         else { return }
-        switch item.recommendation {
+        // The effective recommendation, not the agent's raw one: the button is
+        // labelled from what the row leads with, and a button that says Ignore
+        // and unsubscribes would be the original defect wearing a new hat.
+        switch trustVerdict(for: id).recommendation(given: item.recommendation) {
         case .unsubscribe: onUnsubscribe([id])
         case .ignore: ignore([id])
         case .trash: requestTrash([id])
@@ -1504,6 +1549,15 @@ final class AppModel {
 
     func group(for id: GroupID) -> SenderGroup? {
         groups.first { $0.id == id }
+    }
+
+    /// What the app's own reading of this sender's headers amounts to (TASK-30).
+    ///
+    /// Computed rather than stored: it is a pure function of mail already in
+    /// hand, so caching it would only create a second thing that can be stale
+    /// after a sync.
+    func trustVerdict(for id: GroupID) -> SenderTrustVerdict {
+        group(for: id).map(SenderTrustVerdict.of) ?? .none
     }
 
     /// How many rows of the collection on screen are selected. The status bar's

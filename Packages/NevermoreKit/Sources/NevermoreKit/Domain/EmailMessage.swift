@@ -23,6 +23,13 @@ public struct EmailMessage: Hashable, Sendable, Identifiable {
     /// RFC 2919 `List-ID`, when the sender is a mailing list. Nil for ordinary
     /// bulk mail, which is most marketing.
     public let listID: String?
+    /// RFC 8601 `Authentication-Results` — the receiving provider's SPF, DKIM
+    /// and DMARC verdicts for this message (TASK-30).
+    ///
+    /// Nil on every message today: the field is not in the sync's header list
+    /// until TASK-36 has measured what asking for it costs on a real mailbox.
+    /// See `SyncHeaderFields`.
+    public let authentication: AuthenticationResults?
 
     public var id: MessageUID { uid }
     public var canUnsubscribe: Bool { unsubscribe != nil }
@@ -36,7 +43,8 @@ public struct EmailMessage: Hashable, Sendable, Identifiable {
         unsubscribe: ListUnsubscribe?,
         deliveredTo: String = "",
         messageId: String = "",
-        listID: String? = nil
+        listID: String? = nil,
+        authentication: AuthenticationResults? = nil
     ) {
         self.uid = uid
         self.sender = sender
@@ -47,6 +55,7 @@ public struct EmailMessage: Hashable, Sendable, Identifiable {
         self.deliveredTo = deliveredTo
         self.messageId = messageId
         self.listID = listID
+        self.authentication = authentication
     }
 }
 

@@ -8,6 +8,18 @@ All notable changes to Nevermore are recorded here. Format follows
 
 ### Added
 
+- **Nevermore now argues against its own main feature where the mail warrants
+  it.** Unsubscribing tells a sender the address is live and read by a person,
+  and that cannot be taken back — worth it for a real subscription, and exactly
+  what a cold sender is fishing for. The inspector now says when a sender's own
+  mail argues against it: an unsubscribe link hidden behind a shortener or
+  pointed at a bare IP address, an unsubscribe reply addressed to a free
+  consumer mailbox rather than a list manager, or an unsubscribe handled on a
+  domain with no apparent connection to the sender. The first three change the
+  recommended action to Ignore and put a confirmation in front of an unsubscribe
+  that goes ahead anyway; the last is shown as context and changes nothing,
+  because handing unsubscribes to a bulk-mail provider is how most legitimate
+  senders work. Nothing here ever acts on its own, and no button is disabled.
 - **A report on how the last 30 days of unsubscribes went**, at the top of
   Unsubscribed: how many senders you unsubscribed from, how many have mailed
   you since, and how many have sent nothing since. It reports what arrived, not

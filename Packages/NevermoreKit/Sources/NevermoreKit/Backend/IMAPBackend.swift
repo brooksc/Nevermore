@@ -343,8 +343,12 @@ public actor IMAPBackend: MailBackend {
         // the `To` header.
         // Message-ID is fetched explicitly so trash-undo can find a message again
         // in the Trash folder (IMAP UIDs differ per folder).
+        // Authentication-Results joins this list only when SyncHeaderFields says
+        // so — it is the one field here whose per-message cost nobody has
+        // measured yet (TASK-36).
         let headerFields =
             FetchMessageInfoOptions.newsletterHeaderFields + ["Delivered-To", "To", "Message-ID"]
+            + SyncHeaderFields.optional
 
         var offset = 0
         while offset < total {
@@ -393,7 +397,9 @@ public actor IMAPBackend: MailBackend {
             unsubscribe: unsubscribe,
             deliveredTo: EmailSender(header: deliveredTo).address,
             messageId: info.messageId?.description ?? header("Message-ID") ?? "",
-            listID: MailingList.id(fromHeader: header("List-ID"))
+            listID: MailingList.id(fromHeader: header("List-ID")),
+            authentication: AuthenticationResults(
+                header: header(SyncHeaderFields.authenticationResults))
         )
     }
 

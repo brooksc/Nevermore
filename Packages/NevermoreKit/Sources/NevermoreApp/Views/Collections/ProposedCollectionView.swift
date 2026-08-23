@@ -115,7 +115,10 @@ struct ProposedCollectionView: View {
             Capsule().fill(
                 (action == .unsubscribe ? Tokens.brandBlue : Color.secondary).opacity(0.12)))
         .frame(width: 108, alignment: .leading)
-        .accessibilityLabel("The agent recommends: \(action.badgeTitle)")
+        // Not "the agent recommends" any more: the app's own reading of the
+        // headers can take this slot over (TASK-30), and the line under the
+        // reason is what says which of them it was.
+        .accessibilityLabel("Recommended: \(action.badgeTitle)")
     }
 
     // MARK: - Row
@@ -141,14 +144,28 @@ struct ProposedCollectionView: View {
             // as a caption and skipped (TASK-52). Three lines rather than two:
             // the reasons that matter are the ones arguing against the obvious
             // action, and those are the long ones.
-            Text(row.reason)
-                .font(.callout)
-                .foregroundStyle(.primary)
-                .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textSelection(.enabled)
-                .help(row.reason)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(row.reason)
+                    .font(.callout)
+                    .foregroundStyle(.primary)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .help(row.reason)
+
+                // Only when the app overrode the agent (TASK-30). Under the
+                // agent's reason rather than instead of it: the badge above says
+                // what to do, and these two lines say who thought so — the
+                // agent's judgement stays checkable even when it lost.
+                if let note = row.providerNote {
+                    Label(note, systemImage: "exclamationmark.shield")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             VStack(alignment: .trailing, spacing: 4) {
                 HStack(spacing: 6) {
@@ -174,7 +191,9 @@ struct ProposedCollectionView: View {
                     .controlSize(.small)
                     .disabled(row.sender == nil)
                     .help(
-                        "What the agent recommended for this sender: "
+                        (row.providerNote == nil
+                            ? "What the agent recommended for this sender: "
+                            : "What Nevermore recommends for this sender: ")
                             + row.recommendation.guidance + ".")
                     Button("Remove") { model.removeFromProposal([row.id]) }
                         .controlSize(.small)

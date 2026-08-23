@@ -81,6 +81,10 @@ struct InspectorView: View {
                 Divider()
                 methodExplanation(method, sender: name)
 
+                // Above the buttons, because it is an argument about which
+                // button to press (TASK-30).
+                trustSection(model.trustVerdict(for: group.id))
+
                 historySection(group)
 
                 // Actions sit directly under the sender summary — the primary
@@ -137,6 +141,48 @@ struct InspectorView: View {
                 Text(method.inspectorTitle).font(.callout.weight(.semibold))
                 Text(method.inspectorDetail(sender: sender))
                     .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// What the app found in this sender's own headers, and what it thinks you
+    /// should do about it (TASK-30).
+    ///
+    /// It advises and never acts: nothing here disables the Unsubscribe button
+    /// or presses another one. The evidence is second-hand and sometimes wrong —
+    /// a real newsletter fails DMARC through a misconfiguration all the time —
+    /// so the user is told what was seen, by whom, and what it does not cover,
+    /// and then makes the call.
+    @ViewBuilder
+    private func trustSection(_ verdict: SenderTrustVerdict) -> some View {
+        if !verdict.isEmpty {
+            Divider()
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(verdict.findings) { finding in
+                    HStack(alignment: .top, spacing: 9) {
+                        Image(
+                            systemName: finding.weight == .strong
+                                ? "exclamationmark.shield.fill" : "info.circle")
+                            .font(.system(size: 16))
+                            .foregroundStyle(finding.weight == .strong ? Color.orange : .secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(finding.title).font(.callout.weight(.semibold))
+                            Text(finding.detail)
+                                .font(.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                if let action = verdict.recommendedAction {
+                    Text(
+                        "Nevermore suggests \(action.badgeTitle.lowercased()) — or Trash Messages "
+                            + "if you don't want the mail either. Unsubscribing would tell this "
+                            + "sender the address is live and read, and that cannot be taken back. "
+                            + "Nothing here stops you: the button still works.")
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
