@@ -136,6 +136,12 @@ secondary-styled numbers. No action buttons live here.
 - **Unsubscribed** — history, with outcome state (`checkmark.circle`)
 - **Ignored** — hidden locally, never touched in Gmail (`eye.slash`)
 
+The two archives may list the same sender, and that is intended (TASK-50). They
+answer different questions — *who did I ask to stop* and *who did I mute* — and a
+sender can honestly be both. Hiding the unsubscribe record because the sender was
+later ignored would lose the fact that a request went out, which is exactly what
+Reappeared measures against.
+
 **Multiple accounts:** when more than one is configured, add a top-level
 account section above INBOX with each address as a row; the collections below
 reflect the selected account. With a single account, show no account chrome at

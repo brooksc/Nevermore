@@ -2347,9 +2347,11 @@ struct SenderCollectionMembershipTests {
         expect(SenderCollection.ignored.contains(state(ignored: true)))
     }
 
-    // Inherited behaviour, pinned rather than endorsed: Unsubscribed doesn't
-    // exclude ignored senders, so one that is both is listed twice. Changing it
-    // is a product decision, not part of unifying the selection model.
+    // Intended, decided in TASK-50. The two archives answer different questions
+    // — "who did I ask to stop" and "who did I mute" — and a sender can honestly
+    // be both. Suppressing the unsubscribe record because the sender was later
+    // ignored would lose the fact that a request went out, which is the thing
+    // Reappeared checks against.
     @Test("an ignored sender with a record is listed in both archives") func anIgnoredSenderWithARecordIsListedInBothArchives() {
         let s = state(ignored: true, unsubscribed: true)
         eq(SenderCollection.allCases.filter { $0.contains(s) }, [.unsubscribed, .ignored])

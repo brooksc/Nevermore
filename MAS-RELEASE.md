@@ -319,6 +319,28 @@ codesign -d --entitlements :- "$APP" | grep app-sandbox      # expect the sandbo
 ls "$APP/Contents/embedded.provisionprofile"                 # expect it to exist
 ```
 
+### 9.5. Export compliance, every upload
+
+App Store Connect asks the encryption questions on every submission. The answers
+do not change, so they are written down here rather than reasoned out afresh each
+time — the tempting answer ("uses only standard OS encryption") is the wrong one:
+
+- **Does your app use encryption?** Yes. It speaks IMAP and SMTP over TLS.
+- **Does it qualify for the exemption for standard encryption?** No, or not on
+  the strength of Apple's own crypto alone. The app statically links BoringSSL
+  through swift-nio-ssl, so it carries its own TLS implementation rather than
+  calling the system's.
+- **Declared as:** uses standard algorithms *in addition to* those provided by
+  the operating system.
+- **France:** the app is not distributed there. See TASK-11 for what re-enabling
+  it would require.
+
+Setting `ITSAppUsesNonExemptEncryption` in `Info.plist` would stop the
+questionnaire re-asking, and TASK-10 exists for that. It is deliberately not set:
+the honest value depends on the France answer, and getting a plist key wrong is
+harder to notice than answering four questions from this list. Answer them here
+each time until TASK-10 is decided.
+
 ### 10. App Review notes
 
 Paste something close to this into the review notes — the first two points are

@@ -1,10 +1,10 @@
 ---
 id: TASK-50
 title: A sender that is ignored and unsubscribed appears in both archives
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-21 01:13'
-updated_date: '2026-08-21 01:14'
+updated_date: '2026-08-23 17:46'
 labels:
   - ui
 dependencies: []
@@ -27,8 +27,22 @@ Whichever way it goes, the test that currently pins the behaviour must be update
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A decision is recorded on whether the two archives may overlap
-- [ ] #2 The chosen behaviour is covered by a test that states it is intended
-- [ ] #3 If overlap is removed, no unsubscribe record is lost — only its presentation changes
-- [ ] #4 UI_SPEC.md matches whatever is decided
+- [x] #1 A decision is recorded on whether the two archives may overlap
+- [x] #2 The chosen behaviour is covered by a test that states it is intended
+- [x] #3 If overlap is removed, no unsubscribe record is lost — only its presentation changes
+- [x] #4 UI_SPEC.md matches whatever is decided
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: claude
+created: 2026-08-23 17:46
+---
+Decided: the two archives may overlap, and the behaviour stands as it is.
+
+They answer different questions — who did I ask to stop, and who did I mute — and a sender can honestly be both. The argument for removing the overlap was that every other collection is mutually exclusive, so a row appearing twice reads as a bug. The argument against is stronger: suppressing the unsubscribe record because the sender was later ignored would lose the fact that a request went out, and that fact is precisely what Reappeared measures against.
+
+No code change. The test that pinned this as inherited-not-endorsed now says it is intended and why, and UI_SPEC records it so the next person to notice the overlap finds the decision rather than re-opening it. Criterion 3 is satisfied vacuously: nothing was removed, so no record was lost.
+---
+<!-- COMMENTS:END -->

@@ -4,6 +4,7 @@ title: Replace runAsync's blocking semaphore with async tests
 status: To Do
 assignee: []
 created_date: '2026-08-23 03:43'
+updated_date: '2026-08-23 17:05'
 labels:
   - tests
   - concurrency
@@ -33,5 +34,15 @@ The fix is to make the affected tests `@Test ... async` and `await` directly, de
 - [ ] #2 Every test that used them is an async @Test awaiting directly, asserting what it asserted before
 - [ ] #3 The suite passes with .serialized removed from NetworkBound, proving the deadlock is gone rather than still contained
 - [ ] #4 Whether .serialized is then still needed for port contention is decided and recorded, not left implicit
-- [ ] #5 Test count is still 434 (or any change is accounted for case by case)
+- [ ] #5 Test count is still 479 (or any change is accounted for case by case)
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: claude
+created: 2026-08-23 17:05
+---
+Criterion 5 said 434 when filed. That was the count at TASK-19's branch point; the rebase brought TASK-30's 45 tests across and main is at 479. Corrected so nobody reconciles against the wrong baseline.
+---
+<!-- COMMENTS:END -->
