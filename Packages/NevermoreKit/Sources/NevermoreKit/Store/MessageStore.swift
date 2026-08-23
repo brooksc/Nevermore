@@ -146,6 +146,22 @@ public final class MessageStore: Sendable {
                 t.column("decidedAt", .double).notNull()
             }
         }
+
+        // RFC 8601 Authentication-Results, so the app can say when the mail
+        // provider could not verify a sender before offering to unsubscribe
+        // from them (TASK-30).
+        //
+        // The column lands now although nothing writes to it yet: the sync does
+        // not ask for the field until TASK-36 has measured what it costs, and
+        // migrations here are forward-only, so adding the column with the code
+        // that reads it means flipping that switch stays a one-line change
+        // rather than a schema change made under time pressure. Nullable and
+        // empty, it costs an existing database nothing.
+        m.registerMigration("v6-authentication-results") { db in
+            try db.alter(table: "message") { t in
+                t.add(column: "authResults", .text)
+            }
+        }
         return m
     }
 
@@ -161,8 +177,8 @@ public final class MessageStore: Sendable {
                         INSERT INTO message
                           (uid, senderAddress, senderHost, senderName, subject, receivedAt,
                            isUnread, unsubscribeRaw, unsubscribePost, deliveredTo, syncedAt,
-                           messageId, listId)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           messageId, listId, authResults)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(uid) DO UPDATE SET
                           isUnread = excluded.isUnread,
                           syncedAt = excluded.syncedAt,
@@ -172,7 +188,12 @@ public final class MessageStore: Sendable {
                           unsubscribePost = excluded.unsubscribePost,
                           deliveredTo = excluded.deliveredTo,
                           messageId = excluded.messageId,
-                          listId = excluded.listId
+                          listId = excluded.listId,
+                          -- COALESCE, unlike the rest: this field is only
+                          -- fetched when SyncHeaderFields says so, so a sync
+                          -- with it off supplies NULL, and letting NULL win
+                          -- would throw away a verdict already on file.
+                          authResults = COALESCE(excluded.authResults, message.authResults)
                         """,
                     arguments: [
                         Int(m.uid.value), m.sender.address, m.sender.host, m.sender.displayName,
@@ -187,6 +208,10 @@ public final class MessageStore: Sendable {
                         m.unsubscribe?.supportsOneClick == true
                             ? "List-Unsubscribe=One-Click" : nil,
                         m.deliveredTo, now, m.messageId, m.listID,
+                        // The whole header, re-parsed on read, for the same
+                        // reason as the unsubscribe one: a parser fix then
+                        // reaches rows already written.
+                        m.authentication?.raw,
                     ])
             }
         }
@@ -252,7 +277,8 @@ public final class MessageStore: Sendable {
             ),
             deliveredTo: row["deliveredTo"] ?? "",
             messageId: row["messageId"] ?? "",
-            listID: row["listId"]
+            listID: row["listId"],
+            authentication: AuthenticationResults(header: row["authResults"])
         )
     }
 

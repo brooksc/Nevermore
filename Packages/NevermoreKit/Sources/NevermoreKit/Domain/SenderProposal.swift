@@ -255,6 +255,12 @@ extension SenderProposal {
 public enum ProposalOverrideWarning {
     public static let confirmTitle = "Unsubscribe Anyway"
 
+    /// The part that is true whoever objected, so `UnsubscribeExposureWarning`
+    /// can say it once rather than keeping a second copy of it (TASK-30).
+    public static let closingParagraph =
+        "Unsubscribing tells the sender the address is live and read, which cannot be "
+        + "taken back. Their recommendation is still one keystroke away in the row."
+
     public static func title(count: Int) -> String {
         count == 1
             ? "The agent recommended against unsubscribing from this sender"
@@ -267,10 +273,6 @@ public enum ProposalOverrideWarning {
         let lines = items.map { item in
             "\(item.senderName) — recommended: \(item.recommendation.badgeTitle). \(item.reason)"
         }
-        return
-            (lines + [
-                "Unsubscribing tells the sender the address is live and read, which cannot be "
-                    + "taken back. Their recommendation is still one keystroke away in the row."
-            ]).joined(separator: "\n\n")
+        return (lines + [closingParagraph]).joined(separator: "\n\n")
     }
 }

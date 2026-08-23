@@ -102,6 +102,16 @@ Nevermore is the opposite shape:
   list stays something you can actually read before you press the button. A
   selection a rule filled always shows the confirmation sheet, even if you have
   turned confirmations off.
+- **It will tell you not to unsubscribe.** An unsubscribe proves to a stranger
+  that the address is live and read by a person, and no amount of clicking takes
+  that back. Where a sender's own mail argues against it — an unsubscribe link
+  hidden behind a URL shortener or pointed at a bare IP address, or an
+  unsubscribe reply addressed to somebody's Gmail rather than a list manager —
+  the inspector says so and recommends Ignore or Trash instead. It advises and
+  never acts: no button is disabled, and the confirmation it puts up can be
+  answered yes. Senders whose unsubscribe is simply handled by a bulk-mail
+  provider get a note explaining that and nothing more, because that is how most
+  legitimate mail works and a warning that fires on everything is worthless.
 - **Trash with undo.** Messages move to your provider's Trash and `⌘Z` puts
   them back.
 - **Alias-aware.** Send-as addresses are inferred from your Sent folder, so

@@ -6222,4 +6222,528 @@ Harness.suite("UnsubscribePeriodReport") {
     }
 }
 
+// MARK: - Authentication-Results parsing (TASK-30)
+
+/// A Gmail header for mail that authenticated cleanly, comments and all.
+let authPassHeader = """
+    mx.google.com;
+           dkim=pass header.i=@substack.com header.s=google header.b=Xy1zAbc;
+           spf=pass (google.com: domain of bounces+1-abc@substack.com designates \
+    209.85.220.41 as permitted sender) smtp.mailfrom="bounces+1-abc@substack.com";
+           dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=substack.com
+    """
+
+/// The shape a cold sender arrives in: nothing lines up, and DMARC says so.
+let authFailHeader = """
+    mx.google.com;
+           spf=softfail (google.com: domain of transitioning sales@coldoutreach.biz does not \
+    designate 45.9.1.2 as permitted sender) smtp.mailfrom=sales@coldoutreach.biz;
+           dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=coldoutreach.biz
+    """
+
+Harness.suite("AuthenticationResults") {
+    Harness.test("reads the authority and all three verdicts out of a Gmail header") {
+        let auth = AuthenticationResults(header: authPassHeader)
+        eq(auth?.authority, "mx.google.com")
+        eq(auth?.spf, .pass)
+        eq(auth?.dkim, .pass)
+        eq(auth?.dmarc, .pass)
+        eq(auth?.headerFrom, "substack.com")
+        expect(auth?.isSilent == false)
+    }
+
+    // The comment Google writes into the SPF clause contains both a semicolon's
+    // worth of punctuation and several `=` signs. Splitting before stripping it
+    // produces garbage, so this is the case that decides the parser works.
+    Harness.test("a comment full of punctuation does not derail the split") {
+        let auth = AuthenticationResults(header: authFailHeader)
+        eq(auth?.spf, .softfail)
+        eq(auth?.dmarc, .fail)
+        eq(auth?.headerFrom, "coldoutreach.biz")
+        eq(auth?.dkim, nil)
+    }
+
+    Harness.test("nested and escaped comment text is removed whole") {
+        let auth = AuthenticationResults(
+            header: #"mx.a.net; dkim=pass (a (nested; comment=here) tail) header.i=@a.net"#)
+        eq(auth?.dkim, .pass)
+        eq(auth?.authority, "mx.a.net")
+    }
+
+    // A message can carry several signatures, and one verifying is what makes it
+    // signed. Reporting the first would call a signed message unsigned.
+    Harness.test("one passing DKIM signature outweighs a failing one, in any order") {
+        eq(
+            AuthenticationResults(
+                header: "mx.a.net; dkim=fail header.i=@list.ex; dkim=pass header.i=@acme.com")?
+                .dkim, .pass)
+        eq(
+            AuthenticationResults(
+                header: "mx.a.net; dkim=pass header.i=@acme.com; dkim=fail header.i=@list.ex")?
+                .dkim, .pass)
+    }
+
+    Harness.test("DMARC's header.from wins over another method's") {
+        let auth = AuthenticationResults(
+            header: "mx.a.net; dkim=pass header.from=bounce.acme.com; "
+                + "dmarc=pass header.from=acme.com")
+        eq(auth?.headerFrom, "acme.com")
+    }
+
+    Harness.test("a full address in header.from reduces to its domain") {
+        eq(AuthenticationResults.domainPart("News <hi@Acme.COM>"), "acme.com")
+        eq(AuthenticationResults.domainPart("acme.com"), "acme.com")
+        eq(AuthenticationResults.domainPart(""), nil)
+    }
+
+    Harness.test("a header that asserts nothing is silent rather than failing") {
+        let auth = AuthenticationResults(header: "example.com; none")
+        expect(auth != nil, "still parses")
+        expect(auth?.isSilent == true)
+        // arc is a method this type does not model; it must not be mistaken for
+        // one that it does.
+        expect(AuthenticationResults(header: "example.com; arc=pass")?.isSilent == true)
+    }
+
+    Harness.test("nothing to parse gives nothing back") {
+        expect(AuthenticationResults(header: nil) == nil)
+        expect(AuthenticationResults(header: "   ") == nil)
+    }
+
+    // The store keeps the raw header; whatever wrote it may or may not have kept
+    // the field name, and a message can carry one header per hop.
+    Harness.test("takes the topmost of several headers, with or without field names") {
+        let both = "Authentication-Results: mx.google.com; dmarc=fail header.from=a.com\n"
+            + "Authentication-Results: relay.upstream.net; dmarc=pass header.from=a.com"
+        let auth = AuthenticationResults(header: both)
+        eq(auth?.authority, "mx.google.com")
+        eq(auth?.dmarc, .fail)
+        eq(AuthenticationResults(header: "Authentication-Results: mx.a.net; spf=pass")?.spf, .pass)
+    }
+
+    Harness.test("a header folded across lines parses as one") {
+        let folded = "mx.google.com;\r\n\tdkim=pass header.i=@acme.com;\r\n\tdmarc=pass "
+            + "header.from=acme.com"
+        eq(AuthenticationResults(header: folded)?.dmarc, .pass)
+        eq(AuthenticationResults(header: folded)?.dkim, .pass)
+    }
+
+    // The distinction the whole feature rests on: "I could not tell" is not
+    // "this sender is lying", and treating it as one is how a warning starts
+    // firing on ordinary mail.
+    Harness.test("only fail is a failure — not neutral, none, or either error") {
+        expect(AuthMethodResult.fail.isFailure)
+        for result: AuthMethodResult in [.pass, .softfail, .neutral, .none, .policy,
+                                         .permerror, .temperror] {
+            expect(!result.isFailure, "\(result.rawValue) must not read as a failure")
+        }
+    }
+
+    Harness.test("a method spelled with a version number still parses") {
+        eq(AuthenticationResults.methodResult("dkim/1=pass")?.method, "dkim")
+        eq(AuthenticationResults.methodResult("dkim/1=pass")?.result, .pass)
+        expect(AuthenticationResults.methodResult("nonsense") == nil)
+        expect(AuthenticationResults.methodResult("dkim=notaverdict") == nil)
+    }
+}
+
+// MARK: - The verdict a sender's own mail supports (TASK-30)
+
+func trustMessage(
+    _ uid: UInt32,
+    from: String = "news@acme.com",
+    name: String = "Acme",
+    unsubscribe: String? = "<https://acme.com/u?id=1>",
+    auth: String? = nil,
+    listID: String? = nil,
+    daysAgo: Double = 1
+) -> EmailMessage {
+    let host = from.contains("@") ? String(from.split(separator: "@").last!) : ""
+    return EmailMessage(
+        uid: MessageUID(uid),
+        sender: EmailSender(displayName: name, address: from, host: host),
+        subject: "Subject \(uid)",
+        receivedAt: Date().addingTimeInterval(-daysAgo * 86400),
+        isUnread: true,
+        unsubscribe: ListUnsubscribe(header: unsubscribe),
+        deliveredTo: "me@example.com",
+        messageId: "<\(uid)@acme.com>",
+        listID: listID,
+        authentication: AuthenticationResults(header: auth))
+}
+
+func trustGroup(_ messages: [EmailMessage], key: String = "acme.com") -> SenderGroup {
+    SenderGroup(id: GroupID(kind: .domain, key: key), messages: messages)
+}
+
+Harness.suite("SenderTrustVerdict — what the mail provider said") {
+    // Today's state of the world, and the one that must stay quiet: the sync
+    // does not fetch Authentication-Results yet, so every message has none.
+    Harness.test("no Authentication-Results anywhere means nothing is claimed") {
+        let verdict = SenderTrustVerdict.of(trustGroup([trustMessage(1), trustMessage(2)]))
+        expect(verdict.isEmpty, "found \(verdict.findings.map(\.title))")
+        expect(!verdict.advisesAgainstUnsubscribing)
+        expect(verdict.recommendedAction == nil)
+    }
+
+    Harness.test("every checked message failing DMARC is a strong finding") {
+        let messages = (1...3).map {
+            trustMessage(
+                $0, from: "sales@coldoutreach.biz", name: "Sales",
+                unsubscribe: "<https://coldoutreach.biz/u>", auth: authFailHeader)
+        }
+        let verdict = SenderTrustVerdict.of(trustGroup(messages, key: "coldoutreach.biz"))
+        let finding = verdict.findings.first { $0.kind == .authenticationFailed }
+        eq(finding?.weight, .strong)
+        expect(verdict.advisesAgainstUnsubscribing)
+        eq(verdict.recommendedAction, .ignore)
+        // AC #5: the claim is attributed, and it is attributed to the server
+        // that actually made it.
+        expect(finding?.detail.contains("mx.google.com") == true, "names the authority")
+        expect(finding?.detail.contains("not Nevermore's") == true, "disclaims authorship")
+        // AC #3: the advice is to say nothing, not to ask them to stop.
+        expect(finding?.detail.contains("ignore or trash") == true)
+    }
+
+    // Forwarded mail fails these checks constantly. A sender who sometimes
+    // passes is a sender whose mail sometimes took an odd route, and warning
+    // about that is how people learn to click through warnings.
+    Harness.test("a failure among passes is advisory only") {
+        let verdict = SenderTrustVerdict.of(
+            trustGroup([
+                trustMessage(1, auth: authPassHeader.replacingOccurrences(
+                    of: "substack.com", with: "acme.com")),
+                trustMessage(2, auth: authFailHeader.replacingOccurrences(
+                    of: "coldoutreach.biz", with: "acme.com")),
+            ]))
+        let finding = verdict.findings.first { $0.kind == .authenticationFailed }
+        eq(finding?.weight, .advisory)
+        expect(!verdict.advisesAgainstUnsubscribing)
+        expect(verdict.recommendedAction == nil)
+        expect(finding?.detail.contains("1 of 2") == true)
+    }
+
+    // Mailing lists rewrite what they forward, which breaks DMARC by design.
+    // A list failing is a fact about mailing lists, not about this sender.
+    Harness.test("a mailing list that fails throughout is advisory, not strong") {
+        let messages = (1...3).map {
+            trustMessage(
+                $0, from: "list@acme.com",
+                auth: authFailHeader.replacingOccurrences(
+                    of: "coldoutreach.biz", with: "acme.com"),
+                listID: "announce.acme.com")
+        }
+        let verdict = SenderTrustVerdict.of(trustGroup(messages))
+        eq(verdict.findings.first { $0.kind == .authenticationFailed }?.weight, .advisory)
+        expect(!verdict.advisesAgainstUnsubscribing)
+    }
+
+    // A verdict about somebody else's domain is somebody else's verdict.
+    Harness.test("a verdict whose header.from is a different domain is not read at all") {
+        let wrongDomain = "mx.google.com; dmarc=fail (p=NONE) header.from=forwarder.example"
+        let verdict = SenderTrustVerdict.of(
+            trustGroup([trustMessage(1, auth: wrongDomain)]))
+        expect(verdict.findings.allSatisfy { $0.kind != .authenticationFailed })
+    }
+
+    Harness.test("a subdomain in header.from still counts as the same sender") {
+        let sub = "mx.google.com; dmarc=fail (p=NONE) header.from=mail.acme.com"
+        let verdict = SenderTrustVerdict.of(trustGroup([trustMessage(1, auth: sub)]))
+        eq(verdict.findings.first { $0.kind == .authenticationFailed }?.weight, .strong)
+    }
+
+    // Without a DMARC verdict, neither SPF nor DKIM means much alone — both
+    // break on forwarded mail. Together they are worth reporting.
+    Harness.test("SPF and DKIM are only read together, and only without DMARC") {
+        func verdict(_ header: String) -> SenderTrustVerdict {
+            SenderTrustVerdict.of(trustGroup([trustMessage(1, auth: header)]))
+        }
+        expect(verdict("mx.a.net; spf=fail; dkim=fail").advisesAgainstUnsubscribing)
+        expect(!verdict("mx.a.net; spf=fail; dkim=pass").advisesAgainstUnsubscribing)
+        expect(!verdict("mx.a.net; spf=fail").advisesAgainstUnsubscribing)
+        // A DMARC pass settles it, whatever the other two did.
+        expect(
+            !verdict("mx.a.net; spf=fail; dkim=fail; dmarc=pass header.from=acme.com")
+                .advisesAgainstUnsubscribing)
+    }
+
+    Harness.test("a silent header is not evidence") {
+        let verdict = SenderTrustVerdict.of(
+            trustGroup([trustMessage(1, auth: "mx.google.com; none")]))
+        expect(verdict.findings.allSatisfy { $0.kind != .authenticationFailed })
+    }
+}
+
+// MARK: - Where the unsubscribe would actually go (TASK-30 AC #4)
+
+Harness.suite("SenderTrustVerdict — the unsubscribe target") {
+    // The single most important test in this file. Nearly all legitimate bulk
+    // mail unsubscribes on the sending platform's domain, not the brand's. If
+    // that produced a warning, the warning would be worthless within a day.
+    Harness.test("a bulk-mail platform's unsubscribe link raises nothing strong") {
+        for target in [
+            "https://acme.us1.list-manage.com/unsubscribe?u=1&id=2",
+            "https://u1234.ct.sendgrid.net/wf/unsubscribe?tok=abc",
+            "https://email.klaviyo.com/unsub?c=1",
+            "https://click.e.constantcontact.com/rs6.net/on.jsp?x=1",
+        ] {
+            let verdict = SenderTrustVerdict.of(
+                trustGroup([trustMessage(1, unsubscribe: "<\(target)>")]))
+            expect(
+                !verdict.advisesAgainstUnsubscribing,
+                "\(target) must not argue against unsubscribing")
+        }
+    }
+
+    Harness.test("a known platform is not even worth an advisory note") {
+        let verdict = SenderTrustVerdict.of(
+            trustGroup([
+                trustMessage(1, unsubscribe: "<https://acme.us1.list-manage.com/unsubscribe?u=1>")
+            ]))
+        expect(verdict.isEmpty, "found \(verdict.findings.map(\.title))")
+    }
+
+    Harness.test("the sender's own domain, or a subdomain of it, raises nothing") {
+        for target in ["https://acme.com/u", "https://email.acme.com/u", "https://a.b.acme.com/u"] {
+            let verdict = SenderTrustVerdict.of(
+                trustGroup([trustMessage(1, unsubscribe: "<\(target)>")]))
+            expect(verdict.isEmpty, "\(target) raised \(verdict.findings.map(\.title))")
+        }
+    }
+
+    Harness.test("the same brand on another public suffix is the same brand") {
+        let verdict = SenderTrustVerdict.of(
+            trustGroup([trustMessage(1, unsubscribe: "<https://acme.co.uk/u>")]))
+        expect(verdict.isEmpty, "found \(verdict.findings.map(\.title))")
+    }
+
+    Harness.test("a mailing list's own domain explains its unsubscribe target") {
+        let verdict = SenderTrustVerdict.of(
+            trustGroup([
+                trustMessage(
+                    1, unsubscribe: "<https://lists.wastatepta.org/u>",
+                    listID: "ptamemberconnection.wastatepta.org")
+            ]))
+        expect(verdict.isEmpty, "found \(verdict.findings.map(\.title))")
+    }
+
+    // AC #4. Advisory and never more: the list of platforms above will never be
+    // complete, so an unrecognised one has to read as "have a look" rather than
+    // as an accusation.
+    Harness.test("an unexplained third-party target is flagged, and only advisory") {
+        let verdict = SenderTrustVerdict.of(
+            trustGroup([trustMessage(1, unsubscribe: "<https://tracking-partner.xyz/u?id=9>")]))
+        let finding = verdict.findings.first { $0.kind == .unrelatedUnsubscribeTarget }
+        expect(finding != nil, "not flagged")
+        eq(finding?.weight, .advisory)
+        expect(!verdict.advisesAgainstUnsubscribing, "must not change the recommendation")
+        expect(finding?.detail.contains("acme.com") == true)
+        expect(finding?.detail.contains("tracking-partner.xyz") == true)
+        // The copy has to say the normal case is normal, or it reads as an alarm.
+        expect(finding?.detail.contains("That is normal") == true)
+    }
+
+    Harness.test("a shortened unsubscribe link is strong") {
+        let verdict = SenderTrustVerdict.of(
+            trustGroup([trustMessage(1, unsubscribe: "<https://bit.ly/3xYz>")]))
+        eq(verdict.headline?.kind, .shortenedUnsubscribeTarget)
+        eq(verdict.recommendedAction, .ignore)
+    }
+
+    Harness.test("an unsubscribe link at a bare IP address is strong") {
+        for target in ["https://45.9.1.2/unsub", "https://[2001:db8::1]/unsub"] {
+            let verdict = SenderTrustVerdict.of(
+                trustGroup([trustMessage(1, unsubscribe: "<\(target)>")]))
+            eq(verdict.headline?.kind, .bareAddressUnsubscribeTarget, target)
+        }
+        // A domain that merely looks numeric is a domain.
+        expect(!SenderTrustVerdict.isBareAddress("123.acme.com"))
+        expect(SenderTrustVerdict.isBareAddress("45.9.1.2"))
+    }
+
+    Harness.test("an unsubscribe reply addressed to a free consumer mailbox is strong") {
+        let verdict = SenderTrustVerdict.of(
+            trustGroup([
+                trustMessage(1, unsubscribe: "<mailto:leadgen.dave@gmail.com?subject=stop>")
+            ]))
+        eq(verdict.headline?.kind, .consumerMailboxUnsubscribeTarget)
+        eq(verdict.recommendedAction, .ignore)
+        expect(verdict.headline?.detail.contains("leadgen.dave@gmail.com") == true)
+    }
+
+    Harness.test("a mailto at the sender's own domain is the ordinary case") {
+        let verdict = SenderTrustVerdict.of(
+            trustGroup([trustMessage(1, unsubscribe: "<mailto:unsub@acme.com?subject=stop>")]))
+        expect(verdict.isEmpty, "found \(verdict.findings.map(\.title))")
+    }
+
+    // The app acts on the newest message that has a target, so that is the
+    // message the finding has to describe.
+    Harness.test("the target examined is the one the app would actually use") {
+        let verdict = SenderTrustVerdict.of(
+            trustGroup([
+                trustMessage(1, unsubscribe: "<https://bit.ly/new>", daysAgo: 1),
+                trustMessage(2, unsubscribe: "<https://acme.com/u>", daysAgo: 30),
+            ]))
+        eq(verdict.headline?.kind, .shortenedUnsubscribeTarget)
+    }
+
+    Harness.test("a sender with nothing to unsubscribe from raises nothing") {
+        let verdict = SenderTrustVerdict.of(trustGroup([trustMessage(1, unsubscribe: nil)]))
+        expect(verdict.isEmpty)
+    }
+}
+
+// MARK: - Whose recommendation wins the badge (TASK-52 left this open)
+
+Harness.suite("SenderTrustVerdict.recommendation(given:)") {
+    let strong = SenderTrustVerdict(findings: [
+        TrustFinding(
+            kind: .authenticationFailed, weight: .strong, title: "t", detail: "d")
+    ])
+    let advisoryOnly = SenderTrustVerdict(findings: [
+        TrustFinding(
+            kind: .unrelatedUnsubscribeTarget, weight: .advisory, title: "t", detail: "d")
+    ])
+
+    Harness.test("the app's evidence vetoes an unsubscribe the agent asked for") {
+        eq(strong.recommendation(given: .unsubscribe), .ignore)
+        // And for a sender no agent ever looked at, which is most of them.
+        eq(strong.recommendation(given: nil), .ignore)
+    }
+
+    // The asymmetry, and the reason for it: a clean read is evidence of nothing.
+    // A spammer publishing SPF and DKIM for their own throwaway domain passes
+    // DMARC first time. An agent that read the content and said "cold outreach"
+    // knows something the headers cannot show.
+    Harness.test("a clean read never talks an agent out of ignoring a sender") {
+        eq(SenderTrustVerdict.none.recommendation(given: .ignore), .ignore)
+        eq(SenderTrustVerdict.none.recommendation(given: .trash), .trash)
+        eq(advisoryOnly.recommendation(given: .ignore), .ignore)
+    }
+
+    Harness.test("a clean read leaves an unsubscribe alone") {
+        eq(SenderTrustVerdict.none.recommendation(given: .unsubscribe), .unsubscribe)
+        eq(SenderTrustVerdict.none.recommendation(given: nil), .unsubscribe)
+        eq(advisoryOnly.recommendation(given: .unsubscribe), .unsubscribe)
+    }
+
+    // The verdict only ever argues against exposure. It has no evidence that
+    // any sender is a genuine subscription, so it must never upgrade anything.
+    Harness.test("the verdict can veto an unsubscribe and can never mint one") {
+        for stated: RecommendedAction in [.ignore, .trash] {
+            eq(strong.recommendation(given: stated), stated)
+        }
+        expect(SenderTrustVerdict.none.recommendedAction == nil)
+    }
+
+    Harness.test("only a strong finding is allowed to change anything") {
+        expect(!advisoryOnly.advisesAgainstUnsubscribing)
+        expect(advisoryOnly.recommendedAction == nil)
+        expect(advisoryOnly.headline == nil)
+        expect(strong.headline?.kind == .authenticationFailed)
+    }
+}
+
+// MARK: - The one dialog both objections share (TASK-30 + TASK-52)
+
+Harness.suite("UnsubscribeExposureWarning") {
+    let agentObjection = UnsubscribeObjection(
+        senderName: "Growth Partners",
+        recommendation: .ignore,
+        reason: "cold outreach; no prior relationship",
+        source: .agent)
+    let providerObjection = UnsubscribeObjection(
+        senderName: "Deals Daily",
+        recommendation: .ignore,
+        reason: "Your mail provider could not verify this sender",
+        source: .mailProvider)
+
+    Harness.test("an agent-only set keeps the wording TASK-52 settled on") {
+        eq(
+            UnsubscribeExposureWarning.title(for: [agentObjection]),
+            ProposalOverrideWarning.title(count: 1))
+    }
+
+    // "Your provider could not verify them" would be a lie about a shortened
+    // link, so anything the app found gets wording that fits every finding.
+    Harness.test("anything the app found gets wording that fits every finding") {
+        let title = UnsubscribeExposureWarning.title(for: [providerObjection])
+        expect(title.contains("a reason not to unsubscribe"))
+        eq(
+            UnsubscribeExposureWarning.title(for: [providerObjection, agentObjection]),
+            "There are reasons not to unsubscribe from 2 of these senders")
+    }
+
+    Harness.test("every sender is named, with its reason verbatim and who gave it") {
+        let message = UnsubscribeExposureWarning.message(
+            for: [agentObjection, providerObjection])
+        expect(message.contains("Growth Partners"))
+        expect(message.contains("cold outreach; no prior relationship"))
+        expect(message.contains("the agent"))
+        expect(message.contains("Deals Daily"))
+        // AC #5 again, in the place the irreversible decision is actually taken.
+        expect(message.contains("Your mail provider could not verify this sender"))
+        expect(message.contains("Nevermore, from the message headers"))
+    }
+
+    Harness.test("the closing paragraph is shared with TASK-52's dialog, not copied") {
+        expect(
+            UnsubscribeExposureWarning.message(for: [providerObjection])
+                .contains(ProposalOverrideWarning.closingParagraph))
+        expect(
+            ProposalOverrideWarning.message(for: [
+                SenderProposal.Item(
+                    groupKey: "domain:a.com", senderName: "A", senderEmail: "a@a.com",
+                    reason: "r", recommendation: .ignore)
+            ]).contains(ProposalOverrideWarning.closingParagraph))
+        expect(ProposalOverrideWarning.closingParagraph.contains("cannot be taken back"))
+    }
+}
+
+// MARK: - Storing it, and the switch that is not on yet (TASK-30 AC #1)
+
+Harness.suite("Authentication-Results storage and fetch") {
+    // Stated as a test rather than a comment, because the honest claim about
+    // this feature is "everything but the fetch". TASK-36 measures the cost and
+    // flips this; until then a passing suite must not imply the app is asking
+    // for the field.
+    Harness.test("the sync does not ask for Authentication-Results yet") {
+        expect(!SyncHeaderFields.fetchesAuthenticationResults)
+        expect(SyncHeaderFields.optional.isEmpty)
+        eq(SyncHeaderFields.authenticationResults, "Authentication-Results")
+    }
+
+    Harness.test("the raw header survives a store round-trip and re-parses") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([trustMessage(1, auth: authFailHeader)])
+            let read = try store.allMessages().first
+            eq(read?.authentication?.dmarc, .fail)
+            eq(read?.authentication?.authority, "mx.google.com")
+            eq(read?.authentication?.raw, authFailHeader)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    Harness.test("a message with no header stores and reads back as having none") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([trustMessage(1)])
+            expect(try store.allMessages().first?.authentication == nil)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    // The sync supplies NULL for this column whenever the switch is off, and the
+    // ordinary upsert rule — last write wins — would then erase a verdict
+    // already on file the first time anyone re-synced.
+    Harness.test("a re-sync without the header keeps the verdict already stored") {
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([trustMessage(1, auth: authFailHeader)])
+            try store.upsert([trustMessage(1, auth: nil)])
+            eq(try store.allMessages().first?.authentication?.dmarc, .fail)
+        } catch { expect(false, "threw: \(error)") }
+    }
+}
+
 exit(Harness.finish())

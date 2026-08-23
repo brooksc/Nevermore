@@ -247,12 +247,22 @@ Sections, top to bottom:
    Unsubscribe will actually do. This is where the app is honest: *"Sends a
    one-click request directly to Acme. No page will open."* vs *"Opens Acme's
    unsubscribe page — you may need to confirm there."*
-4. **History** — if previously unsubscribed: date and outcome
+4. **What the mail itself says** — shown only when there is something to say
+   (TASK-30). One block per finding: a heading, and an explanation that names
+   who found it and what it does not cover. A **strong** finding — an
+   unsubscribe link behind a shortener or at a bare IP, an unsubscribe reply
+   addressed to a personal mailbox, or a provider verdict that the sender could
+   not be verified — gets an orange shield and closes with a suggestion to
+   Ignore or Trash instead. An **advisory** one — the unsubscribe being handled
+   on a third-party domain, which is how most bulk mail works — gets a grey
+   `info.circle` and suggests nothing. It sits above Actions because it is an
+   argument about which button to press. It never disables a button.
+5. **History** — if previously unsubscribed: date and outcome
    (Requested / Confirmed / Failed), plus a **Forget** button to clear the record.
-5. **Recent messages** — last 10 subjects with dates. Each row has a context
+6. **Recent messages** — last 10 subjects with dates. Each row has a context
    menu with *View in Gmail* and *Move to Trash*. This is a capability the TUI
    never had: acting on individual messages rather than whole senders.
-6. **Actions** — `Unsubscribe` (prominent, tinted), `Ignore`, `Trash Messages`.
+7. **Actions** — `Unsubscribe` (prominent, tinted), `Ignore`, `Trash Messages`.
 
 ---
 

@@ -321,7 +321,7 @@ struct MainWindowView: View {
         // that contradicts an agent's recommendation is stopped and asked about
         // (TASK-52). Doing it in the Proposed view would have left the menu and
         // the inspector as two ways round it.
-        guard model.mayUnsubscribeFromProposal(ids, alsoDelete: false) else { return }
+        guard model.mayUnsubscribe(ids, alsoDelete: false) else { return }
         let plan = model.plan(for: ids)
         guard !plan.isEmpty else { return }
         immediateDelete = false
@@ -344,7 +344,7 @@ struct MainWindowView: View {
     /// Recoverable: the messages go to the provider's Trash, and ⌘Z restores
     /// them for batches under the undo limit.
     private func beginUnsubscribeAndDelete(_ ids: Set<GroupID>) {
-        guard model.mayUnsubscribeFromProposal(ids, alsoDelete: true) else { return }
+        guard model.mayUnsubscribe(ids, alsoDelete: true) else { return }
         let plan = model.plan(for: ids)
         guard !plan.isEmpty else { return }
         immediateDelete = true
