@@ -167,10 +167,39 @@ public final class MessageStore: Sendable {
 
     // MARK: - Messages
 
-    public func upsert(_ messages: [EmailMessage]) throws {
-        guard !messages.isEmpty else { return }
+    /// What an upsert actually did. `ON CONFLICT DO UPDATE` reports one change
+    /// either way, so "was this new" is answered by the row count moving, not
+    /// by the statement.
+    public struct UpsertOutcome: Sendable, Equatable {
+        /// Rows that did not exist before.
+        public let inserted: Int
+        /// Rows that did — refreshed in place. Incremental sync re-reads a
+        /// two-day overlap on purpose, so this is routinely non-zero.
+        public let updated: Int
+
+        public init(inserted: Int, updated: Int) {
+            self.inserted = inserted
+            self.updated = updated
+        }
+    }
+
+    /// Write messages, reporting how many were new.
+    ///
+    /// The split matters because the app shows a "found" count and a "stored"
+    /// count and, until TASK-7, could not explain the difference between them:
+    /// a re-read message is not a lost one, and without this it looked like
+    /// one. Two `COUNT(*)`s over a table of this size are far cheaper than the
+    /// fetch that produced the rows.
+    ///
+    /// Duplicate UIDs within `messages` count as updates. The backend removes
+    /// them before calling — see `SyncDropReason.duplicateUID` — so in practice
+    /// they do not arise here.
+    @discardableResult
+    public func upsert(_ messages: [EmailMessage]) throws -> UpsertOutcome {
+        guard !messages.isEmpty else { return UpsertOutcome(inserted: 0, updated: 0) }
         let now = Date().timeIntervalSince1970
-        try pool.write { db in
+        return try pool.write { db in
+            let before = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM message") ?? 0
             for m in messages {
                 try db.execute(
                     sql: """
@@ -214,6 +243,9 @@ public final class MessageStore: Sendable {
                         m.authentication?.raw,
                     ])
             }
+            let after = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM message") ?? 0
+            let inserted = max(0, after - before)
+            return UpsertOutcome(inserted: inserted, updated: messages.count - inserted)
         }
     }
 

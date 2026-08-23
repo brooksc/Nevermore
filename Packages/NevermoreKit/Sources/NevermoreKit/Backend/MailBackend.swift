@@ -58,6 +58,26 @@ public enum SyncPhase: Sendable {
     case fetching(done: Int, of: Int)
 }
 
+/// What one sync produced: the messages worth storing, where to resume from,
+/// and an account of every located message that is not in the first list.
+///
+/// A struct rather than the tuple this used to be, because the third member is
+/// the point: "14,600 found, 12,300 stored" was a question the app could not
+/// answer, and an unnamed third tuple element is a poor place to keep an answer.
+public struct SyncResult: Sendable {
+    public let messages: [EmailMessage]
+    public let token: SyncToken
+    /// Why the located count and `messages.count` differ. The store half of it
+    /// is filled in by whoever performs the upsert.
+    public var attribution: SyncAttribution
+
+    public init(messages: [EmailMessage], token: SyncToken, attribution: SyncAttribution) {
+        self.messages = messages
+        self.token = token
+        self.attribution = attribution
+    }
+}
+
 /// Where a message sat before it was trashed, so undo can put it back there.
 ///
 /// Two cases, because two is all IMAP can express. On Gmail the difference is
@@ -111,13 +131,13 @@ public protocol MailBackend: Sendable {
     /// Every message carrying `List-Unsubscribe`. Slow; first run only.
     func discoverAll(
         progress: @Sendable @escaping (SyncPhase) -> Void
-    ) async throws -> (messages: [EmailMessage], token: SyncToken)
+    ) async throws -> SyncResult
 
     /// Messages that arrived since `token`. Fast.
     func changes(
         since token: SyncToken?,
         progress: @Sendable @escaping (SyncPhase) -> Void
-    ) async throws -> (messages: [EmailMessage], token: SyncToken)
+    ) async throws -> SyncResult
 
     /// Move messages to Trash. Reports the UIDs actually moved, which may be a
     /// prefix of the request if the server gave up partway, and which of those

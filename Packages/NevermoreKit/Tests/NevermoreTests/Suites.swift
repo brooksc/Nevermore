@@ -6090,3 +6090,159 @@ struct AuthenticationResultsStorageAndFetchTests {
         } catch { expect(false, "threw: \(error)") }
     }
 }
+
+// MARK: - Sync accounting (TASK-7)
+
+@Suite("SyncDropReason.forUnusableHeader")
+struct SyncDropReasonClassificationTests {
+    // The classifier only ever runs on headers ListUnsubscribe already refused,
+    // so every case below is first checked to be a genuine refusal. A header
+    // that parses would make the classification meaningless.
+    private func rejected(_ header: String?) -> SyncDropReason {
+        expect(ListUnsubscribe(header: header) == nil, "should not parse: \(header ?? "nil")")
+        return SyncDropReason.forUnusableHeader(header)
+    }
+
+    @Test("a missing header is not an unsupported scheme") func missingHeader() {
+        eq(rejected(nil), .noUnsubscribeHeader)
+    }
+
+    @Test("a blank header counts as missing") func blankHeader() {
+        eq(rejected("   "), .noUnsubscribeHeader)
+        eq(rejected(""), .noUnsubscribeHeader)
+    }
+
+    @Test("every target using a scheme we cannot open") func unsupportedScheme() {
+        eq(rejected("<ftp://lists.example.com/unsub>"), .unsupportedScheme)
+        eq(rejected("<news:example.list>, <ftp://x.example/u>"), .unsupportedScheme)
+        // The scheme comparison is case-insensitive, so this is genuinely
+        // unsupported rather than a supported one we failed to recognise.
+        eq(rejected("<NEWS:example.list>"), .unsupportedScheme)
+    }
+
+    @Test("a supported scheme that still yields nothing is our problem, not theirs") func unusableTarget() {
+        // No angle brackets at all: a malformed header, not a scheme we decline.
+        eq(rejected("https://ex.com/u"), .unusableTarget)
+        // mailto is supported; this address is rejected by the injection guard.
+        eq(rejected("<mailto:one@ex.com,two@ex.com>"), .unusableTarget)
+        eq(rejected("<mailto:nodomain>"), .unusableTarget)
+    }
+
+    @Test("mixing an unsupported scheme with an unusable supported one blames the supported one") func mixedSchemes() {
+        // Reporting this as `unsupportedScheme` would hide a parser bug behind
+        // a sender's choice of scheme.
+        eq(rejected("<ftp://x.example/u>, <mailto:one@ex.com,two@ex.com>"), .unusableTarget)
+    }
+}
+
+@Suite("SyncAttribution")
+struct SyncAttributionTests {
+    @Test("a sync whose parts add up balances") func balances() {
+        var a = SyncAttribution()
+        a.located = 100
+        a.fetched = 96
+        a.drop(.notFetched, count: 4)
+        a.drop(.ownMail, count: 6)
+        a.drop(.unsupportedScheme, count: 5)
+        a.record(MessageStore.UpsertOutcome(inserted: 80, updated: 5))
+        eq(a.dropped, 15)
+        eq(a.unaccounted, 0)
+        expect(a.balances, "80 + 5 + 15 == 100")
+    }
+
+    @Test("a drop with no case named reports itself rather than hiding") func unaccounted() {
+        // The failure mode this whole type exists to prevent: messages that
+        // vanish between the server and the store with nothing to point at.
+        var a = SyncAttribution()
+        a.located = 100
+        a.record(MessageStore.UpsertOutcome(inserted: 90, updated: 0))
+        eq(a.unaccounted, 10)
+        expect(!a.balances, "10 unexplained")
+        expect(a.summary.contains("UNACCOUNTED 10"), "summary says so: \(a.summary)")
+    }
+
+    @Test("counts accumulate per reason") func accumulates() {
+        var a = SyncAttribution()
+        a.drop(.ownMail)
+        a.drop(.ownMail)
+        a.drop(.ownMail, count: 3)
+        eq(a.count(.ownMail), 5)
+        eq(a.count(.duplicateUID), 0)
+    }
+
+    @Test("a zero drop leaves no row behind") func zeroDropIsNoRow() {
+        // `max(0, total - fetched)` is a real call site, and a "0 gone before
+        // we read them" line in the popover would be noise.
+        var a = SyncAttribution()
+        a.drop(.notFetched, count: 0)
+        a.drop(.ownMail, count: -3)
+        eq(a.significantDrops.count, 0)
+        eq(a.dropped, 0)
+    }
+
+    @Test("the breakdown reads largest first") func ordering() {
+        var a = SyncAttribution()
+        a.drop(.ownMail, count: 2)
+        a.drop(.unsupportedScheme, count: 40)
+        a.drop(.notFetched, count: 7)
+        eq(a.significantDrops.map(\.reason), [.unsupportedScheme, .notFetched, .ownMail])
+        eq(a.significantDrops.map(\.count), [40, 7, 2])
+    }
+
+    @Test("the log line carries every number a reader needs") func summaryContents() {
+        var a = SyncAttribution()
+        a.located = 14600
+        a.fetched = 14590
+        a.drop(.notFetched, count: 10)
+        a.drop(.ownMail, count: 2300)
+        a.record(MessageStore.UpsertOutcome(inserted: 12290, updated: 0))
+        for fragment in ["located 14600", "fetched 14590", "stored 12290 new", "ownMail 2300"] {
+            expect(a.summary.contains(fragment), "missing '\(fragment)' in: \(a.summary)")
+        }
+        expect(!a.summary.contains("UNACCOUNTED"), "it balances: \(a.summary)")
+    }
+
+    @Test("every reason has a label and an explanation") func everyReasonSpeaks() {
+        // The popover renders whatever comes back, so a case added later
+        // without copy would show a blank row rather than fail to compile.
+        for reason in SyncDropReason.allCases {
+            expect(!reason.label.isEmpty, "\(reason.rawValue) has no label")
+            expect(!reason.detail.isEmpty, "\(reason.rawValue) has no detail")
+        }
+    }
+}
+
+@Suite("MessageStore.upsert accounting")
+struct UpsertOutcomeTests {
+    @Test("new messages count as inserted") func inserted() {
+        do {
+            let store = try MessageStore.inMemory()
+            let outcome = try store.upsert([
+                makeMessage(1, from: "A <a@x.com>"), makeMessage(2, from: "B <b@y.com>"),
+            ])
+            eq(outcome, MessageStore.UpsertOutcome(inserted: 2, updated: 0))
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    @Test("re-reading the same messages counts as updated, not lost") func updated() {
+        // This is the number that explains an incremental sync: the two-day
+        // overlap re-reads messages on purpose, and without this they looked
+        // like located messages that never arrived.
+        do {
+            let store = try MessageStore.inMemory()
+            try store.upsert([makeMessage(1, from: "A <a@x.com>")])
+            let outcome = try store.upsert([
+                makeMessage(1, from: "A <a@x.com>"), makeMessage(2, from: "B <b@y.com>"),
+            ])
+            eq(outcome, MessageStore.UpsertOutcome(inserted: 1, updated: 1))
+            eq(try store.count(), 2)
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    @Test("an empty upsert reports nothing rather than failing") func empty() {
+        do {
+            let store = try MessageStore.inMemory()
+            eq(try store.upsert([]), MessageStore.UpsertOutcome(inserted: 0, updated: 0))
+        } catch { expect(false, "threw: \(error)") }
+    }
+}

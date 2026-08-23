@@ -1,8 +1,12 @@
+import NevermoreKit
 import SwiftUI
 
 /// The window's bottom status row (spec §12): counts · transient toast · sync state.
 struct StatusBarView: View {
     @Bindable var model: AppModel
+
+    /// Whether the breakdown of the last sync is open.
+    @State private var showingAccounting = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -70,7 +74,20 @@ struct StatusBarView: View {
         switch model.syncState {
         case .idle:
             if let date = model.lastSyncedAt {
-                Text("Last synced \(relative(date))")
+                // A plain label until there is something to explain. The
+                // breakdown hangs off "last synced" because that is where a
+                // user looks after noticing the server found more messages
+                // than the app is showing (TASK-7).
+                if let attribution = model.lastSyncAttribution, attribution.located > 0 {
+                    Button("Last synced \(relative(date))") { showingAccounting.toggle() }
+                        .buttonStyle(.link)
+                        .help("What the last sync found, and what became of it.")
+                        .popover(isPresented: $showingAccounting, arrowEdge: .top) {
+                            SyncAccountingView(attribution: attribution)
+                        }
+                } else {
+                    Text("Last synced \(relative(date))")
+                }
             } else {
                 Text("Not synced yet")
             }
@@ -101,6 +118,63 @@ struct StatusBarView: View {
                     .help(message)
                 Button("Retry") { model.startSync() }
                     .buttonStyle(.link)
+            }
+        }
+    }
+
+    /// Where the last sync's messages went.
+    ///
+    /// The app has always shown "N found" during a sync and a smaller number of
+    /// senders afterwards, and had no answer for the difference. Every line
+    /// here is one reason a located message was not stored, with a count — so
+    /// the answer is arithmetic a user can check rather than reassurance.
+    private struct SyncAccountingView: View {
+        let attribution: SyncAttribution
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Last sync")
+                    .font(.headline)
+                Text("\(attribution.located.formatted()) messages matched on the server.")
+                    .foregroundStyle(.secondary)
+
+                Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
+                    row(attribution.inserted, "Added to Nevermore", nil)
+                    if attribution.updated > 0 {
+                        row(
+                            attribution.updated, "Already had them",
+                            "Re-read on purpose: each sync overlaps the last by two days so nothing falls through the gap."
+                        )
+                    }
+                    ForEach(attribution.significantDrops, id: \.reason) { drop in
+                        row(drop.count, drop.reason.label, drop.reason.detail)
+                    }
+                    if !attribution.balances {
+                        row(
+                            attribution.unaccounted, "Unaccounted for",
+                            "Nevermore cannot explain these. Worth reporting."
+                        )
+                    }
+                }
+            }
+            .frame(width: 340, alignment: .leading)
+            .padding(14)
+        }
+
+        private func row(_ count: Int, _ label: String, _ detail: String?) -> some View {
+            GridRow(alignment: .firstTextBaseline) {
+                Text(count.formatted())
+                    .monospacedDigit()
+                    .gridColumnAlignment(.trailing)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(label)
+                    if let detail {
+                        Text(detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
         }
     }

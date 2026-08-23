@@ -84,15 +84,34 @@ let started = Date()
 let synced = await step("sync") {
     try await backend.changes(since: existingToken, progress: report)
 }
-guard let (messages, token) = synced else { exit(1) }
+guard var result = synced else { exit(1) }
+let messages = result.messages
+let token = result.token
 let elapsed = Date().timeIntervalSince(started)
 
-try store.upsert(messages)
+result.attribution.record(try store.upsert(messages))
 try store.setSyncToken(token)
 
 stamp("fetched \(messages.count) messages in \(String(format: "%.1f", elapsed))s")
 stamp("token: uidValidity=\(token.uidValidity) highestUID=\(token.highestUID)")
 stamp("stored total: \(try store.count())")
+
+// The measurement TASK-7 asks for. This is the only place it can be taken:
+// it needs a real mailbox, and the numbers are meaningless without one.
+let attribution = result.attribution
+print("")
+stamp("\u{001B}[1mwhere the located messages went\u{001B}[0m")
+stamp("  located (distinct UIDs the server matched): \(attribution.located)")
+stamp("  stored as new rows: \(attribution.inserted)")
+stamp("  already in the store, refreshed: \(attribution.updated)")
+for drop in attribution.significantDrops {
+    stamp("  \(drop.reason.rawValue): \(drop.count) — \(drop.reason.detail)")
+}
+if !attribution.balances {
+    stamp(
+        "  \u{001B}[33munaccounted: \(attribution.unaccounted)\u{001B}[0m "
+            + "— a drop exists that SyncDropReason does not name")
+}
 
 // Group them the way the UI will, and show the top senders.
 let all = try store.allMessages()

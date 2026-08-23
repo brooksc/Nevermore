@@ -152,7 +152,7 @@ public actor IMAPBackend: MailBackend {
 
     public func discoverAll(
         progress: @Sendable @escaping (SyncPhase) -> Void
-    ) async throws -> (messages: [EmailMessage], token: SyncToken) {
+    ) async throws -> SyncResult {
         let server = try await connected()
         let folders = try await resolvedFolders(on: server)
         let selection = try await select(folders.searchScope, on: server)
@@ -179,16 +179,20 @@ public actor IMAPBackend: MailBackend {
 
         let sorted = found.sorted()
         Log.backend.event("discovery found \(sorted.count) messages; fetching headers")
-        let messages = try await fetch(
+        var (messages, attribution) = try await fetch(
             uids: UIDSet(sorted.map { UID($0) }), from: server, progress: progress
         )
-        return (
-            filterOutOwnMail(messages),
-            SyncToken(
+        messages = filterOutOwnMail(messages, &attribution)
+        attribution.handedToStore = messages.count
+        Log.sync.event(attribution.summary)
+        return SyncResult(
+            messages: messages,
+            token: SyncToken(
                 uidValidity: selection.uidValidity.value,
                 highestUID: sorted.last ?? selection.uidNext.value,
                 lastSyncedAt: Date()
-            )
+            ),
+            attribution: attribution
         )
     }
 
@@ -278,7 +282,7 @@ public actor IMAPBackend: MailBackend {
     public func changes(
         since token: SyncToken?,
         progress: @Sendable @escaping (SyncPhase) -> Void
-    ) async throws -> (messages: [EmailMessage], token: SyncToken) {
+    ) async throws -> SyncResult {
         guard let token else { return try await discoverAll(progress: progress) }
 
         let server = try await connected()
@@ -311,15 +315,20 @@ public actor IMAPBackend: MailBackend {
         let candidates = UIDSet(uidValues.map { UID($0) })
         Log.backend.event("incremental sync since \(lastSync): \(candidates.count) candidate messages")
 
-        let messages = try await fetch(uids: candidates, from: server, progress: progress)
-        return (
-            filterOutOwnMail(messages),
-            SyncToken(
+        var (messages, attribution) = try await fetch(
+            uids: candidates, from: server, progress: progress)
+        messages = filterOutOwnMail(messages, &attribution)
+        attribution.handedToStore = messages.count
+        Log.sync.event(attribution.summary)
+        return SyncResult(
+            messages: messages,
+            token: SyncToken(
                 uidValidity: selection.uidValidity.value,
                 highestUID: max(
                     token.highestUID, maxUID(in: candidates, fallback: token.highestUID)),
                 lastSyncedAt: Date()
-            )
+            ),
+            attribution: attribution
         )
     }
 
@@ -329,13 +338,19 @@ public actor IMAPBackend: MailBackend {
         uids: UIDSet,
         from server: IMAPServer,
         progress: @Sendable @escaping (SyncPhase) -> Void
-    ) async throws -> [EmailMessage] {
-        guard !uids.isEmpty else { return [] }
+    ) async throws -> (messages: [EmailMessage], attribution: SyncAttribution) {
+        var attribution = SyncAttribution()
+        guard !uids.isEmpty else { return ([], attribution) }
 
         let all = uids.toArray()
         let total = all.count
+        attribution.located = total
         var result: [EmailMessage] = []
         result.reserveCapacity(total)
+        // The one piece of per-UID bookkeeping here, and it buys an exact
+        // answer: without it a UID the server listed twice would collapse
+        // inside SQLite and read as a message that vanished.
+        var seen = Set<UInt32>(minimumCapacity: total)
 
         // `Delivered-To` is set by the receiving mail server (Gmail and many
         // other MTAs), so it survives forwarding in a way the sender-controlled
@@ -360,18 +375,50 @@ public actor IMAPBackend: MailBackend {
             let infos = try await server.fetchMessageInfosBulk(
                 using: chunk, options: .slim, headerFields: headerFields
             )
-            result.append(contentsOf: infos.compactMap(Self.convert))
+            for info in infos {
+                switch Self.convert(info) {
+                case .message(let message):
+                    attribution.fetched += 1
+                    if seen.insert(message.uid.value).inserted {
+                        result.append(message)
+                    } else {
+                        attribution.drop(.duplicateUID)
+                    }
+                case .dropped(.notFetched):
+                    // A response with no UID: we cannot say which located
+                    // message it belongs to, so it counts as one we never got.
+                    break
+                case .dropped(let reason):
+                    attribution.fetched += 1
+                    attribution.drop(reason)
+                }
+            }
 
             offset = end
             progress(.fetching(done: offset, of: total))
         }
+        // Derived rather than tracked per UID: the difference between what was
+        // asked for and what came back needs no set membership test.
+        attribution.drop(.notFetched, count: max(0, total - attribution.fetched))
         Log.backend.detail("fetched headers for \(result.count)/\(total) messages")
-        return result
+        return (result, attribution)
     }
 
-    /// Map SwiftMail's `MessageInfo` onto our domain type.
-    private static func convert(_ info: MessageInfo) -> EmailMessage? {
-        guard let uid = info.uid else { return nil }
+    /// What `convert` made of one fetched message. Not a `Result`: a dropped
+    /// message is the app working as designed, and calling that an `Error`
+    /// would invite somebody to `throw` it and abandon the sync.
+    enum Conversion {
+        case message(EmailMessage)
+        case dropped(SyncDropReason)
+    }
+
+    /// Map SwiftMail's `MessageInfo` onto our domain type, or say why not.
+    ///
+    /// Returns a reason rather than `nil` so the sync can account for every
+    /// message it declines to store (TASK-7). Every refusal here was already
+    /// happening; only the explanation is new.
+    private static func convert(_ info: MessageInfo) -> Conversion {
+        guard let uid = info.uid else { return .dropped(.notFetched) }
 
         // Header lookup is case-insensitive per RFC 5322.
         let fields = info.additionalFields ?? [:]
@@ -379,17 +426,20 @@ public actor IMAPBackend: MailBackend {
             fields.first { $0.key.caseInsensitiveCompare(name) == .orderedSame }?.value
         }
 
+        let unsubscribeHeader = header("List-Unsubscribe")
         let unsubscribe = ListUnsubscribe(
-            header: header("List-Unsubscribe"),
+            header: unsubscribeHeader,
             postHeader: header("List-Unsubscribe-Post")
         )
         // A message with no unsubscribe target is not actionable, and storing it
         // would only inflate the local database.
-        guard unsubscribe != nil else { return nil }
+        guard unsubscribe != nil else {
+            return .dropped(.forUnusableHeader(unsubscribeHeader))
+        }
 
         let deliveredTo = header("Delivered-To") ?? header("To") ?? ""
 
-        return EmailMessage(
+        return .message(EmailMessage(
             uid: MessageUID(uid.value),
             sender: EmailSender(header: info.from ?? ""),
             subject: MIMEHeader.decode(info.subject ?? ""),
@@ -401,13 +451,18 @@ public actor IMAPBackend: MailBackend {
             listID: MailingList.id(fromHeader: header("List-ID")),
             authentication: AuthenticationResults(
                 header: header(SyncHeaderFields.authenticationResults))
-        )
+        ))
     }
 
-    /// Drop the user's own sent mail — the IMAP equivalent of `-in:sent`.
-    private func filterOutOwnMail(_ messages: [EmailMessage]) -> [EmailMessage] {
+    /// Drop the user's own sent mail — the IMAP equivalent of `-in:sent`,
+    /// counting what it removed.
+    private func filterOutOwnMail(
+        _ messages: [EmailMessage], _ attribution: inout SyncAttribution
+    ) -> [EmailMessage] {
         let own = Set((cachedSendAs ?? [primaryAddress]).map { $0.lowercased() })
-        return messages.filter { !own.contains($0.sender.address) }
+        let kept = messages.filter { !own.contains($0.sender.address) }
+        attribution.drop(.ownMail, count: messages.count - kept.count)
+        return kept
     }
 
     // MARK: - Mutations

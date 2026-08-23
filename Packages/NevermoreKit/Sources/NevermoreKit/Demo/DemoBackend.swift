@@ -19,7 +19,7 @@ public actor DemoBackend: MailBackend {
 
     public func discoverAll(
         progress: @Sendable @escaping (SyncPhase) -> Void
-    ) async throws -> (messages: [EmailMessage], token: SyncToken) {
+    ) async throws -> SyncResult {
         // Walk the same two phases a real sync does, briefly. Without this the
         // demo would snap straight to a full table and never show the first-run
         // progress screen — which is one of the things worth demonstrating.
@@ -44,18 +44,28 @@ public actor DemoBackend: MailBackend {
 
         let token = SyncToken(uidValidity: 1, highestUID: 9999, lastSyncedAt: Date())
         issuedToken = token
-        return (demoMessages, token)
+        // The demo mailbox drops nothing: every message in it is storable, and
+        // inventing losses would put numbers on screen that describe no
+        // mailbox anyone has.
+        var attribution = SyncAttribution()
+        attribution.located = demoMessages.count
+        attribution.fetched = demoMessages.count
+        attribution.handedToStore = demoMessages.count
+        return SyncResult(messages: demoMessages, token: token, attribution: attribution)
     }
 
     public func changes(
         since token: SyncToken?,
         progress: @Sendable @escaping (SyncPhase) -> Void
-    ) async throws -> (messages: [EmailMessage], token: SyncToken) {
+    ) async throws -> SyncResult {
         guard token != nil else { return try await discoverAll(progress: progress) }
         // An incremental demo sync finds nothing new — the demo mailbox is
         // fixed, and inventing arrivals would make "Sync Now" quietly change
         // the screenshot you were about to take.
-        return ([], SyncToken(uidValidity: 1, highestUID: 9999, lastSyncedAt: Date()))
+        return SyncResult(
+            messages: [],
+            token: SyncToken(uidValidity: 1, highestUID: 9999, lastSyncedAt: Date()),
+            attribution: SyncAttribution())
     }
 
     private var demoMessages: [EmailMessage] { DemoData.messages() }

@@ -622,7 +622,13 @@ A single row at the bottom of the window. Three zones:
   when something is selected.
 - **Center:** transient messages with an `Undo` button, auto-dismissing after
   ~10 seconds.
-- **Trailing:** "Last synced 4 minutes ago", or live sync progress.
+- **Trailing:** "Last synced 4 minutes ago", or live sync progress. Once a sync
+  has run, "Last synced…" is clickable and opens a breakdown of that sync: how
+  many messages the server matched, how many were added, and a line per reason
+  the rest were not stored (your own sent mail, an unsubscribe link in a scheme
+  the app cannot open, and so on). It exists because the app shows a "found"
+  count during a sync and a smaller number afterwards, and a user who notices
+  deserves an answer that adds up.
 
 ---
 
