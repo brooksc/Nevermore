@@ -58,6 +58,53 @@ public enum SyncPhase: Sendable {
     case fetching(done: Int, of: Int)
 }
 
+/// Where a message sat before it was trashed, so undo can put it back there.
+///
+/// Two cases, because two is all IMAP can express. On Gmail the difference is
+/// the `\Inbox` label rather than a folder — but Gmail's IMAP surface presents
+/// All Mail as a mailbox you can MOVE into, so "archived" is reachable exactly
+/// the way "inbox" is. Providers without an all-mail folder never show
+/// Nevermore anything but the inbox, so `.archive` does not arise there.
+public enum RestoreTarget: String, Sendable, Hashable {
+    case inbox
+    case archive
+}
+
+/// What a trash actually did, which is not always what was asked for.
+public struct TrashOutcome: Sendable {
+    /// The UIDs the server confirmed it moved. May be a prefix of the request.
+    public let moved: [MessageUID]
+    /// Of those, the ones that were archived rather than in the inbox.
+    ///
+    /// Empty when nothing was archived, when the account has no notion of
+    /// archiving, and when the origin could not be established — in all three
+    /// cases undo restores to the inbox, which is what it has always done.
+    public let archived: Set<MessageUID>
+
+    public init(moved: [MessageUID], archived: Set<MessageUID> = []) {
+        self.moved = moved
+        self.archived = archived
+    }
+
+    /// Split messages by where each one has to be restored to, as Message-IDs
+    /// — the only identifier that survives the move into Trash, since IMAP UIDs
+    /// are per-mailbox.
+    public static func restorePlan(
+        for messages: [EmailMessage], archived: Set<MessageUID>
+    ) -> (inbox: [String], archive: [String]) {
+        var inbox: [String] = []
+        var archive: [String] = []
+        for message in messages where !message.messageId.isEmpty {
+            if archived.contains(message.uid) {
+                archive.append(message.messageId)
+            } else {
+                inbox.append(message.messageId)
+            }
+        }
+        return (inbox, archive)
+    }
+}
+
 /// The mail operations Nevermore needs. Deliberately narrow so a second
 /// implementation stays cheap to add.
 public protocol MailBackend: Sendable {
@@ -72,11 +119,17 @@ public protocol MailBackend: Sendable {
         progress: @Sendable @escaping (SyncPhase) -> Void
     ) async throws -> (messages: [EmailMessage], token: SyncToken)
 
-    /// Move messages to Trash. Returns the UIDs actually moved, which may be a
-    /// prefix of the request if the server gave up partway.
-    func trash(_ uids: [MessageUID]) async throws -> [MessageUID]
-    /// Restore trashed messages by Message-ID; returns how many were recovered.
-    func untrash(messageIDs: [String]) async throws -> Int
+    /// Move messages to Trash. Reports the UIDs actually moved, which may be a
+    /// prefix of the request if the server gave up partway, and which of those
+    /// were archived rather than in the inbox.
+    ///
+    /// `recordOrigin` is false when the batch is too large for undo to be
+    /// offered: establishing origin costs a round trip per chunk, and nothing
+    /// would ever read the answer.
+    func trash(_ uids: [MessageUID], recordOrigin: Bool) async throws -> TrashOutcome
+    /// Restore trashed messages by Message-ID into `target`; returns how many
+    /// were recovered.
+    func untrash(messageIDs: [String], to target: RestoreTarget) async throws -> Int
     /// Throws if the credentials don't authenticate.
     func verifyConnection() async throws
     func sendMail(to: String, subject: String, body: String, from: String?) async throws

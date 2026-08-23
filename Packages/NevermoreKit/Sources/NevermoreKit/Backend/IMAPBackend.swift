@@ -417,11 +417,19 @@ public actor IMAPBackend: MailBackend {
     /// four of six times out, the first three *are* in Trash, and the caller
     /// needs to know which so the local cache doesn't drift from the server.
     /// Throws only when nothing moved at all.
-    public func trash(_ uids: [MessageUID]) async throws -> [MessageUID] {
-        guard !uids.isEmpty else { return [] }
+    public func trash(_ uids: [MessageUID], recordOrigin: Bool) async throws -> TrashOutcome {
+        guard !uids.isEmpty else { return TrashOutcome(moved: []) }
         let server = try await connected()
         let folders = try await resolvedFolders(on: server)
         _ = try await select(folders.searchScope, on: server)
+
+        // Establish origin *before* the move, because afterwards the answer is
+        // gone: Gmail strips every label from a message that lands in Trash, so
+        // a trashed message that used to be archived and one that used to be in
+        // the inbox are indistinguishable. There is nothing to look up at undo
+        // time — it is captured here or it is lost.
+        let archived =
+            recordOrigin ? await archivedUIDs(among: uids, on: server, folders: folders) : []
 
         var moved: [MessageUID] = []
         var offset = 0
@@ -439,24 +447,98 @@ public actor IMAPBackend: MailBackend {
                 Log.backend.problem(
                     "trash stopped after \(moved.count)/\(uids.count): \(error.localizedDescription)")
                 if moved.isEmpty { throw error }
-                return moved
+                return TrashOutcome(moved: moved, archived: archived.intersection(moved))
             }
             offset = end
         }
-        Log.backend.event("trashed \(moved.count) messages to \(folders.trash)")
-        return moved
+        Log.backend.event(
+            "trashed \(moved.count) messages to \(folders.trash) "
+                + "(\(archived.count) of them archived)")
+        return TrashOutcome(moved: moved, archived: archived.intersection(moved))
     }
 
-    /// Restore messages from Trash by their RFC Message-IDs. Returns how many
-    /// were found and moved back to the Inbox. IMAP has no "untrash", so we
-    /// search the Trash folder for each Message-ID (its Trash UID differs from
-    /// the one we had) and move it out.
-    public func untrash(messageIDs: [String]) async throws -> Int {
+    /// Which of `uids` are archived: present in the all-mail folder but without
+    /// Gmail's `\Inbox` label.
+    ///
+    /// Gmail-only, and deliberately best-effort — any failure returns an empty
+    /// set, which restores everything to the inbox exactly as this did before
+    /// origin was tracked at all. That asymmetry is on purpose: guessing "inbox"
+    /// wrongly puts a message somewhere the user can see and re-file, while
+    /// guessing "archived" wrongly hides mail they asked to have back.
+    ///
+    /// The caller has All Mail selected, so this is one FETCH per chunk on a
+    /// connection that is already where it needs to be.
+    private func archivedUIDs(
+        among uids: [MessageUID], on server: IMAPServer, folders: Folders
+    ) async -> Set<MessageUID> {
+        // No all-mail folder means discovery only ever searched the inbox, so
+        // every message this app can trash came from there. Nothing to ask.
+        guard folders.searchScope != config.inboxMailbox,
+            Self.isGmailHost(config.imapHost)
+        else { return [] }
+
+        var archived: Set<MessageUID> = []
+        var offset = 0
+        while offset < uids.count {
+            let end = min(offset + Self.fetchChunkSize, uids.count)
+            let chunk = Array(uids[offset..<end])
+            do {
+                let attributes = try await server.fetchGmailAttributes(
+                    for: UIDSet(chunk.map { UID($0.value) }))
+                for (uid, info) in attributes where Self.isArchived(labels: info.labels) {
+                    archived.insert(MessageUID(uid.value))
+                }
+            } catch {
+                // Give up on the whole batch rather than keep a partial answer:
+                // the UIDs from chunks that never ran would silently read as
+                // "was in the inbox", which is a guess dressed up as a fact.
+                Log.backend.detail(
+                    "trash origin unavailable, undo will restore to the inbox: "
+                        + error.localizedDescription)
+                return []
+            }
+            offset = end
+        }
+        return archived
+    }
+
+    /// Whether a message's Gmail labels say it is archived.
+    ///
+    /// Gmail reports mailbox membership as labels: a message in the inbox
+    /// carries the system label `\Inbox`, and an archived one simply does not.
+    /// User labels are folders in Gmail's UI but play no part in this decision
+    /// — mail filed under "Receipts" and archived is still archived.
+    public static func isArchived(labels: [String]) -> Bool {
+        !labels.contains { $0.caseInsensitiveCompare("\\Inbox") == .orderedSame }
+    }
+
+    /// Whether this host speaks Gmail's IMAP extensions (`X-GM-EXT-1`).
+    ///
+    /// A hostname test rather than a capability test because SwiftMail keeps the
+    /// capability set internal. Being wrong only costs a tagged BAD that the
+    /// callers already treat as "no answer".
+    public static func isGmailHost(_ host: String) -> Bool {
+        let host = host.lowercased()
+        return host.contains("gmail") || host.contains("google")
+    }
+
+    /// Restore messages from Trash by their RFC Message-IDs, into the inbox or
+    /// back into the archive. Returns how many were found and moved. IMAP has
+    /// no "untrash", so we search the Trash folder for each Message-ID (its
+    /// Trash UID differs from the one we had) and move it out.
+    ///
+    /// Restoring to `.archive` does not restore Gmail *labels*: the move to
+    /// Trash dropped them, and SwiftMail can only `STORE` flags, not
+    /// `X-GM-LABELS`. A message that was filed under a user label and archived
+    /// comes back archived and unlabelled. That part is not recoverable without
+    /// a fork of the IMAP library.
+    public func untrash(messageIDs: [String], to target: RestoreTarget) async throws -> Int {
         let ids = messageIDs.filter { !$0.isEmpty }
         guard !ids.isEmpty else { return 0 }
         let server = try await connected()
         let folders = try await resolvedFolders(on: server)
         _ = try await select(folders.trash, on: server)
+        let destination = mailbox(for: target, folders)
 
         var restored = 0
         for messageID in ids {
@@ -464,11 +546,37 @@ public actor IMAPBackend: MailBackend {
                 criteria: [.header("Message-ID", messageID)])
             let uids = Self.matched(result)
             guard !uids.isEmpty else { continue }
-            try await server.move(messages: uids, to: config.inboxMailbox)
+            do {
+                try await server.move(messages: uids, to: destination)
+            } catch {
+                // Restoring to the archive rests on Gmail accepting All Mail as
+                // a MOVE destination. If it doesn't, put the message in the
+                // inbox rather than leaving it in Trash: mail in the wrong
+                // folder is a nuisance the user can fix, mail still in Trash
+                // looks like Undo did nothing at all.
+                guard destination != config.inboxMailbox else { throw error }
+                Log.backend.problem(
+                    "restore to \(destination) failed, falling back to the inbox: "
+                        + error.localizedDescription)
+                try await server.move(messages: uids, to: config.inboxMailbox)
+            }
             restored += uids.count
         }
-        Log.backend.event("untrashed \(restored)/\(ids.count) messages")
+        Log.backend.event("untrashed \(restored)/\(ids.count) messages to \(destination)")
         return restored
+    }
+
+    /// The mailbox a restore target names on this account.
+    private func mailbox(for target: RestoreTarget, _ folders: Folders) -> String {
+        switch target {
+        case .inbox:
+            return config.inboxMailbox
+        case .archive:
+            // No all-mail folder means the provider has no archive that IMAP can
+            // see, and everything Nevermore ever found came from the inbox.
+            return folders.searchScope == config.inboxMailbox
+                ? config.inboxMailbox : folders.searchScope
+        }
     }
 
     public func sendMail(to: String, subject: String, body: String, from: String?) async throws {
@@ -552,8 +660,7 @@ public actor IMAPBackend: MailBackend {
     /// Returns nil rather than throwing: a non-Gmail server answers this with a
     /// tagged BAD, and the caller has a working fallback either way.
     public func gmailThreadID(for uid: MessageUID) async -> UInt64? {
-        guard config.imapHost.contains("gmail") || config.imapHost.contains("google")
-        else { return nil }
+        guard Self.isGmailHost(config.imapHost) else { return nil }
 
         // Retry once on a fresh connection. A cached IMAP connection that has
         // gone stale — Gmail drops idle ones, and this runs only when the user

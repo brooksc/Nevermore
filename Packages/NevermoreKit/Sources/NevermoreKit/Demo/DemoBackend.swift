@@ -62,13 +62,15 @@ public actor DemoBackend: MailBackend {
 
     // MARK: - Actions that would touch a server
 
-    public func trash(_ uids: [MessageUID]) async throws -> [MessageUID] {
+    public func trash(_ uids: [MessageUID], recordOrigin: Bool) async throws -> TrashOutcome {
         Log.app.event("demo: pretending to trash \(uids.count) message(s)")
-        return uids
+        // The demo mailbox is all inbox, so undo has nowhere else to put things.
+        return TrashOutcome(moved: uids)
     }
 
-    public func untrash(messageIDs: [String]) async throws -> Int {
-        Log.app.event("demo: pretending to restore \(messageIDs.count) message(s)")
+    public func untrash(messageIDs: [String], to target: RestoreTarget) async throws -> Int {
+        Log.app.event(
+            "demo: pretending to restore \(messageIDs.count) message(s) to \(target.rawValue)")
         return messageIDs.count
     }
 
