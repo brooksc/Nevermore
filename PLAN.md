@@ -319,7 +319,7 @@ Carried forward from the code review so they don't get faithfully reproduced:
 ## 9a. Build status
 
 **All milestones through the SwiftUI app are done** (updated 26 July 2026).
-`Packages/NevermoreKit` builds under Swift 6 strict concurrency; **494 tests
+`Packages/NevermoreKit` builds under Swift 6 strict concurrency; **523 tests
 pass**. The app is used daily against a live ~132,000-message mailbox.
 
 Measured on that mailbox:
@@ -344,7 +344,7 @@ Shipped since this plan was written, and not described above:
 - **Release tooling** — `VERSION`, commit-count build numbers, a pre-migration
   database backup, and a version/tag guard in `notarize.sh`.
 
-**Testing note:** tests ran as an executable (`swift run nevermore-tests`) with
+**Testing note:**523 tests ran as an executable (`swift run nevermore-tests`) with
 a small harness for most of the project's life, because SwiftPM builds test
 targets as `.xctest` bundles on macOS, which needs XCTest and `_TestingInterop`
 from a full Xcode install rather than Command Line Tools. That reasoning had
