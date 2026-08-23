@@ -1,0 +1,42 @@
+name: Tests
+
+# The suite is the only automated verification this project has — the SwiftUI
+# layer is not exercised by anything else — so it runs on every push to main and
+# on every pull request, rather than by hand like the release workflow.
+#
+# This does spend Actions minutes on a macOS runner, which bills at 10x the
+# Linux rate (see release-mas.yml). A single `swift test` is a few minutes, not
+# the tens the archive-and-sign job takes. If minutes get tight, drop the `push`
+# trigger first and keep `pull_request` — the merge is what needs guarding.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A superseded push has nothing to tell us. Cancel it rather than pay for it.
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Show toolchain
+        # Tests need a full Xcode, not Command Line Tools: they build as an
+        # .xctest bundle against XCTest/_TestingInterop, and NevermoreApp needs
+        # the macOS SDK regardless.
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Test
+        working-directory: Packages/NevermoreKit
+        run: swift test

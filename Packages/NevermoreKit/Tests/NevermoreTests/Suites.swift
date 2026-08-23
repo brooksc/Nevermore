@@ -1,156 +1,1136 @@
 import Foundation
 import Network
-import NevermoreKit
-// For SecKeychainGetUserInteractionAllowed, which the Keychain probe toggles.
 import Security
-// For ExtendedSearchResult/UID/UIDSet, which IMAPBackend.matched(_:) is stated in.
 import SwiftMail
+import Testing
 
-// Thin forwarders: binding these as `let` loses both the generic parameter and
-// the `line: Int = #line` default, so they have to be functions.
-func expect(
-    _ condition: Bool,
-    _ message: @autoclosure () -> String = "expectation failed",
-    line: Int = #line
-) {
-    Harness.expect(condition, message(), line: line)
+@testable import NevermoreKit
+
+// These suites bind real loopback ports (8775-8779) or stand up a real
+// socket, so they cannot run concurrently with each other. Nesting them
+// under one `.serialized` parent is what keeps that true: the trait applies
+// to every descendant, so the whole group runs one test at a time while the
+// rest of the suite still runs in parallel around it.
+@Suite(.serialized)
+struct NetworkBound {
+    @Suite("Server port contract")
+    struct ServerPortContractTests {
+        @Test("is 8775-8779, and does not collide with jobhunt's range") func is87758779AndDoesNotCollideWithJobhuntSRange() {
+            eq(ServerPortContract.firstPort, 8775)
+            eq(ServerPortContract.lastPort, 8779)
+            eq(ServerPortContract.discoveryPorts, [8775, 8776, 8777, 8778, 8779])
+            // jobhunt owns 8765-8769 and 8770-8774 is its growth gap. Two apps, one Mac.
+            expect(!ServerPortContract.discoveryPorts.contains(where: { $0 < 8775 }), "no overlap below")
+        }
+
+        @Test("the listener is restricted to loopback") func theListenerIsRestrictedToLoopback() {
+            // This restriction IS the security boundary — a non-loopback peer is refused by the OS and
+            // never reaches route handling. Asserted here so it can't be dropped without a red test.
+            eq(NevermoreServer.listenerParameters().requiredInterfaceType, .loopback)
+        }
+    }
+
+    @Suite("Server port binding")
+    struct ServerPortBindingTests {
+        @Test("falls back to the next contract port when the first is taken") func fallsBackToTheNextContractPortWhenTheFirstIsTaken() {
+            guard let held = holdPort(ServerPortContract.firstPort) else {
+                expect(false, "could not occupy \(ServerPortContract.firstPort) to set up the test")
+                return
+            }
+            defer { held.release() }
+
+            let bound: UInt16 = runAsync {
+                let server = NevermoreServer()
+                try? await server.start()
+                let p = await server.port
+                await server.stop()
+                return p
+            }
+            eq(bound, ServerPortContract.firstPort + 1, "skipped the occupied port")
+        }
+
+        @Test("fails closed when every contract port is taken") func failsClosedWhenEveryContractPortIsTaken() {
+            var held: [HeldPort] = []
+            for p in ServerPortContract.discoveryPorts {
+                guard let l = holdPort(p) else { break }
+                held.append(l)
+            }
+            guard held.count == ServerPortContract.discoveryPorts.count else {
+                held.forEach { $0.release() }
+                expect(false, "could not occupy all \(ServerPortContract.discoveryPorts.count) ports")
+                return
+            }
+            defer { held.forEach { $0.release() } }
+
+            struct Outcome: Sendable {
+                let error: ServerError?
+                let port: UInt16
+                let listening: Bool
+            }
+            let outcome: Outcome = runAsync {
+                let server = NevermoreServer()
+                var caught: ServerError?
+                do { try await server.start() } catch let e as ServerError { caught = e } catch {}
+                let boundPort = await server.port
+                let listening = await server.isListening
+                await server.stop()
+                return Outcome(error: caught, port: boundPort, listening: listening)
+            }
+            // No ephemeral fallback: a port the bridge can't guess is worse than no server at all,
+            // because "running" and "unreachable" look identical from the client side.
+            eq(outcome.error, ServerError.noPortAvailable)
+            eq(outcome.port, 0, "did not bind anything")
+            expect(!outcome.listening, "no listener left behind")
+            expect(outcome.error?.localizedDescription.contains("8775") == true, "failure names the range")
+        }
+    }
+
+    @Suite("Server over a real socket")
+    struct ServerOverARealSocketTests {
+        @Test("a loopback client gets the health route off the wire") func aLoopbackClientGetsTheHealthRouteOffTheWire() {
+            // The routing tests call routeRequest directly; this is the only one that proves the
+            // listener accepts, the parser frames, and the response serialises as real HTTP.
+            struct Result: Sendable {
+                let status: Int
+                let body: String
+                let port: UInt16
+            }
+            let result: Result? = runAsync {
+                let server = NevermoreServer(appVersion: "9.9.9")
+                // An ephemeral port: this test is about the wire, not about port discovery, and the
+                // contract ports may legitimately be busy on a developer's Mac.
+                try? await server.startOnAnyPort()
+                let port = await server.port
+                defer { Task { await server.stop() } }
+                guard port != 0,
+                      let url = URL(string: "http://127.0.0.1:\(port)/health") else { return nil }
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 5
+                guard let (data, response) = try? await URLSession.shared.data(for: request),
+                      let http = response as? HTTPURLResponse else { return nil }
+                return Result(
+                    status: http.statusCode,
+                    body: String(data: data, encoding: .utf8) ?? "",
+                    port: port)
+            }
+            guard let result else {
+                expect(false, "no response from the loopback server")
+                return
+            }
+            eq(result.status, 200)
+            eq(result.body, "{\"ok\":true}")
+        }
+    }
+
+    @Suite("Server routing")
+    struct ServerRoutingTests {
+        func get(_ path: String, headers: [String: String] = [:]) -> HTTPRequest {
+            HTTPRequest(method: "GET", path: path, headers: headers)
+        }
+        func route(_ request: HTTPRequest, token: String = "") -> HTTPResponse {
+            runAsync {
+                await NevermoreServer(appVersion: "9.9.9", mcpToken: token).routeRequest(request)
+            }
+        }
+        func bodyText(_ response: HTTPResponse) -> String {
+            String(data: response.body, encoding: .utf8) ?? ""
+        }
+
+        @Test("health and ping answer, so a client can find the port") func healthAndPingAnswerSoAClientCanFindThePort() {
+            eq(route(get("/health")).statusCode, 200)
+            expect(bodyText(route(get("/health"))).contains("\"ok\":true"), "reports ok")
+
+            let ping = route(get("/api/ping"))
+            eq(ping.statusCode, 200)
+            expect(bodyText(ping).contains("\"app\":\"nevermore\""), "identifies the app")
+            expect(bodyText(ping).contains("9.9.9"), "reports its version")
+        }
+
+        @Test("an unknown path is 404") func anUnknownPathIs404() {
+            eq(route(get("/nope")).statusCode, 404)
+        }
+
+        @Test("Transfer-Encoding is refused rather than parsed as an empty body") func transferEncodingIsRefusedRatherThanParsedAsAnEmptyBody() {
+            eq(route(get("/health", headers: ["transfer-encoding": "chunked"])).statusCode, 400)
+        }
+
+        @Test("MCP routes are 503 until a token is configured") func mcpRoutesAre503UntilATokenIsConfigured() {
+            // Fail closed: no token must never mean "no token required".
+            let r = route(HTTPRequest(method: "POST", path: "/mcp/senders/list"), token: "")
+            eq(r.statusCode, 503)
+        }
+
+        @Test("MCP routes reject a missing or wrong token with 401") func mcpRoutesRejectAMissingOrWrongTokenWith401() {
+            let secret = "s3cret-token"
+            let mcp = { (headers: [String: String]) in
+                route(HTTPRequest(method: "POST", path: "/mcp/senders/list", headers: headers), token: secret)
+            }
+            eq(mcp([:]).statusCode, 401, "no Authorization header")
+            eq(mcp(["authorization": "Bearer wrong"]).statusCode, 401, "wrong token")
+            eq(mcp(["authorization": "Bearer "]).statusCode, 401, "empty token")
+            eq(mcp(["authorization": secret]).statusCode, 401, "token without the Bearer scheme")
+            eq(mcp(["authorization": "Basic \(secret)"]).statusCode, 401, "wrong scheme")
+            // Near-misses must not pass: the compare is constant-time, not a prefix match.
+            eq(mcp(["authorization": "Bearer s3cret"]).statusCode, 401, "prefix of the token")
+            eq(mcp(["authorization": "Bearer s3cret-tokenX"]).statusCode, 401, "token plus a suffix")
+        }
+
+        @Test("the right token gets past auth, and the scheme is case-insensitive") func theRightTokenGetsPastAuthAndTheSchemeIsCaseInsensitive() {
+            let secret = "s3cret-token"
+            let authed = route(
+                HTTPRequest(method: "POST", path: "/mcp/not-a-tool",
+                            headers: ["authorization": "bearer \(secret)"]),
+                token: secret)
+            // Auth passed, so the 404 is about the route rather than the credential. A real tool route
+            // is used for that distinction in the TASK-44 suites, where a mailbox exists to serve it.
+            eq(authed.statusCode, 404)
+            expect(bodyText(authed).contains("MCP route not found"), "404 is about the route")
+        }
+
+        @Test("a non-POST MCP request is 405, but only after it authenticates") func aNonPOSTMCPRequestIs405ButOnlyAfterItAuthenticates() {
+            let secret = "s3cret-token"
+            eq(route(get("/mcp/senders/list", headers: ["authorization": "Bearer \(secret)"]),
+                     token: secret).statusCode, 405)
+            // Unauthenticated, the method never gets a say — 401 comes first.
+            eq(route(get("/mcp/senders/list"), token: secret).statusCode, 401)
+        }
+
+        @Test("MCP bodies get a larger budget than the discovery routes") func mcpBodiesGetALargerBudgetThanTheDiscoveryRoutes() {
+            eq(NevermoreServer.maxBodySize(forPath: "/mcp/senders/list"), 1_048_576)
+            eq(NevermoreServer.maxBodySize(forPath: "/health"), 64 * 1024)
+        }
+    }
+
+    @Suite("HTTP framing")
+    struct HTTPFramingTests {
+        func framing(_ raw: String, cap: Int = NevermoreServer.maxHeaderBytes) -> RequestFraming {
+            inspectRequestFraming(Data(raw.utf8), maxHeaderBytes: cap)
+        }
+
+        @Test("a complete GET frames with no body") func aCompleteGETFramesWithNoBody() {
+            eq(framing("GET /health HTTP/1.1\r\nHost: x\r\n\r\n"),
+               .valid(method: "GET", path: "/health", contentLength: 0))
+        }
+
+        @Test("headers without a terminator are incomplete, not invalid") func headersWithoutATerminatorAreIncompleteNotInvalid() {
+            eq(framing("GET /health HTTP/1.1\r\nHost: x"), .incomplete)
+        }
+
+        @Test("headers past the cap are rejected rather than accumulated") func headersPastTheCapAreRejectedRatherThanAccumulated() {
+            let long = "GET /health HTTP/1.1\r\nX: " + String(repeating: "a", count: 200) + "\r\n\r\n"
+            eq(framing(long, cap: 64), .invalid(reason: "Request header fields too large", statusCode: 431))
+        }
+
+        @Test("conflicting or malformed Content-Length is refused") func conflictingOrMalformedContentLengthIsRefused() {
+            eq(framing("POST /x HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabc"),
+               .invalid(reason: "Conflicting Content-Length headers", statusCode: 400))
+            eq(framing("POST /x HTTP/1.1\r\nContent-Length: -1\r\n\r\n"),
+               .invalid(reason: "Malformed Content-Length", statusCode: 400))
+            eq(framing("POST /x HTTP/1.1\r\nContent-Length: abc\r\n\r\n"),
+               .invalid(reason: "Malformed Content-Length", statusCode: 400))
+        }
+
+        @Test("a POST with no Content-Length is unframable, not empty") func aPOSTWithNoContentLengthIsUnframableNotEmpty() {
+            eq(framing("POST /x HTTP/1.1\r\nHost: x\r\n\r\n"),
+               .invalid(reason: "Missing Content-Length on POST", statusCode: 400))
+        }
+
+        @Test("the parser lowercases header names and splits the query") func theParserLowercasesHeaderNamesAndSplitsTheQuery() {
+            let raw = "GET /api/ping?a=1&b=two HTTP/1.1\r\nAuthorization: Bearer t\r\n\r\n"
+            let request = parseHTTPRequest(Data(raw.utf8))
+            eq(request?.path, "/api/ping")
+            eq(request?.queryValue(for: "b"), "two")
+            eq(request?.headers["authorization"], "Bearer t")
+            eq(NevermoreServer.bearerToken(from: request!), "t")
+        }
+
+        @Test("a UTF-8 body is sliced by bytes, not characters") func aUTF8BodyIsSlicedByBytesNotCharacters() {
+            // "Café" is 5 bytes and 4 characters — slicing by character count truncates the JSON.
+            let json = "{\"n\":\"Café\"}"
+            let bytes = Data(json.utf8)
+            let raw = Data("POST /mcp/x HTTP/1.1\r\nContent-Length: \(bytes.count)\r\n\r\n".utf8) + bytes
+            eq(parseHTTPRequest(raw)?.body, bytes)
+        }
+
+        @Test("a body that hasn't fully arrived parses as nil so the server reads more") func aBodyThatHasnTFullyArrivedParsesAsNilSoTheServerReadsMore() {
+            let raw = "POST /mcp/x HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc"
+            expect(parseHTTPRequest(Data(raw.utf8)) == nil, "incomplete body")
+        }
+
+        @Test("every status the server emits has a real reason phrase") func everyStatusTheServerEmitsHasARealReasonPhrase() {
+            for code in [200, 204, 400, 401, 403, 404, 405, 413, 431, 500, 503] {
+                expect(HTTPResponse.statusText(for: code) != "Unknown", "reason phrase for \(code)")
+            }
+        }
+    }
+
+    @Suite("MCP token file")
+    struct MCPTokenFileTests {
+        /// A scratch directory so the lifecycle is exercised without touching the real
+        /// ~/.nevermore-mcp-token, which a running app may own.
+        func withScratchToken(_ body: (URL) -> Void) {
+            let dir = URL.temporaryDirectory.appending(path: "nevermore-token-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            body(dir.appending(path: ".nevermore-mcp-token"))
+        }
+
+        @Test("the real token path is ~/.nevermore-mcp-token") func theRealTokenPathIsNevermoreMcpToken() {
+            eq(MCPTokenManager.tokenURL.lastPathComponent, ".nevermore-mcp-token")
+            eq(MCPTokenManager.tokenURL.deletingLastPathComponent().path,
+               URL.homeDirectory.path)
+        }
+
+        @Test("a written token is 0600 and reads back") func aWrittenTokenIs0600AndReadsBack() {
+            withScratchToken { url in
+                guard let written = try? MCPTokenManager.generateAndWrite(at: url) else {
+                    expect(false, "write failed")
+                    return
+                }
+                let perms = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int
+                eq(perms, 0o600)
+                eq(MCPTokenManager.read(at: url), written)
+                expect(UUID(uuidString: written) != nil, "a fresh UUID, not a fixed secret")
+            }
+        }
+
+        @Test("each launch gets a different token") func eachLaunchGetsADifferentToken() {
+            withScratchToken { url in
+                let first = try? MCPTokenManager.generateAndWrite(at: url)
+                let second = try? MCPTokenManager.generateAndWrite(at: url)
+                expect(first != second, "transient credential, not a stored one")
+            }
+        }
+
+        @Test("a token with broader permissions is refused on read") func aTokenWithBroaderPermissionsIsRefusedOnRead() {
+            // Group- or world-readable means another account could already have taken a copy, so the
+            // secret is spent — refuse it rather than authenticate against it.
+            for mode in [0o644, 0o640, 0o604, 0o666] {
+                withScratchToken { url in
+                    _ = try? MCPTokenManager.generateAndWrite(at: url)
+                    try? FileManager.default.setAttributes(
+                        [.posixPermissions: mode], ofItemAtPath: url.path)
+                    expect(MCPTokenManager.read(at: url) == nil, "refused mode \(String(mode, radix: 8))")
+                }
+            }
+            // 0400 is narrower than 0600, so it is still acceptable.
+            withScratchToken { url in
+                _ = try? MCPTokenManager.generateAndWrite(at: url)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: url.path)
+                expect(MCPTokenManager.read(at: url) != nil, "0400 is not broader than 0600")
+            }
+        }
+
+        @Test("a missing token reads as nil, and delete is what makes it missing") func aMissingTokenReadsAsNilAndDeleteIsWhatMakesItMissing() {
+            withScratchToken { url in
+                expect(MCPTokenManager.read(at: url) == nil, "nothing written yet")
+                _ = try? MCPTokenManager.generateAndWrite(at: url)
+                expect(MCPTokenManager.read(at: url) != nil, "present after write")
+                MCPTokenManager.delete(at: url)
+                expect(!FileManager.default.fileExists(atPath: url.path), "removed on shutdown")
+                expect(MCPTokenManager.read(at: url) == nil, "gone")
+            }
+        }
+
+        @Test("a client whose token file went over-permissive is refused, not admitted") func aClientWhoseTokenFileWentOverPermissiveIsRefusedNotAdmitted() {
+            // The two halves of the policy composed: the bridge reads the file to get its credential,
+            // a widened file reads as nil, so it has nothing to present — and the server answers 401
+            // rather than treating an absent credential as "no credential required".
+            withScratchToken { url in
+                let secret = (try? MCPTokenManager.generateAndWrite(at: url)) ?? ""
+                expect(!secret.isEmpty, "a token was written")
+                try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+
+                let presented = MCPTokenManager.read(at: url) ?? ""
+                expect(presented.isEmpty, "an over-permissive file yields no credential")
+
+                let response = runAsync {
+                    await NevermoreServer(mcpToken: secret).routeRequest(
+                        HTTPRequest(method: "POST", path: "/mcp/senders/list",
+                                    headers: ["authorization": "Bearer \(presented)"]))
+                }
+                eq(response.statusCode, 401)
+            }
+        }
+
+        @Test("a token that fails to be written leaves nothing behind") func aTokenThatFailsToBeWrittenLeavesNothingBehind() {
+            // A directory that doesn't exist makes the write fail; the point is that no partial or
+            // over-permissive file survives the failure.
+            let url = URL.temporaryDirectory
+                .appending(path: "nevermore-missing-\(UUID().uuidString)")
+                .appending(path: ".nevermore-mcp-token")
+            var threw = false
+            do { _ = try MCPTokenManager.generateAndWrite(at: url) } catch { threw = true }
+            expect(threw, "the write failure is reported, not swallowed")
+            expect(!FileManager.default.fileExists(atPath: url.path), "no leftover file")
+        }
+    }
+
+    @Suite("Local server lifecycle")
+    struct LocalServerLifecycleTests {
+        /// A scratch token path, so starting and stopping a server here never disturbs the real
+        /// ~/.nevermore-mcp-token that a running Nevermore may own.
+        func withScratchTokenPath(_ body: (URL) -> Void) {
+            let dir = URL.temporaryDirectory.appending(path: "nevermore-lifecycle-\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: dir) }
+            body(dir.appending(path: ".nevermore-mcp-token"))
+        }
+
+        /// The status code for a POST to an /mcp/ route with whatever credential the token file holds.
+        /// 401 means the file and the running server disagree; 503 means they match and the request
+        /// got all the way to "no mailbox is open", which is as far as a controller started without an
+        /// account can go.
+        @Sendable func mcpStatus(port: UInt16, token: String?) async -> Int? {
+            guard let url = URL(string: "http://127.0.0.1:\(port)/mcp/senders/list") else { return nil }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 5
+            if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization") }
+            guard let (_, response) = try? await URLSession.shared.data(for: request) else { return nil }
+            return (response as? HTTPURLResponse)?.statusCode
+        }
+
+        @Test("starting binds a contract port and writes the token the server will accept") func startingBindsAContractPortAndWritesTheTokenTheServerWillAccept() {
+            withScratchTokenPath { tokenURL in
+                let controller = LocalServerController(tokenURL: tokenURL, appVersion: "9.9.9")
+                let status = runAsync { await controller.start(isDemo: false) }
+                defer { runAsync { await controller.stop() } }
+
+                guard case let .running(port) = status else {
+                    expect(false, "expected a running server, got \(status)")
+                    return
+                }
+                expect(ServerPortContract.discoveryPorts.contains(port), "bound a discoverable port")
+
+                // The token file is the only channel to the bridge, so "started" has to mean the file
+                // on disk authenticates against the server that is actually listening.
+                let token = MCPTokenManager.read(at: tokenURL)
+                expect(token != nil, "a 0600 token exists while the server runs")
+                eq(runAsync { await mcpStatus(port: port, token: token) }, 503,
+                   "the written token is accepted (503 is the absent mailbox, not the credential)")
+                eq(runAsync { await mcpStatus(port: port, token: nil) }, 401,
+                   "and the gate is still closed without it")
+            }
+        }
+
+        @Test("stopping releases the port and removes the token file") func stoppingReleasesThePortAndRemovesTheTokenFile() {
+            withScratchTokenPath { tokenURL in
+                let controller = LocalServerController(tokenURL: tokenURL)
+                let started = runAsync { await controller.start(isDemo: false) }
+                guard case let .running(port) = started else {
+                    expect(false, "expected a running server, got \(started)")
+                    return
+                }
+                eq(runAsync { await controller.stop() }, LocalServerStatus.off)
+                expect(!FileManager.default.fileExists(atPath: tokenURL.path),
+                       "the credential does not outlive the server")
+                // Re-binding the port is the only honest proof the OS actually got it back.
+                guard let held = holdPort(port) else {
+                    expect(false, "port \(port) was not released")
+                    return
+                }
+                held.release()
+            }
+        }
+
+        @Test("stopping a server that never started is not an error") func stoppingAServerThatNeverStartedIsNotAnError() {
+            withScratchTokenPath { tokenURL in
+                let controller = LocalServerController(tokenURL: tokenURL)
+                eq(runAsync { await controller.stop() }, LocalServerStatus.off)
+            }
+        }
+
+        @Test("a bind failure is reported with the port range, and Retry works once it frees up") func aBindFailureIsReportedWithThePortRangeAndRetryWorksOnceItFreesUp() {
+            withScratchTokenPath { tokenURL in
+                var held: [HeldPort] = []
+                for p in ServerPortContract.discoveryPorts {
+                    guard let l = holdPort(p) else { break }
+                    held.append(l)
+                }
+                guard held.count == ServerPortContract.discoveryPorts.count else {
+                    held.forEach { $0.release() }
+                    expect(false, "could not occupy all \(ServerPortContract.discoveryPorts.count) ports")
+                    return
+                }
+
+                let controller = LocalServerController(tokenURL: tokenURL)
+                let failed = runAsync { await controller.start(isDemo: false) }
+                guard case let .failed(message) = failed else {
+                    held.forEach { $0.release() }
+                    runAsync { await controller.stop() }
+                    expect(false, "expected a reported failure, got \(failed)")
+                    return
+                }
+                // The message is what Settings shows; naming the range is what makes it actionable.
+                expect(message.contains("8775"), "the failure names the port range: \(message)")
+                expect(message.contains("8779"), "the failure names the port range: \(message)")
+                expect(!FileManager.default.fileExists(atPath: tokenURL.path),
+                       "a failed start leaves no token behind")
+
+                // Whatever held the ports quits — which is exactly the case Retry exists for.
+                held.forEach { $0.release() }
+                let retried = runAsync { await controller.start(isDemo: false) }
+                defer { runAsync { await controller.stop() } }
+                expect(retried.isRunning, "retry succeeded after the ports freed up, got \(retried)")
+            }
+        }
+
+        @Test("the token path is shown before the server has ever run") func theTokenPathIsShownBeforeTheServerHasEverRun() {
+            withScratchTokenPath { tokenURL in
+                let controller = LocalServerController(tokenURL: tokenURL)
+                eq(controller.tokenPath, tokenURL.path)
+            }
+            // And the default is the real per-user path, not the scratch one.
+            eq(LocalServerController().tokenPath, MCPTokenManager.tokenURL.path)
+        }
+    }
+
+    @Suite("MCP server dispatch")
+    struct MCPServerDispatchTests {
+        func serve(
+            path: String, token: String = "s3cret", presented: String = "s3cret", isDemo: Bool = false,
+            context: MCPContext?
+        ) -> HTTPResponse {
+            runAsync {
+                let server = NevermoreServer(appVersion: "9.9.9", isDemo: isDemo, mcpToken: token)
+                await server.setMCPContext(context)
+                return await server.routeRequest(
+                    HTTPRequest(
+                        method: "POST", path: path,
+                        headers: ["authorization": "Bearer \(presented)"],
+                        body: Data("{}".utf8)))
+            }
+        }
+
+        @Test("a real route serves the open account") func aRealRouteServesTheOpenAccount() {
+            do {
+                let store = try MessageStore.inMemory()
+                try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
+                let response = serve(
+                    path: "/mcp/senders/list",
+                    context: MCPContext(account: "me@example.com", store: store))
+                eq(response.statusCode, 200)
+                eq(mcpJSON(response)["account"] as? String, "me@example.com")
+            } catch { expect(false, "threw: \(error)") }
+        }
+
+        @Test("with no mailbox open the answer is 503, never an empty mailbox") func withNoMailboxOpenTheAnswerIs503NeverAnEmptyMailbox() {
+            // "This person has no senders" and "no account is open" are answers an
+            // agent would act on very differently.
+            let response = serve(path: "/mcp/senders/list", context: nil)
+            eq(response.statusCode, 503)
+            expect(
+                (mcpJSON(response)["error"] as? String ?? "").contains("No mailbox is open"),
+                "says which it is")
+        }
+
+        @Test("demo mode refuses every tool") func demoModeRefusesEveryTool() {
+            do {
+                let store = try MessageStore.inMemory()
+                try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
+                let context = MCPContext(account: "me@example.com", store: store)
+                for path in MCPRoutes.paths.sorted() {
+                    let response = serve(path: path, isDemo: true, context: context)
+                    eq(response.statusCode, 403, path)
+                    expect(
+                        (mcpJSON(response)["error"] as? String ?? "").contains("demo mode"), path)
+                }
+            } catch { expect(false, "threw: \(error)") }
+        }
+
+        @Test("the four refusals stay distinguishable, demo mode included") func theFourRefusalsStayDistinguishableDemoModeIncluded() {
+            // A bridge reads its situation off these codes: 401 fix your token, 404
+            // that tool doesn't exist, 403 leave demo mode, 503 open an account.
+            do {
+                let store = try MessageStore.inMemory()
+                let context = MCPContext(account: "me@example.com", store: store)
+                eq(
+                    serve(path: "/mcp/senders/list", presented: "wrong", isDemo: true, context: context)
+                        .statusCode, 401, "credential first, even in demo mode")
+                eq(
+                    serve(path: "/mcp/not-a-tool", isDemo: true, context: context).statusCode, 404,
+                    "an unknown route is still about the route in demo mode")
+                eq(
+                    serve(path: "/mcp/senders/list", isDemo: true, context: nil).statusCode, 403,
+                    "demo mode is reported before the absent mailbox")
+            } catch { expect(false, "threw: \(error)") }
+        }
+
+        @Test("the local server hands the context on to a server it starts later") func theLocalServerHandsTheContextOnToAServerItStartsLater() {
+            // The account and the server come up in either order, so whichever is
+            // second has to find the other already recorded.
+            do {
+                let store = try MessageStore.inMemory()
+                try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
+                let dir = URL.temporaryDirectory.appending(path: "nevermore-mcp-\(UUID().uuidString)")
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: dir) }
+                let tokenURL = dir.appending(path: ".nevermore-mcp-token")
+
+                let controller = LocalServerController(tokenURL: tokenURL, appVersion: "9.9.9")
+                runAsync {
+                    await controller.setMCPContext(
+                        MCPContext(account: "me@example.com", store: store))
+                }
+                let status = runAsync { await controller.start(isDemo: false) }
+                defer { runAsync { await controller.stop() } }
+                guard case let .running(port) = status, let token = MCPTokenManager.read(at: tokenURL)
+                else {
+                    expect(false, "expected a running server with a token, got \(status)")
+                    return
+                }
+                let result: (status: Int, body: String)? = runAsync {
+                    guard let url = URL(string: "http://127.0.0.1:\(port)/mcp/mailbox/summary")
+                    else { return nil }
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "POST"
+                    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                    request.httpBody = Data("{}".utf8)
+                    guard let (data, response) = try? await URLSession.shared.data(for: request),
+                        let http = response as? HTTPURLResponse
+                    else { return nil }
+                    return (http.statusCode, String(data: data, encoding: .utf8) ?? "")
+                }
+                eq(result?.status, 200, "the tool answers over the socket, not just in-process")
+                expect(result?.body.contains("me@example.com") ?? false, "and names the account")
+            } catch { expect(false, "threw: \(error)") }
+        }
+    }
+
+    @Suite("The write surface is guarded like the read surface")
+    struct TheWriteSurfaceIsGuardedLikeTheReadSurfaceTests {
+        @Test("a write with the wrong credential is 401, before anything else") func aWriteWithTheWrongCredentialIs401BeforeAnythingElse() async {
+            for path in MCPWriteRoutes.paths.sorted() {
+                eq(await guardedCall(path, token: "wrong").statusCode, 401, path)
+                eq(await guardedCall(path, token: nil).statusCode, 401, "\(path) with no header")
+            }
+        }
+
+        @Test("a write refuses in demo mode") func aWriteRefusesInDemoMode() async {
+            // TASK-41: the demo mailbox is fabricated, so acting on it is acting on
+            // senders that do not exist. Including the policy — an agent that read a
+            // policy here would think it had a mailbox to apply it to.
+            for path in MCPWriteRoutes.paths.sorted() {
+                let response = await guardedCall(path, isDemo: true)
+                eq(response.statusCode, 403, path)
+            }
+        }
+
+        @Test("a write over GET is 405, not a silent no-op") func aWriteOverGETIs405NotASilentNoOp() async {
+            eq(await guardedCall("/mcp/senders/ignore", method: "GET").statusCode, 405)
+        }
+
+        @Test("an unconfigured server refuses writes rather than opening them up") func anUnconfiguredServerRefusesWritesRatherThanOpeningThemUp() async {
+            let server = NevermoreServer(mcpToken: "")
+            let response = await server.routeRequest(
+                HTTPRequest(
+                    method: "POST", path: "/mcp/senders/ignore",
+                    headers: ["authorization": "Bearer anything"], body: nil))
+            eq(response.statusCode, 503)
+        }
+
+        @Test("a write reaches the app once one is attached") func aWriteReachesTheAppOnceOneIsAttached() async {
+            let actions = StubActions()
+            let server = NevermoreServer(mcpToken: "secret")
+            await server.setMCPActions(actions)
+            let response = await server.routeRequest(
+                HTTPRequest(
+                    method: "POST", path: "/mcp/senders/ignore",
+                    headers: [
+                        "authorization": "Bearer secret", "content-type": "application/json",
+                    ],
+                    body: try! JSONSerialization.data(withJSONObject: ["sender_id": "domain:a"])))
+            eq(response.statusCode, 200)
+            eq(await actions.details(of: "ignore"), ["domain:a"])
+            // And it needed no snapshot: the write surface acts on the live app, so
+            // a server with actions and no mailbox context still serves it.
+        }
+    }
+
+    @Suite("PinnedHTTPClient (DNS rebinding)")
+    struct PinnedHTTPClientDNSRebindingTests {
+        // AC #4, and the heart of the matter. The resolver answers with a reachable
+        // address the first time and an unreachable one every time after, which is
+        // the rebinding shape: check one address, connect to another.
+        //
+        // Two things are asserted and both are needed. That the request arrives at
+        // the *first* answer proves the validated address is the one dialled. That
+        // the host was looked up exactly once proves there was no second lookup for
+        // a hostile resolver to answer differently — the window is gone, not merely
+        // narrowed.
+        @Test("a resolver that changes its answer cannot move the connection") func aResolverThatChangesItsAnswerCannotMoveTheConnection() {
+            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("first-answer") })
+            else { return expect(false, "could not start stub origin") }
+            defer { origin.stop() }
+
+            let resolver = RecordingResolver { host, nth in
+                nth == 1 ? [loopbackPin(host)] : [unreachablePin(host)]
+            }
+            let result = send(
+                PinnedHTTPClient(resolve: resolver.resolver), "GET",
+                "http://rebind.invalid:\(origin.port)/unsub")
+
+            eq(status(result), 200, "reached the first, validated answer (\(String(describing: failure(result)))")
+            eq(resolver.callCount(for: "rebind.invalid"), 1, "exactly one lookup, so nothing to rebind")
+            eq(origin.requestLines.first, "GET /unsub HTTP/1.1")
+        }
+
+        // The same setup carries a second proof: `rebind.invalid` has no DNS record
+        // anywhere (RFC 6761 guarantees it), so a request that succeeds is one
+        // nothing but our own resolver could have routed. That is the pre-fix defect
+        // stated as an assertion — a second resolver existing at all.
+        @Test("nothing but the injected resolver ever looks the host up") func nothingButTheInjectedResolverEverLooksTheHostUp() {
+            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("pinned") })
+            else { return expect(false, "could not start stub origin") }
+            defer { origin.stop() }
+
+            // Independently confirm the name really is unresolvable, so this can't
+            // quietly pass because some resolver started answering for it.
+            expect(DestinationGuard.pin(for: "unresolvable.invalid") == nil, "name does not resolve")
+
+            let resolver = RecordingResolver { host, _ in [loopbackPin(host)] }
+            let result = send(
+                PinnedHTTPClient(resolve: resolver.resolver), "GET",
+                "http://unresolvable.invalid:\(origin.port)/x")
+            eq(status(result), 200, "delivered despite no DNS record anywhere")
+        }
+
+        // AC #2 on the wire rather than in a unit test: the origin has to see the
+        // name it serves, or every virtual host breaks.
+        @Test("the origin sees the real hostname in Host") func theOriginSeesTheRealHostnameInHost() {
+            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("ok") })
+            else { return expect(false, "could not start stub origin") }
+            defer { origin.stop() }
+
+            let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
+            _ = send(client, "GET", "http://vhost.invalid:\(origin.port)/path?a=1")
+
+            guard let seen = origin.requests.first else {
+                return expect(false, "origin received nothing")
+            }
+            expect(
+                seen.contains("Host: vhost.invalid:\(origin.port)"),
+                "Host carries the name and the non-default port; saw:\n\(seen)")
+            expect(seen.hasPrefix("GET /path?a=1 HTTP/1.1"), "request line; saw:\n\(seen)")
+        }
+
+        @Test("a refused host is never dialled") func aRefusedHostIsNeverDialled() {
+            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
+            else { return expect(false, "could not start stub origin") }
+            defer { origin.stop() }
+
+            // Nil is what the real resolver returns for a private, local, or
+            // unresolvable answer.
+            let client = PinnedHTTPClient(resolve: { _ in [] })
+            let result = send(client, "GET", "http://blocked.invalid:\(origin.port)/")
+            eq(failure(result), .blocked(host: "blocked.invalid"))
+            expect(origin.requests.isEmpty, "the origin was never contacted")
+        }
+
+        // Pinning one address would otherwise throw away the failover a resolver's
+        // several answers exist to give. A CDN endpoint with a PoP out of rotation
+        // must not read to the user as an unsubscribe link that doesn't work.
+        @Test("a dead first address fails over to the next validated one") func aDeadFirstAddressFailsOverToTheNextValidatedOne() {
+            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("second-address") })
+            else { return expect(false, "could not start stub origin") }
+            defer { origin.stop() }
+
+            let client = PinnedHTTPClient(resolve: { host in
+                // Both were validated by the same single lookup; only the first is dead.
+                [unreachablePin(host), loopbackPin(host)]
+            })
+            // 8s across two addresses is a 4s slice each, so the dead one is given
+            // up on quickly rather than stranding the request.
+            let result = send(
+                client, "GET", "http://multi.invalid:\(origin.port)/unsub", timeout: 8)
+            eq(status(result), 200, "reached the live address (\(String(describing: failure(result))))")
+        }
+
+        // Found by measurement, not by reasoning: the timeout fired and reported
+        // itself accurately while `send` went on running for 30s, because
+        // Network.framework ignores Swift task cancellation and the sibling task sat
+        // in a continuation until the OS gave up. A budget nobody honours is worse
+        // than none, so this asserts the elapsed time, not the error message.
+        @Test("a timeout ends the request, not just the waiting for it") func aTimeoutEndsTheRequestNotJustTheWaitingForIt() {
+            let client = PinnedHTTPClient(resolve: { host in
+                // TEST-NET-2: a connection here can never complete.
+                [DestinationGuard.PinnedAddress(host: host, literal: "198.51.100.1", isIPv6: false)]
+            })
+            let began = Date()
+            let result = send(client, "GET", "http://blackhole.invalid/x", timeout: 4)
+            let elapsed = Date().timeIntervalSince(began)
+            expect(failure(result) != nil, "the attempt failed")
+            expect(elapsed < 12, "returned in \(String(format: "%.1f", elapsed))s, budget was 4s")
+        }
+
+        // A host that accepts the connection and then answers nothing is the
+        // cheapest thing a hostile endpoint can do, and the deadline has to cover
+        // the response read — not just the connect — or an unsubscribe hangs on
+        // whatever a stranger put in a header.
+        @Test("a silent endpoint does not hang the request forever") func aSilentEndpointDoesNotHangTheRequestForever() {
+            guard let origin = StubHTTPServer(staysSilent: true)
+            else { return expect(false, "could not start stub origin") }
+            defer { origin.stop() }
+
+            let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
+            let began = Date()
+            let result = send(client, "GET", "http://silent.invalid:\(origin.port)/unsub", timeout: 4)
+            let elapsed = Date().timeIntervalSince(began)
+            expect(failure(result) != nil, "did not invent a response")
+            expect(elapsed < 12, "gave up in \(String(format: "%.1f", elapsed))s, budget was 4s")
+            expect(!origin.requests.isEmpty, "the request was actually sent and read")
+        }
+
+        @Test("failover only ever tries addresses that passed the check") func failoverOnlyEverTriesAddressesThatPassedTheCheck() {
+            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
+            else { return expect(false, "could not start stub origin") }
+            defer { origin.stop() }
+
+            // An empty answer is the guard's refusal, and there is nothing to fall
+            // back to — a refused host must not become a reachable one.
+            let client = PinnedHTTPClient(resolve: { _ in [] })
+            let result = send(client, "GET", "http://refused.invalid:\(origin.port)/")
+            eq(failure(result), .blocked(host: "refused.invalid"))
+            expect(origin.requests.isEmpty, "nothing was dialled")
+        }
+
+        @Test("a non-http scheme is refused before any lookup") func aNonHttpSchemeIsRefusedBeforeAnyLookup() {
+            let resolver = RecordingResolver { host, _ in [loopbackPin(host)] }
+            let client = PinnedHTTPClient(resolve: resolver.resolver)
+            let result = send(client, "GET", "ftp://acme.invalid/x")
+            expect(failure(result) != nil, "refused")
+            eq(resolver.callCount, 0, "never even resolved")
+        }
+
+        // AC #3. Each hop is resolved, checked and pinned on its own account.
+        @Test("a redirect to another host is pinned again, not inherited") func aRedirectToAnotherHostIsPinnedAgainNotInherited() {
+            guard let second = StubHTTPServer(respond: { _ in StubHTTPServer.ok("second-hop") })
+            else { return expect(false, "could not start second origin") }
+            defer { second.stop() }
+            let secondPort = second.port
+            guard let first = StubHTTPServer(respond: { _ in
+                StubHTTPServer.redirect(to: "http://hop-two.invalid:\(secondPort)/done")
+            }) else { return expect(false, "could not start first origin") }
+            defer { first.stop() }
+
+            let resolver = RecordingResolver { host, _ in [loopbackPin(host)] }
+            let result = send(
+                PinnedHTTPClient(resolve: resolver.resolver), "GET",
+                "http://hop-one.invalid:\(first.port)/start")
+
+            eq(status(result), 200, "followed the redirect")
+            expect(resolver.hosts.contains("hop-one.invalid"), "hop one was pinned")
+            expect(resolver.hosts.contains("hop-two.invalid"), "hop two got its own pin")
+            eq(second.requestLines.first, "GET /done HTTP/1.1")
+        }
+
+        // The hop-two guard has to survive, and has to stay distinguishable from a
+        // sender who simply answered 302 — the engine reports them differently.
+        @Test("a redirect into a refused host surfaces the 3xx unfollowed") func aRedirectIntoARefusedHostSurfacesThe3xxUnfollowed() {
+            guard let second = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
+            else { return expect(false, "could not start second origin") }
+            defer { second.stop() }
+            let secondPort = second.port
+            guard let first = StubHTTPServer(respond: { _ in
+                StubHTTPServer.redirect(to: "http://internal.invalid:\(secondPort)/admin")
+            }) else { return expect(false, "could not start first origin") }
+            defer { first.stop() }
+
+            let client = PinnedHTTPClient(resolve: { host in
+                host == "hop-one.invalid" ? [loopbackPin(host)] : []
+            })
+            let result = send(client, "GET", "http://hop-one.invalid:\(first.port)/start")
+
+            eq(status(result), 302, "the 3xx comes back unfollowed, for the engine to report")
+            expect(second.requests.isEmpty, "the internal host was never contacted")
+        }
+
+        @Test("a relative Location is resolved against the hop it came from") func aRelativeLocationIsResolvedAgainstTheHopItCameFrom() {
+            let box = ResultBox<UInt16>()
+            guard let origin = StubHTTPServer(respond: { head in
+                head.hasPrefix("GET /start")
+                    ? StubHTTPServer.redirect(to: "/moved") : StubHTTPServer.ok("relative")
+            }) else { return expect(false, "could not start stub origin") }
+            defer { origin.stop() }
+            box.value = origin.port
+
+            let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
+            let result = send(client, "GET", "http://relative.invalid:\(origin.port)/start")
+            eq(status(result), 200)
+            eq(origin.requestLines.last, "GET /moved HTTP/1.1")
+        }
+
+        @Test("a redirect loop ends rather than running forever") func aRedirectLoopEndsRatherThanRunningForever() {
+            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.redirect(to: "/again") })
+            else { return expect(false, "could not start stub origin") }
+            defer { origin.stop() }
+
+            let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
+            let result = send(client, "GET", "http://loop.invalid:\(origin.port)/start")
+            eq(failure(result), .tooManyRedirects)
+            expect(
+                origin.requests.count <= PinnedHTTPClient.maxRedirects + 1,
+                "bounded at \(PinnedHTTPClient.maxRedirects) hops; made \(origin.requests.count)")
+        }
+
+        // RFC 9110: 301/302/303 turn into GET, 307/308 keep the method. One-click is
+        // a POST, so getting this wrong either drops the body or replays it.
+        @Test("a 302 turns a one-click POST into a GET, and 307 does not") func a302TurnsAOneClickPOSTIntoAGETAnd307DoesNot() {
+            for (code, expected) in [(302, "GET /next HTTP/1.1"), (307, "POST /next HTTP/1.1")] {
+                guard let origin = StubHTTPServer(respond: { head in
+                    head.hasPrefix("POST /start")
+                        ? StubHTTPServer.redirect(to: "/next", status: code) : StubHTTPServer.ok("done")
+                }) else { return expect(false, "could not start stub origin") }
+                defer { origin.stop() }
+
+                let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
+                let result = send(
+                    client, "POST", "http://method.invalid:\(origin.port)/start",
+                    body: Data("List-Unsubscribe=One-Click".utf8))
+                eq(status(result), 200, "HTTP \(code) chain completed")
+                eq(origin.requestLines.last, expected, "after HTTP \(code)")
+            }
+        }
+    }
+
+    @Suite("UnsubscribeEngine over a pinned client")
+    struct UnsubscribeEngineOverAPinnedClientTests {
+        @Sendable func engine(_ resolve: @escaping PinnedHTTPClient.Resolver) -> UnsubscribeEngine {
+            UnsubscribeEngine(
+                sendMail: { _, _, _, _ in },
+                client: PinnedHTTPClient(resolve: resolve))
+        }
+
+        @Test("a refused destination reads as blocked, not as a dead link") func aRefusedDestinationReadsAsBlockedNotAsADeadLink() {
+            guard let target = ListUnsubscribe(header: "<http://blocked.invalid/unsub>") else {
+                return expect(false, "could not parse header")
+            }
+            let outcome = runAsync { await engine({ _ in [] }).run(target) }
+            guard case .failed(let detail) = outcome else {
+                return expect(false, "expected failure, got \(outcome)")
+            }
+            expect(detail.contains("private or local address"), "says why; got: \(detail)")
+        }
+
+        @Test("a redirect into a private address is reported as blocked") func aRedirectIntoAPrivateAddressIsReportedAsBlocked() {
+            guard let second = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
+            else { return expect(false, "could not start second origin") }
+            defer { second.stop() }
+            let secondPort = second.port
+            guard let first = StubHTTPServer(respond: { _ in
+                StubHTTPServer.redirect(to: "http://internal.invalid:\(secondPort)/admin")
+            }) else { return expect(false, "could not start first origin") }
+            defer { first.stop() }
+
+            guard let target = ListUnsubscribe(header: "<http://sender.invalid:\(first.port)/unsub>")
+            else { return expect(false, "could not parse header") }
+            let outcome = runAsync {
+                await engine({ host in host == "sender.invalid" ? [loopbackPin(host)] : [] }).run(target)
+            }
+            guard case .failed(let detail) = outcome else {
+                return expect(false, "expected failure, got \(outcome)")
+            }
+            expect(detail.contains("redirected to a private or local address"), "got: \(detail)")
+            expect(second.requests.isEmpty, "the internal host was never contacted")
+        }
+
+        // 0.1.0 shipped exactly this bug — "A blocked SSRF redirect was recorded as
+        // a successful unsubscribe" — because the unfollowed 3xx fell under
+        // `code < 400`. The sender was then moved out of the working list as though
+        // it had worked. Nothing in the suite guarded it before this: `main` has no
+        // redirect test of any kind. `isSuccess` is the exact property that
+        // regressed, so it is what gets asserted, across every redirect status.
+        @Test("a blocked redirect is never recorded as a success") func aBlockedRedirectIsNeverRecordedAsASuccess() {
+            for code in [301, 302, 303, 307, 308] {
+                guard let internalHost = StubHTTPServer(respond: { _ in StubHTTPServer.ok("owned") })
+                else { return expect(false, "could not start internal origin") }
+                defer { internalHost.stop() }
+                let internalPort = internalHost.port
+                guard let sender = StubHTTPServer(respond: { _ in
+                    StubHTTPServer.redirect(to: "http://internal.invalid:\(internalPort)/admin", status: code)
+                }) else { return expect(false, "could not start sender origin") }
+                defer { sender.stop() }
+
+                guard let target = ListUnsubscribe(header: "<http://sender.invalid:\(sender.port)/unsub>")
+                else { return expect(false, "could not parse header") }
+                let outcome = runAsync {
+                    await engine({ host in host == "sender.invalid" ? [loopbackPin(host)] : [] })
+                        .run(target)
+                }
+                expect(!outcome.isSuccess, "HTTP \(code) into a private host read as success: \(outcome)")
+                expect(internalHost.requests.isEmpty, "HTTP \(code): the internal host was contacted")
+            }
+        }
+
+        // An HTTP status can never prove an unsubscribe took effect, so a 200 is
+        // still only `requested`. This is load-bearing for the whole UI.
+        @Test("a 200 is still only requested, never confirmed") func a200IsStillOnlyRequestedNeverConfirmed() {
+            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("bye") })
+            else { return expect(false, "could not start stub origin") }
+            defer { origin.stop() }
+
+            guard let target = ListUnsubscribe(
+                header: "<http://sender.invalid:\(origin.port)/unsub>",
+                postHeader: "List-Unsubscribe=One-Click")
+            else { return expect(false, "could not parse header") }
+            expect(target.supportsOneClick, "this is the one-click path")
+
+            let outcome = runAsync { await engine({ host in [loopbackPin(host)] }).run(target) }
+            guard case .requested(let detail) = outcome else {
+                return expect(false, "expected requested, got \(outcome)")
+            }
+            expect(detail.contains("unverifiable"), "the outcome says so; got: \(detail)")
+            expect(origin.requestLines.first?.hasPrefix("POST ") ?? false, "sent as a POST")
+            expect(
+                origin.requests.first?.contains("Content-Length: 26") ?? false,
+                "carried the one-click body")
+        }
+
+        @Test("a sender that answers 500 falls back to its mailto target") func aSenderThatAnswers500FallsBackToItsMailtoTarget() {
+            guard let origin = StubHTTPServer(respond: { _ in
+                "HTTP/1.1 500 Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            }) else { return expect(false, "could not start stub origin") }
+            defer { origin.stop() }
+
+            guard let target = ListUnsubscribe(
+                header: "<http://sender.invalid:\(origin.port)/unsub>, <mailto:off@sender.invalid>")
+            else { return expect(false, "could not parse header") }
+
+            let mailed = ResultBox<String>()
+            let engine = UnsubscribeEngine(
+                sendMail: { to, _, _, _ in mailed.value = to },
+                client: PinnedHTTPClient(resolve: { host in [loopbackPin(host)] }))
+            let outcome = runAsync { await engine.run(target) }
+            expect(outcome.isSuccess, "the mailto fallback carried it; got \(outcome)")
+            eq(mailed.value, "off@sender.invalid", "the fallback actually sent")
+        }
+    }
+
 }
 
-func eq<T: Equatable>(
-    _ actual: T?,
-    _ expected: T?,
-    _ label: @autoclosure () -> String = "",
-    line: Int = #line
-) {
-    Harness.expectEqual(actual, expected, label(), line: line)
-}
-
-// MARK: - MIME header decoding
-
-Harness.suite("MIMEHeader") {
-    Harness.test("passes plain text through untouched") {
+@Suite("MIMEHeader")
+struct MIMEHeaderTests {
+    @Test("passes plain text through untouched") func passesPlainTextThroughUntouched() {
         eq(MIMEHeader.decode("Acme Newsletter"), "Acme Newsletter")
     }
-    Harness.test("decodes base64 encoded-words") {
+    @Test("decodes base64 encoded-words") func decodesBase64EncodedWords() {
         eq(MIMEHeader.decode("=?UTF-8?B?Q2Fmw6k=?="), "Café")
     }
-    Harness.test("decodes Q-encoded words, with _ as space") {
+    @Test("decodes Q-encoded words, with _ as space") func decodesQEncodedWordsWith_AsSpace() {
         eq(MIMEHeader.decode("=?UTF-8?Q?Caf=C3=A9_News?="), "Café News")
     }
     // RFC 2047: whitespace *between* adjacent encoded-words is not significant.
-    Harness.test("joins adjacent encoded-words without inserting whitespace") {
+    @Test("joins adjacent encoded-words without inserting whitespace") func joinsAdjacentEncodedWordsWithoutInsertingWhitespace() {
         eq(MIMEHeader.decode("=?UTF-8?B?Q2Fm?= =?UTF-8?B?w6k=?="), "Café")
     }
-    Harness.test("keeps literal text around encoded-words") {
+    @Test("keeps literal text around encoded-words") func keepsLiteralTextAroundEncodedWords() {
         eq(MIMEHeader.decode("The =?UTF-8?B?Q2Fmw6k=?= Times"), "The Café Times")
     }
-    Harness.test("leaves malformed encoded-words alone rather than dropping text") {
+    @Test("leaves malformed encoded-words alone rather than dropping text") func leavesMalformedEncodedWordsAloneRatherThanDroppingText() {
         eq(MIMEHeader.decode("=?UTF-8?B?not-valid"), "=?UTF-8?B?not-valid")
         eq(MIMEHeader.decode("=?"), "=?")
     }
-    Harness.test("falls back to UTF-8 for an unknown charset") {
+    @Test("falls back to UTF-8 for an unknown charset") func fallsBackToUTF8ForAnUnknownCharset() {
         eq(MIMEHeader.decode("=?NOPE-9?B?Q2Fmw6k=?="), "Café")
     }
 }
 
-// MARK: - Sender parsing
-
-Harness.suite("EmailSender") {
-    Harness.test("splits display name from address") {
+@Suite("EmailSender")
+struct EmailSenderTests {
+    @Test("splits display name from address") func splitsDisplayNameFromAddress() {
         let s = EmailSender(header: "Acme News <news@mail.acme.com>")
         eq(s.displayName, "Acme News")
         eq(s.address, "news@mail.acme.com")
         eq(s.host, "mail.acme.com")
     }
-    Harness.test("handles a bare address") {
+    @Test("handles a bare address") func handlesABareAddress() {
         let s = EmailSender(header: "news@acme.com")
         eq(s.displayName, "")
         eq(s.address, "news@acme.com")
         eq(s.host, "acme.com")
     }
-    Harness.test("lowercases the address but preserves display-name case") {
+    @Test("lowercases the address but preserves display-name case") func lowercasesTheAddressButPreservesDisplayNameCase() {
         let s = EmailSender(header: "Acme NEWS <News@ACME.com>")
         eq(s.displayName, "Acme NEWS")
         eq(s.address, "news@acme.com")
     }
-    Harness.test("decodes an encoded display name") {
+    @Test("decodes an encoded display name") func decodesAnEncodedDisplayName() {
         eq(EmailSender(header: "=?UTF-8?B?Q2Fmw6k=?= <hi@acme.com>").displayName, "Café")
     }
-    Harness.test("strips quotes from the display name") {
+    @Test("strips quotes from the display name") func stripsQuotesFromTheDisplayName() {
         eq(EmailSender(header: "\"Acme, Inc.\" <hi@acme.com>").displayName, "Acme, Inc.")
     }
     // `"Foo <bar>" <real@acme.com>` — the last bracket pair is the real address.
-    Harness.test("uses the last angle-bracket pair when the name contains one") {
+    @Test("uses the last angle-bracket pair when the name contains one") func usesTheLastAngleBracketPairWhenTheNameContainsOne() {
         eq(EmailSender(header: "\"Foo <bar>\" <real@acme.com>").address, "real@acme.com")
     }
-    Harness.test("degrades gracefully on empty input") {
+    @Test("degrades gracefully on empty input") func degradesGracefullyOnEmptyInput() {
         let s = EmailSender(header: "")
         expect(s.address.isEmpty, "address should be empty")
         expect(s.host.isEmpty, "host should be empty")
         expect(s.label.isEmpty, "label should be empty")
     }
-    Harness.test("label prefers name, then address") {
+    @Test("label prefers name, then address") func labelPrefersNameThenAddress() {
         eq(EmailSender(header: "N <a@b.com>").label, "N")
         eq(EmailSender(header: "<a@b.com>").label, "a@b.com")
     }
 }
 
-// MARK: - List-Unsubscribe
-
-Harness.suite("ListUnsubscribe") {
-    Harness.test("returns nil when the header is absent or blank") {
+@Suite("ListUnsubscribe")
+struct ListUnsubscribeTests {
+    @Test("returns nil when the header is absent or blank") func returnsNilWhenTheHeaderIsAbsentOrBlank() {
         expect(ListUnsubscribe(header: nil) == nil, "nil header")
         expect(ListUnsubscribe(header: "   ") == nil, "blank header")
     }
-    Harness.test("parses an https target") {
+    @Test("parses an https target") func parsesAnHttpsTarget() {
         let u = ListUnsubscribe(header: "<https://ex.com/u?id=1>")
         eq(u?.webTargets.map(\.absoluteString), ["https://ex.com/u?id=1"])
         eq(u?.mailtoTargets.isEmpty, true)
     }
-    Harness.test("parses a mailto target with subject and body") {
+    @Test("parses a mailto target with subject and body") func parsesAMailtoTargetWithSubjectAndBody() {
         let u = ListUnsubscribe(header: "<mailto:unsub@ex.com?subject=stop&body=please%20stop>")
         eq(u?.mailtoTargets.first?.address, "unsub@ex.com")
         eq(u?.mailtoTargets.first?.subject, "stop")
         eq(u?.mailtoTargets.first?.body, "please stop")
     }
-    Harness.test("supplies defaults for a bare mailto") {
+    @Test("supplies defaults for a bare mailto") func suppliesDefaultsForABareMailto() {
         let u = ListUnsubscribe(header: "<mailto:unsub@ex.com>")
         eq(u?.mailtoTargets.first?.subject, "unsubscribe")
         eq(u?.mailtoTargets.first?.body.isEmpty, false)
     }
-    Harness.test("preserves sender-preferred order across both target kinds") {
+    @Test("preserves sender-preferred order across both target kinds") func preservesSenderPreferredOrderAcrossBothTargetKinds() {
         let u = ListUnsubscribe(header: "<https://a.com/1>, <mailto:b@ex.com>, <https://c.com/2>")
         eq(u?.webTargets.count, 2)
         eq(u?.webTargets.first?.host, "a.com")
         eq(u?.mailtoTargets.count, 1)
     }
     // Commas are legal inside a URI, so brackets are the only safe delimiter.
-    Harness.test("tolerates commas inside a URI") {
+    @Test("tolerates commas inside a URI") func toleratesCommasInsideAURI() {
         let u = ListUnsubscribe(header: "<https://ex.com/u?a=1,2,3>")
         eq(u?.webTargets.count, 1)
         eq(u?.webTargets.first?.absoluteString, "https://ex.com/u?a=1,2,3")
     }
-    Harness.test("folds a header wrapped across lines") {
+    @Test("folds a header wrapped across lines") func foldsAHeaderWrappedAcrossLines() {
         eq(ListUnsubscribe(header: "<https://ex.com/\n  unsub?id=1>")?.webTargets.count, 1)
     }
-    Harness.test("detects the RFC 8058 one-click token") {
+    @Test("detects the RFC 8058 one-click token") func detectsTheRFC8058OneClickToken() {
         let u = ListUnsubscribe(
             header: "<https://ex.com/u>", postHeader: "List-Unsubscribe=One-Click")
         eq(u?.supportsOneClick, true)
     }
-    Harness.test("does not treat an arbitrary post header as one-click") {
+    @Test("does not treat an arbitrary post header as one-click") func doesNotTreatAnArbitraryPostHeaderAsOneClick() {
         eq(ListUnsubscribe(header: "<https://ex.com/u>", postHeader: "x")?.supportsOneClick, false)
         eq(ListUnsubscribe(header: "<https://ex.com/u>")?.supportsOneClick, false)
     }
-    Harness.test("ignores unsupported schemes") {
+    @Test("ignores unsupported schemes") func ignoresUnsupportedSchemes() {
         expect(ListUnsubscribe(header: "<ftp://ex.com/u>") == nil, "ftp should be rejected")
     }
 }
 
-// MARK: - Registrable domain
-
-Harness.suite("RegistrableDomain") {
-    Harness.test("collapses sending subdomains to the brand domain") {
+@Suite("RegistrableDomain")
+struct RegistrableDomainTests {
+    @Test("collapses sending subdomains to the brand domain") func collapsesSendingSubdomainsToTheBrandDomain() {
         for (host, want) in [
             ("email.harborfreight.com", "harborfreight.com"),
             ("e.paypal.com", "paypal.com"),
@@ -162,7 +1142,7 @@ Harness.suite("RegistrableDomain") {
             eq(RegistrableDomain.of(host), want, host)
         }
     }
-    Harness.test("respects multi-label public suffixes") {
+    @Test("respects multi-label public suffixes") func respectsMultiLabelPublicSuffixes() {
         for (host, want) in [
             ("mail.bbc.co.uk", "bbc.co.uk"),
             ("bbc.co.uk", "bbc.co.uk"),
@@ -171,37 +1151,18 @@ Harness.suite("RegistrableDomain") {
             eq(RegistrableDomain.of(host), want, host)
         }
     }
-    Harness.test("normalises case and stray dots") {
+    @Test("normalises case and stray dots") func normalisesCaseAndStrayDots() {
         eq(RegistrableDomain.of("Mail.ACME.com."), "acme.com")
     }
-    Harness.test("returns empty for an empty host") {
+    @Test("returns empty for an empty host") func returnsEmptyForAnEmptyHost() {
         eq(RegistrableDomain.of(""), "")
     }
 }
 
-// MARK: - Grouping
-
-func msg(
-    _ uid: UInt32,
-    from: String,
-    subject: String = "s",
-    daysAgo: Double = 0,
-    unread: Bool = false,
-    unsub: String? = "<https://ex.com/u>"
-) -> EmailMessage {
-    EmailMessage(
-        uid: MessageUID(uid),
-        sender: EmailSender(header: from),
-        subject: subject,
-        receivedAt: Date(timeIntervalSince1970: 1_700_000_000 - daysAgo * 86400),
-        isUnread: unread,
-        unsubscribe: ListUnsubscribe(header: unsub)
-    )
-}
-
-Harness.suite("Grouping") {
+@Suite("Grouping")
+struct GroupingTests {
     // The Amazon case: one display name, several sending hosts → one row.
-    Harness.test("merges one brand sending from many subdomains into a single row") {
+    @Test("merges one brand sending from many subdomains into a single row") func mergesOneBrandSendingFromManySubdomainsIntoASingleRow() {
         let groups = Grouping().group([
             msg(1, from: "Amazon <store-news@amazon.com>"),
             msg(2, from: "Amazon <ship@emailinfo.amazon.com>"),
@@ -212,7 +1173,7 @@ Harness.suite("Grouping") {
         eq(groups.first?.total, 3)
     }
     // The Substack case: same domain, different display names → one row each.
-    Harness.test("splits distinct newsletters that share a platform") {
+    @Test("splits distinct newsletters that share a platform") func splitsDistinctNewslettersThatShareAPlatform() {
         let groups = Grouping().group([
             msg(1, from: "Alice Writes <alice@substack.com>"),
             msg(2, from: "Bob Reports <bob@substack.com>"),
@@ -222,14 +1183,14 @@ Harness.suite("Grouping") {
         expect(groups.allSatisfy { $0.id.kind == .address }, "all groups keyed by address")
         eq(groups.first { $0.id.key == "alice@substack.com" }?.total, 2)
     }
-    Harness.test("splits when one domain carries several distinct display names") {
+    @Test("splits when one domain carries several distinct display names") func splitsWhenOneDomainCarriesSeveralDistinctDisplayNames() {
         eq(
             Grouping().group([
                 msg(1, from: "Deals <a@shop.com>"),
                 msg(2, from: "Receipts <b@shop.com>"),
             ]).count, 2)
     }
-    Harness.test("a split rule forces a single-brand domain into per-address rows") {
+    @Test("a split rule forces a single-brand domain into per-address rows") func aSplitRuleForcesASingleBrandDomainIntoPerAddressRows() {
         // Amazon-style: one display name, several addresses — normally merged.
         let merged = Grouping().group([
             msg(1, from: "Amazon <a@amazon.com>"),
@@ -242,7 +1203,7 @@ Harness.suite("Grouping") {
         ])
         eq(split.count, 2)
     }
-    Harness.test("a merge rule keeps an auto-split domain as one group") {
+    @Test("a merge rule keeps an auto-split domain as one group") func aMergeRuleKeepsAnAutoSplitDomainAsOneGroup() {
         // Distinct display names normally split; a merge rule overrides that.
         let split = Grouping().group([
             msg(1, from: "Deals <a@shop.com>"),
@@ -255,7 +1216,7 @@ Harness.suite("Grouping") {
         ])
         eq(merged.count, 1)
     }
-    Harness.test("sorts by message count descending") {
+    @Test("sorts by message count descending") func sortsByMessageCountDescending() {
         let groups = Grouping().group([
             msg(1, from: "One <a@one.com>"),
             msg(2, from: "Two <b@two.com>"),
@@ -263,7 +1224,7 @@ Harness.suite("Grouping") {
         ])
         eq(groups.first?.id.key, "two.com")
     }
-    Harness.test("computes per-group statistics") {
+    @Test("computes per-group statistics") func computesPerGroupStatistics() {
         let groups = Grouping().group([
             msg(1, from: "N <a@x.com>", unread: true),
             msg(2, from: "N <a@x.com>", unread: false),
@@ -272,21 +1233,21 @@ Harness.suite("Grouping") {
         eq(groups.first?.unreadCount, 1)
         eq(groups.first?.unreadPercent, 50)
     }
-    Harness.test("orders messages newest-first") {
+    @Test("orders messages newest-first") func ordersMessagesNewestFirst() {
         let groups = Grouping().group([
             msg(1, from: "N <a@x.com>", subject: "old", daysAgo: 10),
             msg(2, from: "N <a@x.com>", subject: "new", daysAgo: 1),
         ])
         eq(groups.first?.latest?.subject, "new")
     }
-    Harness.test("reports a group unsubscribable only when some message carries a target") {
+    @Test("reports a group unsubscribable only when some message carries a target") func reportsAGroupUnsubscribableOnlyWhenSomeMessageCarriesATarget() {
         expect(Grouping().group([msg(1, from: "N <a@x.com>")])[0].canUnsubscribe, "has target")
         expect(
             !Grouping().group([msg(2, from: "N <a@y.com>", unsub: nil)])[0].canUnsubscribe,
             "no target")
     }
     // Skips newer messages lacking a target rather than giving up on the group.
-    Harness.test("picks the newest message carrying an unsubscribe target") {
+    @Test("picks the newest message carrying an unsubscribe target") func picksTheNewestMessageCarryingAnUnsubscribeTarget() {
         let groups = Grouping().group([
             msg(1, from: "N <a@x.com>", subject: "old", daysAgo: 10),
             msg(2, from: "N <a@x.com>", subject: "newer-no-unsub", daysAgo: 2, unsub: nil),
@@ -294,13 +1255,13 @@ Harness.suite("Grouping") {
         ])
         eq(groups.first?.unsubscribeSource?.subject, "newer-with-unsub")
     }
-    Harness.test("handles an empty input") {
+    @Test("handles an empty input") func handlesAnEmptyInput() {
         expect(Grouping().group([]).isEmpty, "empty in, empty out")
     }
     // Regression: notifications@github.com carries a different human's name on
     // every message. Labelling the group after the newest one named 2,286
     // messages "Liang Hu".
-    Harness.test("falls back to the key when senders disagree on display name") {
+    @Test("falls back to the key when senders disagree on display name") func fallsBackToTheKeyWhenSendersDisagreeOnDisplayName() {
         let groups = Grouping().group([
             msg(1, from: "Liang Hu <notifications@github.com>", daysAgo: 1),
             msg(2, from: "Ana Ruiz <notifications@github.com>", daysAgo: 5),
@@ -309,7 +1270,7 @@ Harness.suite("Grouping") {
         eq(groups.count, 1)
         eq(groups.first?.displayName, groups.first?.id.key)
     }
-    Harness.test("uses a dominant display name even when a few messages differ") {
+    @Test("uses a dominant display name even when a few messages differ") func usesADominantDisplayNameEvenWhenAFewMessagesDiffer() {
         // "Mint" across mostly-consistent senders should still read as Mint.
         let groups = Grouping().group([
             msg(1, from: "Mint <team@mint.com>"),
@@ -318,7 +1279,7 @@ Harness.suite("Grouping") {
         ])
         eq(groups.first?.displayName, "Mint")
     }
-    Harness.test("uses the shared display name when all senders agree") {
+    @Test("uses the shared display name when all senders agree") func usesTheSharedDisplayNameWhenAllSendersAgree() {
         let groups = Grouping().group([
             msg(1, from: "Netflix <info@netflix.com>"),
             msg(2, from: "Netflix <news@netflix.com>"),
@@ -327,18 +1288,14 @@ Harness.suite("Grouping") {
     }
 }
 
-// MARK: - Round-tripping through storage
-
-// Regression: the store wrote "One-Click" but ListUnsubscribe looks for the
-// canonical "List-Unsubscribe=One-Click" token, so every message came back
-// reporting no one-click support — 0% instead of the true 79%.
-Harness.suite("Storage round-trip") {
-    Harness.test("preserves the one-click flag through the stored token") {
+@Suite("Storage round-trip")
+struct StorageRoundTripTests {
+    @Test("preserves the one-click flag through the stored token") func preservesTheOneClickFlagThroughTheStoredToken() {
         let stored = "List-Unsubscribe=One-Click"
         let decoded = ListUnsubscribe(header: "<https://ex.com/u>", postHeader: stored)
         eq(decoded?.supportsOneClick, true)
     }
-    Harness.test("re-wrapping a bare stored URL parses back to the same target") {
+    @Test("re-wrapping a bare stored URL parses back to the same target") func reWrappingABareStoredURLParsesBackToTheSameTarget() {
         let original = ListUnsubscribe(header: "<https://ex.com/u?id=1>")
         let bare = original?.webTargets.first?.absoluteString
         let decoded = ListUnsubscribe(header: bare.map { "<\($0)>" })
@@ -346,10 +1303,9 @@ Harness.suite("Storage round-trip") {
     }
 }
 
-// MARK: - GroupID
-
-Harness.suite("GroupID") {
-    Harness.test("round-trips through its storage key") {
+@Suite("GroupID")
+struct GroupIDTests {
+    @Test("round-trips through its storage key") func roundTripsThroughItsStorageKey() {
         for id in [
             GroupID(kind: .domain, key: "acme.com"),
             GroupID(kind: .address, key: "alice@substack.com"),
@@ -357,21 +1313,20 @@ Harness.suite("GroupID") {
             eq(GroupID(storageKey: id.storageKey), id)
         }
     }
-    Harness.test("distinguishes a domain key from an address key with the same text") {
+    @Test("distinguishes a domain key from an address key with the same text") func distinguishesADomainKeyFromAnAddressKeyWithTheSameText() {
         expect(
             GroupID(kind: .domain, key: "x") != GroupID(kind: .address, key: "x"),
             "kind must participate in equality")
     }
-    Harness.test("rejects a malformed storage key") {
+    @Test("rejects a malformed storage key") func rejectsAMalformedStorageKey() {
         expect(GroupID(storageKey: "nonsense") == nil, "no separator")
         expect(GroupID(storageKey: "bogus:x") == nil, "unknown kind")
     }
 }
 
-// MARK: - Browser confirmation heuristic
-
-Harness.suite("UnsubscribeEngine.looksLikeConfirmation") {
-    Harness.test("matches common success confirmations") {
+@Suite("UnsubscribeEngine.looksLikeConfirmation")
+struct UnsubscribeEngineLooksLikeConfirmationTests {
+    @Test("matches common success confirmations") func matchesCommonSuccessConfirmations() {
         for page in [
             "You have been unsubscribed from our newsletter.",
             "Success! You will no longer receive these emails.",
@@ -382,7 +1337,7 @@ Harness.suite("UnsubscribeEngine.looksLikeConfirmation") {
             expect(UnsubscribeEngine.looksLikeConfirmation(page), "should match: \(page)")
         }
     }
-    Harness.test("does not match a page still asking for action") {
+    @Test("does not match a page still asking for action") func doesNotMatchAPageStillAskingForAction() {
         for page in [
             "Enter your email to unsubscribe.",
             "Click the button below to confirm your unsubscribe request.",
@@ -392,31 +1347,14 @@ Harness.suite("UnsubscribeEngine.looksLikeConfirmation") {
             expect(!UnsubscribeEngine.looksLikeConfirmation(page), "should NOT match: \(page)")
         }
     }
-    Harness.test("is case-insensitive") {
+    @Test("is case-insensitive") func isCaseInsensitive() {
         expect(UnsubscribeEngine.looksLikeConfirmation("UNSUBSCRIBED SUCCESSFULLY"), "upper")
     }
 }
 
-// MARK: - MessageStore (in-memory integration)
-
-func makeMessage(
-    _ uid: UInt32, from: String, unsub: String? = "<https://ex.com/u>",
-    messageId: String = "", deliveredTo: String = "", listID: String? = nil
-) -> EmailMessage {
-    EmailMessage(
-        uid: MessageUID(uid),
-        sender: EmailSender(header: from),
-        subject: "s\(uid)",
-        receivedAt: Date(timeIntervalSince1970: 1_700_000_000 + Double(uid)),
-        isUnread: true,
-        unsubscribe: ListUnsubscribe(header: unsub),
-        deliveredTo: deliveredTo,
-        messageId: messageId,
-        listID: listID)
-}
-
-Harness.suite("MessageStore") {
-    Harness.test("upserts and reads back messages, preserving messageId") {
+@Suite("MessageStore")
+struct MessageStoreTests {
+    @Test("upserts and reads back messages, preserving messageId") func upsertsAndReadsBackMessagesPreservingMessageId() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([
@@ -432,7 +1370,7 @@ Harness.suite("MessageStore") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("does not filter ignored senders out of allMessages") {
+    @Test("does not filter ignored senders out of allMessages") func doesNotFilterIgnoredSendersOutOfAllMessages() {
         // Regression: ignored senders must remain in the model so the Ignored
         // collection can show them.
         do {
@@ -444,7 +1382,7 @@ Harness.suite("MessageStore") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("delete removes messages") {
+    @Test("delete removes messages") func deleteRemovesMessages() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([makeMessage(1, from: "A <a@x.com>"), makeMessage(2, from: "B <b@y.com>")])
@@ -453,7 +1391,7 @@ Harness.suite("MessageStore") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("records and reads unsubscribe history with metadata") {
+    @Test("records and reads unsubscribe history with metadata") func recordsAndReadsUnsubscribeHistoryWithMetadata() {
         do {
             let store = try MessageStore.inMemory()
             let id = GroupID(kind: .domain, key: "acme.com")
@@ -470,7 +1408,7 @@ Harness.suite("MessageStore") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("persists grouping rules") {
+    @Test("persists grouping rules") func persistsGroupingRules() {
         do {
             let store = try MessageStore.inMemory()
             store.setGroupingRules(["github.com": .split, "shop.com": .merge])
@@ -480,7 +1418,7 @@ Harness.suite("MessageStore") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("persists sync token round-trip") {
+    @Test("persists sync token round-trip") func persistsSyncTokenRoundTrip() {
         do {
             let store = try MessageStore.inMemory()
             expect(try store.syncToken() == nil, "no token initially")
@@ -491,7 +1429,7 @@ Harness.suite("MessageStore") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("string-set persistence round-trips") {
+    @Test("string-set persistence round-trips") func stringSetPersistenceRoundTrips() {
         do {
             let store = try MessageStore.inMemory()
             eq(store.stringSet(forKey: "k").count, 0)
@@ -501,10 +1439,9 @@ Harness.suite("MessageStore") {
     }
 }
 
-// MARK: - Provider detection
-
-Harness.suite("MailProvider") {
-    Harness.test("detects known providers by domain, case-insensitively") {
+@Suite("MailProvider")
+struct MailProviderTests {
+    @Test("detects known providers by domain, case-insensitively") func detectsKnownProvidersByDomainCaseInsensitively() {
         expect(MailProvider.detect(forEmail: "a@gmail.com")?.id == "gmail", "gmail")
         expect(MailProvider.detect(forEmail: "A@GoogleMail.com")?.id == "gmail", "googlemail alias")
         expect(MailProvider.detect(forEmail: "a@icloud.com")?.id == "icloud", "icloud")
@@ -512,11 +1449,11 @@ Harness.suite("MailProvider") {
         expect(MailProvider.detect(forEmail: "a@yahoo.com")?.id == "yahoo", "yahoo")
         expect(MailProvider.detect(forEmail: "a@fastmail.com")?.id == "fastmail", "fastmail")
     }
-    Harness.test("returns nil for an unknown (custom) domain") {
+    @Test("returns nil for an unknown (custom) domain") func returnsNilForAnUnknownCustomDomain() {
         expect(MailProvider.detect(forEmail: "a@example.com") == nil, "custom domain")
         expect(MailProvider.detect(forEmail: "not-an-email") == nil, "no @")
     }
-    Harness.test("resolved prefers a stored id, then detection, then Gmail") {
+    @Test("resolved prefers a stored id, then detection, then Gmail") func resolvedPrefersAStoredIdThenDetectionThenGmail() {
         expect(
             MailProvider.resolved(forEmail: "a@example.com", storedID: "fastmail").id == "fastmail",
             "stored id wins")
@@ -530,24 +1467,23 @@ Harness.suite("MailProvider") {
             MailProvider.resolved(forEmail: "a@example.com", storedID: "bogus").id == "gmail",
             "ignores unknown stored id, falls back")
     }
-    Harness.test("webSearchURL is provided for Gmail and nil is possible") {
+    @Test("webSearchURL is provided for Gmail and nil is possible") func websearchurlIsProvidedForGmailAndNilIsPossible() {
         expect(
             MailProvider.gmail.webSearchURL(fromSender: "x@y.com") != nil,
             "gmail has a search URL")
     }
 }
 
-// MARK: - Security hardening
-
-Harness.suite("Header injection defense") {
-    Harness.test("strips CR/LF and control chars from header values") {
+@Suite("Header injection defense")
+struct HeaderInjectionDefenseTests {
+    @Test("strips CR/LF and control chars from header values") func stripsCRLFAndControlCharsFromHeaderValues() {
         let dirty = "stop\r\nBcc: evil@x.com\r\n\r\nforged body"
         let clean = IMAPBackend.stripControlCharacters(dirty)
         expect(!clean.contains("\r"), "no CR")
         expect(!clean.contains("\n"), "no LF")
         expect(clean.contains("stop"), "keeps printable content")
     }
-    Harness.test("rejects a mailto whose subject smuggles CRLF headers, via a valid address") {
+    @Test("rejects a mailto whose subject smuggles CRLF headers, via a valid address") func rejectsAMailtoWhoseSubjectSmugglesCRLFHeadersViaAValidAddress() {
         // The address is fine; the subject carries percent-encoded CRLF. The
         // target still parses (address valid) but the composed subject must be
         // neutralized by stripControlCharacters at the rfc822 sink.
@@ -560,12 +1496,13 @@ Harness.suite("Header injection defense") {
     }
 }
 
-Harness.suite("Mailto recipient validation") {
-    Harness.test("accepts a single well-formed address") {
+@Suite("Mailto recipient validation")
+struct MailtoRecipientValidationTests {
+    @Test("accepts a single well-formed address") func acceptsASingleWellFormedAddress() {
         expect(ListUnsubscribe.isSingleWellFormedAddress("unsub@example.com"), "plain")
         expect(ListUnsubscribe.isSingleWellFormedAddress("a.b+tag@mail.example.co.uk"), "tagged")
     }
-    Harness.test("rejects lists, injection, and malformed addresses") {
+    @Test("rejects lists, injection, and malformed addresses") func rejectsListsInjectionAndMalformedAddresses() {
         expect(!ListUnsubscribe.isSingleWellFormedAddress("a@b.com,c@d.com"), "comma list")
         expect(!ListUnsubscribe.isSingleWellFormedAddress("a@b.com c@d.com"), "space list")
         expect(!ListUnsubscribe.isSingleWellFormedAddress("a@b.com\r\nBcc:x@y.com"), "CRLF")
@@ -573,16 +1510,17 @@ Harness.suite("Mailto recipient validation") {
         expect(!ListUnsubscribe.isSingleWellFormedAddress("a@localhost"), "no dot in domain")
         expect(!ListUnsubscribe.isSingleWellFormedAddress("<a@b.com>"), "angle brackets")
     }
-    Harness.test("drops a mailto target with a multi-recipient address") {
+    @Test("drops a mailto target with a multi-recipient address") func dropsAMailtoTargetWithAMultiRecipientAddress() {
         // Comma is inside the brackets, so it's one URI whose path is a list.
         let u = ListUnsubscribe(header: "<mailto:a@b.com,victim@evil.com?subject=x>")
         expect(u == nil, "no usable target -> nil")
     }
 }
 
-Harness.suite("DestinationGuard (SSRF)") {
+@Suite("DestinationGuard (SSRF)")
+struct DestinationGuardSSRFTests {
     func allowed(_ s: String) -> Bool { DestinationGuard.isAllowed(URL(string: s)!) }
-    Harness.test("blocks loopback, private, and link-local IP literals") {
+    @Test("blocks loopback, private, and link-local IP literals") func blocksLoopbackPrivateAndLinkLocalIPLiterals() {
         expect(!allowed("http://127.0.0.1/admin"), "loopback v4")
         expect(!allowed("http://10.0.0.5/"), "10/8")
         expect(!allowed("http://192.168.1.1/reboot"), "192.168/16")
@@ -591,20 +1529,21 @@ Harness.suite("DestinationGuard (SSRF)") {
         expect(!allowed("http://[::1]/"), "loopback v6")
         expect(!allowed("http://[::ffff:127.0.0.1]/"), "v4-mapped loopback")
     }
-    Harness.test("blocks non-http schemes") {
+    @Test("blocks non-http schemes") func blocksNonHttpSchemes() {
         expect(!allowed("file:///etc/passwd"), "file scheme")
         expect(!allowed("ftp://example.com/"), "ftp scheme")
     }
-    Harness.test("allows a public IP literal") {
+    @Test("allows a public IP literal") func allowsAPublicIPLiteral() {
         // Documentation/example address block is globally routable unicast.
         expect(allowed("https://93.184.216.34/unsubscribe"), "public v4 literal")
     }
 }
 
-Harness.suite("Demo mailbox") {
+@Suite("Demo mailbox")
+struct DemoMailboxTests {
     let messages = DemoData.messages()
 
-    Harness.test("every message parses into a usable sender") {
+    @Test("every message parses into a usable sender") func everyMessageParsesIntoAUsableSender() {
         expect(!messages.isEmpty, "demo data is not empty")
         let bad = messages.filter { $0.sender.address.isEmpty || $0.sender.host.isEmpty }
         expect(bad.isEmpty, "all From headers parsed: \(bad.count) failures")
@@ -612,7 +1551,7 @@ Harness.suite("Demo mailbox") {
         expect(unnamed.isEmpty, "every sender has a display name")
     }
 
-    Harness.test("covers all four unsubscribe methods, for screenshots") {
+    @Test("covers all four unsubscribe methods, for screenshots") func coversAllFourUnsubscribeMethodsForScreenshots() {
         // The demo exists partly to show the method icons. If a refactor drops
         // one of these, the screenshots silently stop demonstrating it.
         let oneClick = messages.contains { $0.unsubscribe?.supportsOneClick == true }
@@ -631,57 +1570,70 @@ Harness.suite("Demo mailbox") {
         expect(manual, "has a sender with no unsubscribe at all")
     }
 
-    Harness.test("groups into a plausible table") {
+    @Test("groups into a plausible table") func groupsIntoAPlausibleTable() {
         let groups = Grouping().group(messages)
         expect(groups.count >= 15, "enough rows to fill a window: \(groups.count)")
         expect(groups.allSatisfy { !$0.messages.isEmpty }, "no empty groups")
     }
 
-    Harness.test("messages are ordered newest first and dated in the past") {
+    @Test("messages are ordered newest first and dated in the past") func messagesAreOrderedNewestFirstAndDatedInThePast() {
         let now = Date()
         expect(messages.allSatisfy { $0.receivedAt <= now }, "nothing from the future")
         let dates = messages.map(\.receivedAt)
         expect(dates == dates.sorted(by: >), "sorted newest first")
     }
 
-    Harness.test("message ids use a reserved domain") {
+    @Test("message ids use a reserved domain") func messageIdsUseAReservedDomain() {
         // Demo Message-IDs must never collide with, or resolve to, real hosts.
         let leaked = messages.filter { !$0.messageId.hasSuffix("@example.invalid>") }
         expect(leaked.isEmpty, "all demo Message-IDs use .invalid: \(leaked.count) leaked")
     }
 }
 
-Harness.suite("Demo unsubscribe history") {
+@Suite("Demo unsubscribe history")
+struct DemoUnsubscribeHistoryTests {
     // The demo seeds unsubscribe records so Reappeared is not empty. Whether a
     // seeded sender reads as reappeared or as honoured is not a flag: it falls
     // out of comparing the record's date against that sender's newest message,
     // exactly as it does for a real unsubscribe. These tests use that same
     // comparison, so they fail if the seed dates drift past the mail.
-    let now = Date()
-    let groups = Grouping().group(DemoData.messages(now: now))
-    let planned = DemoData.plannedUnsubscribes(for: groups, now: now)
+    // Each of the three is derived from the one before it, so they are built in
+    // an initialiser rather than as chained property initialisers, which Swift
+    // does not allow. The values still agree with each other, which is the
+    // property the tests below depend on.
+    let now: Date
+    let groups: [SenderGroup]
+    let planned: [DemoData.PlannedUnsubscribe]
+
+    init() {
+        let n = Date()
+        let g = Grouping().group(DemoData.messages(now: n))
+        now = n
+        groups = g
+        planned = DemoData.plannedUnsubscribes(for: g, now: n)
+    }
 
     func newest(_ id: GroupID) -> Date {
         groups.first { $0.id == id }?.messages.map(\.receivedAt).max() ?? .distantPast
     }
 
-    Harness.test("every prior unsubscribe matches a sender in the demo mailbox") {
+    @Test("every prior unsubscribe matches a sender in the demo mailbox") func everyPriorUnsubscribeMatchesASenderInTheDemoMailbox() {
         expect(
             planned.count == DemoData.priorUnsubscribes.count,
             "matched \(planned.count) of \(DemoData.priorUnsubscribes.count)")
     }
 
-    Harness.test("two senders kept mailing after the request") {
+    @Test("two senders kept mailing after the request") func twoSendersKeptMailingAfterTheRequest() {
         let reappeared = planned.filter { newest($0.groupID) > $0.attemptedAt }
         expect(reappeared.count == 2, "expected 2 reappeared, got \(reappeared.count)")
     }
 
-    Harness.test("two senders honoured it, so the contrast lands") {
+    @Test("two senders honoured it, so the contrast lands") func twoSendersHonouredItSoTheContrastLands() {
         let honoured = planned.filter { newest($0.groupID) <= $0.attemptedAt }
         expect(honoured.count == 2, "expected 2 honoured, got \(honoured.count)")
     }
 
-    Harness.test("one reappearance is a confirmed unsubscribe") {
+    @Test("one reappearance is a confirmed unsubscribe") func oneReappearanceIsAConfirmedUnsubscribe() {
         // The unflattering case the app exists to catch: a sender that showed a
         // confirmation page and carried on regardless.
         let confirmedAndBack = planned.contains {
@@ -690,26 +1642,27 @@ Harness.suite("Demo unsubscribe history") {
         expect(confirmedAndBack, "a confirmed unsubscribe is among the reappeared")
     }
 
-    Harness.test("records carry the sender details a real one would") {
+    @Test("records carry the sender details a real one would") func recordsCarryTheSenderDetailsARealOneWould() {
         expect(planned.allSatisfy { !$0.senderName.isEmpty }, "every record names its sender")
         expect(planned.allSatisfy { $0.senderEmail.contains("@") }, "every record has an address")
         expect(planned.allSatisfy { !$0.senderDomain.isEmpty }, "every record has a domain")
     }
 
-    Harness.test("outcomes are values the store accepts") {
+    @Test("outcomes are values the store accepts") func outcomesAreValuesTheStoreAccepts() {
         // A typo here would be silently dropped by the app, leaving Reappeared
         // empty for the reason this whole feature exists to avoid.
         let valid = Set(["requested", "confirmed", "failed"])
         expect(planned.allSatisfy { valid.contains($0.outcome) }, "outcomes are known values")
     }
 
-    Harness.test("attempt dates are in the past") {
+    @Test("attempt dates are in the past") func attemptDatesAreInThePast() {
         expect(planned.allSatisfy { $0.attemptedAt < now }, "nothing attempted in the future")
     }
 }
 
-Harness.suite("Debug reset") {
-    Harness.test("resetAllLocalData clears databases, registry, and providers") {
+@Suite("Debug reset")
+struct DebugResetTests {
+    @Test("resetAllLocalData clears databases, registry, and providers") func resetalllocaldataClearsDatabasesRegistryAndProviders() {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("nevermore-reset-\(UUID().uuidString)")
         let registry = AccountRegistry(directory: dir)
@@ -743,7 +1696,7 @@ Harness.suite("Debug reset") {
         try? fm.removeItem(at: dir)
     }
 
-    Harness.test("reset leaves an unrelated directory's data alone") {
+    @Test("reset leaves an unrelated directory's data alone") func resetLeavesAnUnrelatedDirectorySDataAlone() {
         // The reset walks its own directory only — a second account registry
         // (or a real user's data, if this ever ran with the wrong path) is
         // untouched.
@@ -765,12 +1718,13 @@ Harness.suite("Debug reset") {
     }
 }
 
-Harness.suite("Unsubscribe header survives the database") {
+@Suite("Unsubscribe header survives the database")
+struct UnsubscribeHeaderSurvivesTheDatabaseTests {
     // A mailto: token in ?subject= is what makes many unsubscribes work; the
     // store used to keep only the address.
     let header = "<https://ex.com/u?id=1>, <mailto:unsub@ex.com?subject=stop-abc123>"
 
-    Harness.test("all targets and the mailto query round-trip") {
+    @Test("all targets and the mailto query round-trip") func allTargetsAndTheMailtoQueryRoundTrip() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([
@@ -792,7 +1746,7 @@ Harness.suite("Unsubscribe header survives the database") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("legacy rows holding a bare URI still decode") {
+    @Test("legacy rows holding a bare URI still decode") func legacyRowsHoldingABareURIStillDecode() {
         // Rows written by the previous format have no angle brackets.
         do {
             let store = try MessageStore.inMemory()
@@ -805,8 +1759,9 @@ Harness.suite("Unsubscribe header survives the database") {
     }
 }
 
-Harness.suite("Sender label determinism") {
-    Harness.test("two equally-common display names pick the same one every time") {
+@Suite("Sender label determinism")
+struct SenderLabelDeterminismTests {
+    @Test("two equally-common display names pick the same one every time") func twoEquallyCommonDisplayNamesPickTheSameOneEveryTime() {
         func label() -> String {
             SenderGroup(
                 id: GroupID(kind: .domain, key: "ex.com"),
@@ -826,15 +1781,16 @@ Harness.suite("Sender label determinism") {
     }
 }
 
-Harness.suite("Per-message webmail links") {
-    Harness.test("Gmail links via rfc822msgid, brackets stripped") {
+@Suite("Per-message webmail links")
+struct PerMessageWebmailLinksTests {
+    @Test("Gmail links via rfc822msgid, brackets stripped") func gmailLinksViaRfc822msgidBracketsStripped() {
         let url = MailProvider.gmail.webMessageURL(messageId: "<abc123@mail.example.com>")
         eq(
             url?.absoluteString,
             "https://mail.google.com/mail/u/0/#search/rfc822msgid:abc123%40mail.example.com")
     }
 
-    Harness.test("a known account routes via authuser, not /u/0/") {
+    @Test("a known account routes via authuser, not /u/0/") func aKnownAccountRoutesViaAuthuserNotU0() {
         // /u/0/ is "whichever Google account signed in first", which is the
         // wrong mailbox for anyone with several. Verified in a real browser:
         // /mail/u/<email>/ gives Gmail's "Temporary Error"; ?authuser= resolves.
@@ -851,7 +1807,7 @@ Harness.suite("Per-message webmail links") {
             "sender search also routes: \(search?.absoluteString ?? "nil")")
     }
 
-    Harness.test("a Gmail thread id becomes a direct conversation link") {
+    @Test("a Gmail thread id becomes a direct conversation link") func aGmailThreadIdBecomesADirectConversationLink() {
         // Gmail's web UI addresses threads by lowercase hex of the decimal
         // X-GM-THRID. 1785028440153 -> 19f9c0f2599.
         let url = MailProvider.gmail.webThreadURL(
@@ -861,7 +1817,7 @@ Harness.suite("Per-message webmail links") {
             "https://mail.google.com/mail/?authuser=someone@gmail.com#all/19f9bfc7059")
     }
 
-    Harness.test("thread links are Gmail-only and reject a zero id") {
+    @Test("thread links are Gmail-only and reject a zero id") func threadLinksAreGmailOnlyAndRejectAZeroId() {
         expect(
             MailProvider.gmail.webThreadURL(threadID: 0) == nil, "0 is not a thread")
         for other in MailProvider.known where other.id != "gmail" {
@@ -869,7 +1825,7 @@ Harness.suite("Per-message webmail links") {
         }
     }
 
-    Harness.test("no account falls back to /u/0/") {
+    @Test("no account falls back to /u/0/") func noAccountFallsBackToU0() {
         expect(
             MailProvider.gmail.webMessageURL(messageId: "<a@b.com>", account: nil)?
                 .absoluteString.contains("/mail/u/0/") == true,
@@ -880,7 +1836,7 @@ Harness.suite("Per-message webmail links") {
             "a malformed account can't produce a broken authuser URL")
     }
 
-    Harness.test("characters that would break the URL are encoded") {
+    @Test("characters that would break the URL are encoded") func charactersThatWouldBreakTheURLAreEncoded() {
         // Real Message-IDs contain +, /, ?, & and = — left raw they'd be read
         // as URL syntax and land on the wrong search.
         let url = MailProvider.gmail.webMessageURL(messageId: "<a+b/c?d&e=f@ex.com>")
@@ -894,7 +1850,7 @@ Harness.suite("Per-message webmail links") {
             .contains("@"), "@ encoded")
     }
 
-    Harness.test("no link without a message id, or for other providers") {
+    @Test("no link without a message id, or for other providers") func noLinkWithoutAMessageIdOrForOtherProviders() {
         expect(MailProvider.gmail.webMessageURL(messageId: "") == nil, "empty id")
         expect(MailProvider.gmail.webMessageURL(messageId: "<>") == nil, "brackets only")
         for other in MailProvider.known where other.id != "gmail" {
@@ -905,7 +1861,8 @@ Harness.suite("Per-message webmail links") {
     }
 }
 
-Harness.suite("Trash batching") {
+@Suite("Trash batching")
+struct TrashBatchingTests {
     /// Stands in for the IMAP server: records each MOVE's size and can be told
     /// to fail once a cumulative limit is passed, the way a real timeout does.
     final class FakeMover: @unchecked Sendable {
@@ -942,7 +1899,7 @@ Harness.suite("Trash batching") {
 
     let many = (1...1127).map { MessageUID(UInt32($0)) }
 
-    Harness.test("a 1,127-message trash is split into bounded batches") {
+    @Test("a 1,127-message trash is split into bounded batches") func a1127MessageTrashIsSplitIntoBoundedBatches() {
         // The bug: one MOVE with every UID timed out and moved nothing.
         let mover = FakeMover()
         let moved = try? runTrash(uids: many, chunk: 200, mover: mover)
@@ -952,7 +1909,7 @@ Harness.suite("Trash batching") {
         eq(mover.batches.reduce(0, +), 1127)
     }
 
-    Harness.test("a mid-run failure reports what actually moved") {
+    @Test("a mid-run failure reports what actually moved") func aMidRunFailureReportsWhatActuallyMoved() {
         let mover = FakeMover()
         mover.failAfterMoved = 500
         let moved = try? runTrash(uids: many, chunk: 200, mover: mover)
@@ -961,7 +1918,7 @@ Harness.suite("Trash batching") {
         expect((moved?.count ?? 0) < many.count, "partial, not all")
     }
 
-    Harness.test("failing on the very first batch throws instead of claiming success") {
+    @Test("failing on the very first batch throws instead of claiming success") func failingOnTheVeryFirstBatchThrowsInsteadOfClaimingSuccess() {
         let mover = FakeMover()
         mover.failAfterMoved = 0
         var threw = false
@@ -970,32 +1927,35 @@ Harness.suite("Trash batching") {
     }
 }
 
-Harness.suite("Selection cursor") {
+@Suite("Selection cursor")
+struct SelectionCursorTests {
     func ids(_ names: [String]) -> [GroupID] { names.map { GroupID(kind: .domain, key: $0) } }
     func set(_ names: [String]) -> Set<GroupID> { Set(ids(names)) }
-    let list = ids(["a", "b", "c", "d", "e"])
+    // Spelled out rather than `ids([…])`: a property initialiser cannot call an
+    // instance method. Same value.
+    let list = ["a", "b", "c", "d", "e"].map { GroupID(kind: .domain, key: $0) }
 
-    Harness.test("single selection lands on the row below") {
+    @Test("single selection lands on the row below") func singleSelectionLandsOnTheRowBelow() {
         eq(SelectionCursor.rowAfterRemoving(set(["b"]), from: list)?.key, "c")
     }
 
-    Harness.test("a contiguous block lands below the whole block") {
+    @Test("a contiguous block lands below the whole block") func aContiguousBlockLandsBelowTheWholeBlock() {
         // The bug: `selection.first` on a Set could pick "b", land on "c",
         // and select a row that was itself about to disappear.
         eq(SelectionCursor.rowAfterRemoving(set(["b", "c", "d"]), from: list)?.key, "e")
     }
 
-    Harness.test("a scattered selection skips every selected row") {
+    @Test("a scattered selection skips every selected row") func aScatteredSelectionSkipsEverySelectedRow() {
         eq(SelectionCursor.rowAfterRemoving(set(["a", "c", "e"]), from: list)?.key, "d")
         eq(SelectionCursor.rowAfterRemoving(set(["b", "d", "e"]), from: list)?.key, "c")
     }
 
-    Harness.test("selecting through the end falls back above the selection") {
+    @Test("selecting through the end falls back above the selection") func selectingThroughTheEndFallsBackAboveTheSelection() {
         eq(SelectionCursor.rowAfterRemoving(set(["d", "e"]), from: list)?.key, "c")
         eq(SelectionCursor.rowAfterRemoving(set(["e"]), from: list)?.key, "d")
     }
 
-    Harness.test("selecting everything leaves nowhere to go") {
+    @Test("selecting everything leaves nowhere to go") func selectingEverythingLeavesNowhereToGo() {
         expect(
             SelectionCursor.rowAfterRemoving(set(["a", "b", "c", "d", "e"]), from: list) == nil,
             "nil, not a ghost row")
@@ -1003,7 +1963,7 @@ Harness.suite("Selection cursor") {
         expect(SelectionCursor.rowAfterRemoving(set(["a"]), from: []) == nil, "empty list")
     }
 
-    Harness.test("the answer doesn't depend on Set iteration order") {
+    @Test("the answer doesn't depend on Set iteration order") func theAnswerDoesnTDependOnSetIterationOrder() {
         // The original defect was invisible precisely because it only showed up
         // for some hash orderings. Rebuild the set repeatedly and demand one
         // answer — Set ordering varies per process and per insertion sequence.
@@ -1017,26 +1977,27 @@ Harness.suite("Selection cursor") {
         eq(answers, ["e"])
     }
 
-    Harness.test("j and k anchor on the edge you're travelling from") {
+    @Test("j and k anchor on the edge you're travelling from") func jAndKAnchorOnTheEdgeYouReTravellingFrom() {
         // Down from the bottom of the block, up from the top — not from an
         // arbitrary row inside it.
         eq(SelectionCursor.move(from: set(["b", "c"]), by: 1, in: list)?.key, "d")
         eq(SelectionCursor.move(from: set(["b", "c"]), by: -1, in: list)?.key, "a")
     }
 
-    Harness.test("moving past either end stays put") {
+    @Test("moving past either end stays put") func movingPastEitherEndStaysPut() {
         eq(SelectionCursor.move(from: set(["e"]), by: 1, in: list)?.key, "e")
         eq(SelectionCursor.move(from: set(["a"]), by: -1, in: list)?.key, "a")
     }
 
-    Harness.test("no selection enters the list from the travelling end") {
+    @Test("no selection enters the list from the travelling end") func noSelectionEntersTheListFromTheTravellingEnd() {
         eq(SelectionCursor.move(from: [], by: 1, in: list)?.key, "a")
         eq(SelectionCursor.move(from: [], by: -1, in: list)?.key, "e")
     }
 }
 
-Harness.suite("Pre-migration backup") {
-    Harness.test("a fresh database is not backed up") {
+@Suite("Pre-migration backup")
+struct PreMigrationBackupTests {
+    @Test("a fresh database is not backed up") func aFreshDatabaseIsNotBackedUp() {
         do {
             let path = FileManager.default.temporaryDirectory
                 .appendingPathComponent("nm-fresh-\(UUID().uuidString).sqlite").path
@@ -1048,7 +2009,7 @@ Harness.suite("Pre-migration backup") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("reopening an already-migrated database makes no new backup") {
+    @Test("reopening an already-migrated database makes no new backup") func reopeningAnAlreadyMigratedDatabaseMakesNoNewBackup() {
         // Every launch runs the migrator; only a *pending* migration should
         // trigger a copy, or the app would duplicate the cache on every start.
         do {
@@ -1065,8 +2026,9 @@ Harness.suite("Pre-migration backup") {
     }
 }
 
-Harness.suite("Forwarded-address mailto handling") {
-    Harness.test("a tokenised mailto identifies the recipient") {
+@Suite("Forwarded-address mailto handling")
+struct ForwardedAddressMailtoHandlingTests {
+    @Test("a tokenised mailto identifies the recipient") func aTokenisedMailtoIdentifiesTheRecipient() {
         // ?subject= carries the sender's own token, so which address you send
         // from doesn't matter.
         let u = ListUnsubscribe(header: "<mailto:unsub@ex.com?subject=unsub-a1b2c3>")
@@ -1074,19 +2036,19 @@ Harness.suite("Forwarded-address mailto handling") {
         eq(u?.mailtoTargets.first?.subject, "unsub-a1b2c3")
     }
 
-    Harness.test("a bare mailto identifies you only by the From address") {
+    @Test("a bare mailto identifies you only by the From address") func aBareMailtoIdentifiesYouOnlyByTheFromAddress() {
         let u = ListUnsubscribe(header: "<mailto:unsub@ex.com>")
         eq(u?.mailtoTargets.first?.identifiesRecipient, false)
         // Falls back to a generic subject, which tells the sender nothing.
         eq(u?.mailtoTargets.first?.subject, "unsubscribe")
     }
 
-    Harness.test("a body token counts too") {
+    @Test("a body token counts too") func aBodyTokenCountsToo() {
         let u = ListUnsubscribe(header: "<mailto:u@ex.com?body=remove%20id%3A99>")
         eq(u?.mailtoTargets.first?.identifiesRecipient, true)
     }
 
-    Harness.test("needsManual carries a reason the UI can show") {
+    @Test("needsManual carries a reason the UI can show") func needsmanualCarriesAReasonTheUICanShow() {
         // Both cases land in the same bucket but mean different things to a
         // user: one has no link at all, the other can't be sent as you.
         let noLink = UnsubscribeEngine.Outcome.needsManual(reason: "no unsubscribe link")
@@ -1097,8 +2059,9 @@ Harness.suite("Forwarded-address mailto handling") {
     }
 }
 
-Harness.suite("Mailing list detection") {
-    Harness.test("List-ID with a description keeps only the identifier") {
+@Suite("Mailing list detection")
+struct MailingListDetectionTests {
+    @Test("List-ID with a description keeps only the identifier") func listIDWithADescriptionKeepsOnlyTheIdentifier() {
         eq(
             MailingList.id(fromHeader: "Ruby Talk <ruby-talk.ruby-lang.org>"),
             "ruby-talk.ruby-lang.org")
@@ -1107,11 +2070,11 @@ Harness.suite("Mailing list detection") {
             "ptamemberconnection.wastatepta.org")
     }
 
-    Harness.test("case and whitespace are normalised") {
+    @Test("case and whitespace are normalised") func caseAndWhitespaceAreNormalised() {
         eq(MailingList.id(fromHeader: "  <Ruby-Talk.Example.ORG>  "), "ruby-talk.example.org")
     }
 
-    Harness.test("a bare identifier is accepted, a bare description is not") {
+    @Test("a bare identifier is accepted, a bare description is not") func aBareIdentifierIsAcceptedABareDescriptionIsNot() {
         eq(MailingList.id(fromHeader: "list.example.com"), "list.example.com")
         // A phrase with no brackets is a description missing its id.
         expect(MailingList.id(fromHeader: "Some Newsletter") == nil, "description alone")
@@ -1120,7 +2083,7 @@ Harness.suite("Mailing list detection") {
         expect(MailingList.id(fromHeader: "<>") == nil, "empty brackets")
     }
 
-    Harness.test("a group reports its list id from any message that carries one") {
+    @Test("a group reports its list id from any message that carries one") func aGroupReportsItsListIdFromAnyMessageThatCarriesOne() {
         // Senders don't always repeat List-ID on every message.
         let group = SenderGroup(
             id: GroupID(kind: .domain, key: "ex.org"),
@@ -1132,7 +2095,7 @@ Harness.suite("Mailing list detection") {
         expect(group.isMailingList, "flagged as a list")
     }
 
-    Harness.test("ordinary marketing is not a mailing list") {
+    @Test("ordinary marketing is not a mailing list") func ordinaryMarketingIsNotAMailingList() {
         let group = SenderGroup(
             id: GroupID(kind: .domain, key: "shop.com"),
             messages: [makeMessage(1, from: "Shop <a@shop.com>")])
@@ -1140,20 +2103,9 @@ Harness.suite("Mailing list detection") {
     }
 }
 
-// MARK: - Agent decisions about senders
-
-/// The decision records for whichever group in `groups` has this id, as a set of
-/// "address/classification" strings — enough to prove nothing was lost, without
-/// depending on ordering.
-func decisionSummary(
-    _ store: MessageStore, _ groups: [SenderGroup], _ id: GroupID
-) throws -> Set<String> {
-    guard let group = groups.first(where: { $0.id == id }) else { return [] }
-    return Set(try store.decisions(for: group).map { "\($0.address)/\($0.classification)" })
-}
-
-Harness.suite("Sender decisions") {
-    Harness.test("stores classification, reason and context verbatim") {
+@Suite("Sender decisions")
+struct SenderDecisionsTests {
+    @Test("stores classification, reason and context verbatim") func storesClassificationReasonAndContextVerbatim() {
         do {
             let store = try MessageStore.inMemory()
             let when = Date(timeIntervalSince1970: 1_700_000_000)
@@ -1172,7 +2124,7 @@ Harness.suite("Sender decisions") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("a later decision supersedes the earlier one for that sender") {
+    @Test("a later decision supersedes the earlier one for that sender") func aLaterDecisionSupersedesTheEarlierOneForThatSender() {
         do {
             let store = try MessageStore.inMemory()
             try store.recordDecision(
@@ -1187,7 +2139,7 @@ Harness.suite("Sender decisions") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("addresses match case-insensitively, unlike the agent's text") {
+    @Test("addresses match case-insensitively, unlike the agent's text") func addressesMatchCaseInsensitivelyUnlikeTheAgentSText() {
         do {
             let store = try MessageStore.inMemory()
             try store.recordDecision(
@@ -1199,7 +2151,7 @@ Harness.suite("Sender decisions") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("query by context is an exact match, not a search") {
+    @Test("query by context is an exact match, not a search") func queryByContextIsAnExactMatchNotASearch() {
         do {
             let store = try MessageStore.inMemory()
             try store.recordDecision(
@@ -1227,7 +2179,7 @@ Harness.suite("Sender decisions") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("a decision survives sync deleting and re-adding the messages") {
+    @Test("a decision survives sync deleting and re-adding the messages") func aDecisionSurvivesSyncDeletingAndReAddingTheMessages() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([makeMessage(1, from: "Acme <news@acme.com>")])
@@ -1242,7 +2194,7 @@ Harness.suite("Sender decisions") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("decisions persist across reopening the same database") {
+    @Test("decisions persist across reopening the same database") func decisionsPersistAcrossReopeningTheSameDatabase() {
         do {
             let path = FileManager.default.temporaryDirectory
                 .appendingPathComponent("nm-decisions-\(UUID().uuidString).sqlite").path
@@ -1263,7 +2215,7 @@ Harness.suite("Sender decisions") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("forgetting removes one decision, or all of them") {
+    @Test("forgetting removes one decision, or all of them") func forgettingRemovesOneDecisionOrAllOfThem() {
         do {
             let store = try MessageStore.inMemory()
             try store.recordDecision(
@@ -1279,13 +2231,8 @@ Harness.suite("Sender decisions") {
     }
 }
 
-// MARK: - Decisions survive regrouping
-
-// The reason records key on address rather than GroupID: splitByAddress and
-// keepAsOneGroup move a sender between a `domain:` group and an `address:` one,
-// so a GroupID key would silently discard the agent's judgement every time the
-// user regrouped a domain.
-Harness.suite("Decisions survive regrouping") {
+@Suite("Decisions survive regrouping")
+struct DecisionsSurviveRegroupingTests {
     // Two senders on one registrable domain, with distinct display names so the
     // automatic grouping has an opinion that the user's rule then overrides.
     let messages = [
@@ -1309,7 +2256,7 @@ Harness.suite("Decisions survive regrouping") {
         return store
     }
 
-    Harness.test("merged, then split by address") {
+    @Test("merged, then split by address") func mergedThenSplitByAddress() {
         do {
             let store = try seeded()
             // As the user sees it merged: the group rolls up both decisions.
@@ -1326,7 +2273,7 @@ Harness.suite("Decisions survive regrouping") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("split, then kept as one group") {
+    @Test("split, then kept as one group") func splitThenKeptAsOneGroup() {
         do {
             let store = try seeded()
             let splitGroups = Grouping(rules: ["acme.com": .split]).group(messages)
@@ -1341,7 +2288,7 @@ Harness.suite("Decisions survive regrouping") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("regrouping back and forth loses nothing, including the context") {
+    @Test("regrouping back and forth loses nothing, including the context") func regroupingBackAndForthLosesNothingIncludingTheContext() {
         do {
             let store = try seeded()
             for rule in [Grouping.Rule.merge, .split, .merge, .split, .merge] {
@@ -1354,7 +2301,7 @@ Harness.suite("Decisions survive regrouping") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("a group with no decided senders reports none") {
+    @Test("a group with no decided senders reports none") func aGroupWithNoDecidedSendersReportsNone() {
         do {
             let store = try seeded()
             let group = SenderGroup(
@@ -1365,538 +2312,8 @@ Harness.suite("Decisions survive regrouping") {
     }
 }
 
-// MARK: - Loopback HTTP server
-
-// The harness runs each test synchronously, and everything below is actor-isolated
-// or built on NWListener. Run the async body on the cooperative pool and block until
-// it finishes — nothing here needs the main thread, so there is no deadlock to hit.
-private final class ResultBox<T>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stored: T?
-    var value: T? {
-        get { lock.withLock { stored } }
-        set { lock.withLock { stored = newValue } }
-    }
-}
-
-func runAsync<T: Sendable>(_ body: @escaping @Sendable () async -> T) -> T {
-    let box = ResultBox<T>()
-    let done = DispatchSemaphore(value: 0)
-    Task {
-        box.value = await body()
-        done.signal()
-    }
-    done.wait()
-    return box.value!
-}
-
-/// A real listener occupying a contract port, so the server has to deal with it the way it would in
-/// the field. Uses the server's own parameters, so "taken" means taken the same way.
-final class HeldPort {
-    private let listener: NWListener
-    fileprivate init(_ listener: NWListener) { self.listener = listener }
-
-    /// Wait for `.cancelled` before returning. `NWListener.cancel()` returns before the OS has
-    /// released the port, so a test that merely cancels leaves the next one binding a port that is
-    /// still occupied — which shows up as an unrelated test failing intermittently.
-    func release() {
-        let done = DispatchSemaphore(value: 0)
-        listener.stateUpdateHandler = { state in
-            if case .cancelled = state { done.signal() }
-        }
-        listener.cancel()
-        _ = done.wait(timeout: .now() + 3)
-    }
-}
-
-func holdPort(_ port: UInt16) -> HeldPort? {
-    guard let nwPort = NWEndpoint.Port(rawValue: port),
-          let listener = try? NWListener(using: NevermoreServer.listenerParameters(), on: nwPort)
-    else { return nil }
-    let ready = DispatchSemaphore(value: 0)
-    listener.stateUpdateHandler = { state in
-        if case .ready = state { ready.signal() }
-    }
-    listener.newConnectionHandler = { $0.cancel() }
-    listener.start(queue: .global())
-    guard ready.wait(timeout: .now() + 3) == .success else {
-        listener.cancel()
-        return nil
-    }
-    return HeldPort(listener)
-}
-
-Harness.suite("Server port contract") {
-    Harness.test("is 8775-8779, and does not collide with jobhunt's range") {
-        eq(ServerPortContract.firstPort, 8775)
-        eq(ServerPortContract.lastPort, 8779)
-        eq(ServerPortContract.discoveryPorts, [8775, 8776, 8777, 8778, 8779])
-        // jobhunt owns 8765-8769 and 8770-8774 is its growth gap. Two apps, one Mac.
-        expect(!ServerPortContract.discoveryPorts.contains(where: { $0 < 8775 }), "no overlap below")
-    }
-
-    Harness.test("the listener is restricted to loopback") {
-        // This restriction IS the security boundary — a non-loopback peer is refused by the OS and
-        // never reaches route handling. Asserted here so it can't be dropped without a red test.
-        eq(NevermoreServer.listenerParameters().requiredInterfaceType, .loopback)
-    }
-}
-
-Harness.suite("Server port binding") {
-    Harness.test("falls back to the next contract port when the first is taken") {
-        guard let held = holdPort(ServerPortContract.firstPort) else {
-            expect(false, "could not occupy \(ServerPortContract.firstPort) to set up the test")
-            return
-        }
-        defer { held.release() }
-
-        let bound: UInt16 = runAsync {
-            let server = NevermoreServer()
-            try? await server.start()
-            let p = await server.port
-            await server.stop()
-            return p
-        }
-        eq(bound, ServerPortContract.firstPort + 1, "skipped the occupied port")
-    }
-
-    Harness.test("fails closed when every contract port is taken") {
-        var held: [HeldPort] = []
-        for p in ServerPortContract.discoveryPorts {
-            guard let l = holdPort(p) else { break }
-            held.append(l)
-        }
-        guard held.count == ServerPortContract.discoveryPorts.count else {
-            held.forEach { $0.release() }
-            expect(false, "could not occupy all \(ServerPortContract.discoveryPorts.count) ports")
-            return
-        }
-        defer { held.forEach { $0.release() } }
-
-        struct Outcome: Sendable {
-            let error: ServerError?
-            let port: UInt16
-            let listening: Bool
-        }
-        let outcome: Outcome = runAsync {
-            let server = NevermoreServer()
-            var caught: ServerError?
-            do { try await server.start() } catch let e as ServerError { caught = e } catch {}
-            let boundPort = await server.port
-            let listening = await server.isListening
-            await server.stop()
-            return Outcome(error: caught, port: boundPort, listening: listening)
-        }
-        // No ephemeral fallback: a port the bridge can't guess is worse than no server at all,
-        // because "running" and "unreachable" look identical from the client side.
-        eq(outcome.error, ServerError.noPortAvailable)
-        eq(outcome.port, 0, "did not bind anything")
-        expect(!outcome.listening, "no listener left behind")
-        expect(outcome.error?.localizedDescription.contains("8775") == true, "failure names the range")
-    }
-}
-
-Harness.suite("Server over a real socket") {
-    Harness.test("a loopback client gets the health route off the wire") {
-        // The routing tests call routeRequest directly; this is the only one that proves the
-        // listener accepts, the parser frames, and the response serialises as real HTTP.
-        struct Result: Sendable {
-            let status: Int
-            let body: String
-            let port: UInt16
-        }
-        let result: Result? = runAsync {
-            let server = NevermoreServer(appVersion: "9.9.9")
-            // An ephemeral port: this test is about the wire, not about port discovery, and the
-            // contract ports may legitimately be busy on a developer's Mac.
-            try? await server.startOnAnyPort()
-            let port = await server.port
-            defer { Task { await server.stop() } }
-            guard port != 0,
-                  let url = URL(string: "http://127.0.0.1:\(port)/health") else { return nil }
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 5
-            guard let (data, response) = try? await URLSession.shared.data(for: request),
-                  let http = response as? HTTPURLResponse else { return nil }
-            return Result(
-                status: http.statusCode,
-                body: String(data: data, encoding: .utf8) ?? "",
-                port: port)
-        }
-        guard let result else {
-            expect(false, "no response from the loopback server")
-            return
-        }
-        eq(result.status, 200)
-        eq(result.body, "{\"ok\":true}")
-    }
-}
-
-Harness.suite("Server routing") {
-    func get(_ path: String, headers: [String: String] = [:]) -> HTTPRequest {
-        HTTPRequest(method: "GET", path: path, headers: headers)
-    }
-    func route(_ request: HTTPRequest, token: String = "") -> HTTPResponse {
-        runAsync {
-            await NevermoreServer(appVersion: "9.9.9", mcpToken: token).routeRequest(request)
-        }
-    }
-    func bodyText(_ response: HTTPResponse) -> String {
-        String(data: response.body, encoding: .utf8) ?? ""
-    }
-
-    Harness.test("health and ping answer, so a client can find the port") {
-        eq(route(get("/health")).statusCode, 200)
-        expect(bodyText(route(get("/health"))).contains("\"ok\":true"), "reports ok")
-
-        let ping = route(get("/api/ping"))
-        eq(ping.statusCode, 200)
-        expect(bodyText(ping).contains("\"app\":\"nevermore\""), "identifies the app")
-        expect(bodyText(ping).contains("9.9.9"), "reports its version")
-    }
-
-    Harness.test("an unknown path is 404") {
-        eq(route(get("/nope")).statusCode, 404)
-    }
-
-    Harness.test("Transfer-Encoding is refused rather than parsed as an empty body") {
-        eq(route(get("/health", headers: ["transfer-encoding": "chunked"])).statusCode, 400)
-    }
-
-    Harness.test("MCP routes are 503 until a token is configured") {
-        // Fail closed: no token must never mean "no token required".
-        let r = route(HTTPRequest(method: "POST", path: "/mcp/senders/list"), token: "")
-        eq(r.statusCode, 503)
-    }
-
-    Harness.test("MCP routes reject a missing or wrong token with 401") {
-        let secret = "s3cret-token"
-        let mcp = { (headers: [String: String]) in
-            route(HTTPRequest(method: "POST", path: "/mcp/senders/list", headers: headers), token: secret)
-        }
-        eq(mcp([:]).statusCode, 401, "no Authorization header")
-        eq(mcp(["authorization": "Bearer wrong"]).statusCode, 401, "wrong token")
-        eq(mcp(["authorization": "Bearer "]).statusCode, 401, "empty token")
-        eq(mcp(["authorization": secret]).statusCode, 401, "token without the Bearer scheme")
-        eq(mcp(["authorization": "Basic \(secret)"]).statusCode, 401, "wrong scheme")
-        // Near-misses must not pass: the compare is constant-time, not a prefix match.
-        eq(mcp(["authorization": "Bearer s3cret"]).statusCode, 401, "prefix of the token")
-        eq(mcp(["authorization": "Bearer s3cret-tokenX"]).statusCode, 401, "token plus a suffix")
-    }
-
-    Harness.test("the right token gets past auth, and the scheme is case-insensitive") {
-        let secret = "s3cret-token"
-        let authed = route(
-            HTTPRequest(method: "POST", path: "/mcp/not-a-tool",
-                        headers: ["authorization": "bearer \(secret)"]),
-            token: secret)
-        // Auth passed, so the 404 is about the route rather than the credential. A real tool route
-        // is used for that distinction in the TASK-44 suites, where a mailbox exists to serve it.
-        eq(authed.statusCode, 404)
-        expect(bodyText(authed).contains("MCP route not found"), "404 is about the route")
-    }
-
-    Harness.test("a non-POST MCP request is 405, but only after it authenticates") {
-        let secret = "s3cret-token"
-        eq(route(get("/mcp/senders/list", headers: ["authorization": "Bearer \(secret)"]),
-                 token: secret).statusCode, 405)
-        // Unauthenticated, the method never gets a say — 401 comes first.
-        eq(route(get("/mcp/senders/list"), token: secret).statusCode, 401)
-    }
-
-    Harness.test("MCP bodies get a larger budget than the discovery routes") {
-        eq(NevermoreServer.maxBodySize(forPath: "/mcp/senders/list"), 1_048_576)
-        eq(NevermoreServer.maxBodySize(forPath: "/health"), 64 * 1024)
-    }
-}
-
-Harness.suite("HTTP framing") {
-    func framing(_ raw: String, cap: Int = NevermoreServer.maxHeaderBytes) -> RequestFraming {
-        inspectRequestFraming(Data(raw.utf8), maxHeaderBytes: cap)
-    }
-
-    Harness.test("a complete GET frames with no body") {
-        eq(framing("GET /health HTTP/1.1\r\nHost: x\r\n\r\n"),
-           .valid(method: "GET", path: "/health", contentLength: 0))
-    }
-
-    Harness.test("headers without a terminator are incomplete, not invalid") {
-        eq(framing("GET /health HTTP/1.1\r\nHost: x"), .incomplete)
-    }
-
-    Harness.test("headers past the cap are rejected rather than accumulated") {
-        let long = "GET /health HTTP/1.1\r\nX: " + String(repeating: "a", count: 200) + "\r\n\r\n"
-        eq(framing(long, cap: 64), .invalid(reason: "Request header fields too large", statusCode: 431))
-    }
-
-    Harness.test("conflicting or malformed Content-Length is refused") {
-        eq(framing("POST /x HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabc"),
-           .invalid(reason: "Conflicting Content-Length headers", statusCode: 400))
-        eq(framing("POST /x HTTP/1.1\r\nContent-Length: -1\r\n\r\n"),
-           .invalid(reason: "Malformed Content-Length", statusCode: 400))
-        eq(framing("POST /x HTTP/1.1\r\nContent-Length: abc\r\n\r\n"),
-           .invalid(reason: "Malformed Content-Length", statusCode: 400))
-    }
-
-    Harness.test("a POST with no Content-Length is unframable, not empty") {
-        eq(framing("POST /x HTTP/1.1\r\nHost: x\r\n\r\n"),
-           .invalid(reason: "Missing Content-Length on POST", statusCode: 400))
-    }
-
-    Harness.test("the parser lowercases header names and splits the query") {
-        let raw = "GET /api/ping?a=1&b=two HTTP/1.1\r\nAuthorization: Bearer t\r\n\r\n"
-        let request = parseHTTPRequest(Data(raw.utf8))
-        eq(request?.path, "/api/ping")
-        eq(request?.queryValue(for: "b"), "two")
-        eq(request?.headers["authorization"], "Bearer t")
-        eq(NevermoreServer.bearerToken(from: request!), "t")
-    }
-
-    Harness.test("a UTF-8 body is sliced by bytes, not characters") {
-        // "Café" is 5 bytes and 4 characters — slicing by character count truncates the JSON.
-        let json = "{\"n\":\"Café\"}"
-        let bytes = Data(json.utf8)
-        let raw = Data("POST /mcp/x HTTP/1.1\r\nContent-Length: \(bytes.count)\r\n\r\n".utf8) + bytes
-        eq(parseHTTPRequest(raw)?.body, bytes)
-    }
-
-    Harness.test("a body that hasn't fully arrived parses as nil so the server reads more") {
-        let raw = "POST /mcp/x HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc"
-        expect(parseHTTPRequest(Data(raw.utf8)) == nil, "incomplete body")
-    }
-
-    Harness.test("every status the server emits has a real reason phrase") {
-        for code in [200, 204, 400, 401, 403, 404, 405, 413, 431, 500, 503] {
-            expect(HTTPResponse.statusText(for: code) != "Unknown", "reason phrase for \(code)")
-        }
-    }
-}
-
-Harness.suite("MCP token file") {
-    /// A scratch directory so the lifecycle is exercised without touching the real
-    /// ~/.nevermore-mcp-token, which a running app may own.
-    func withScratchToken(_ body: (URL) -> Void) {
-        let dir = URL.temporaryDirectory.appending(path: "nevermore-token-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        body(dir.appending(path: ".nevermore-mcp-token"))
-    }
-
-    Harness.test("the real token path is ~/.nevermore-mcp-token") {
-        eq(MCPTokenManager.tokenURL.lastPathComponent, ".nevermore-mcp-token")
-        eq(MCPTokenManager.tokenURL.deletingLastPathComponent().path,
-           URL.homeDirectory.path)
-    }
-
-    Harness.test("a written token is 0600 and reads back") {
-        withScratchToken { url in
-            guard let written = try? MCPTokenManager.generateAndWrite(at: url) else {
-                expect(false, "write failed")
-                return
-            }
-            let perms = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int
-            eq(perms, 0o600)
-            eq(MCPTokenManager.read(at: url), written)
-            expect(UUID(uuidString: written) != nil, "a fresh UUID, not a fixed secret")
-        }
-    }
-
-    Harness.test("each launch gets a different token") {
-        withScratchToken { url in
-            let first = try? MCPTokenManager.generateAndWrite(at: url)
-            let second = try? MCPTokenManager.generateAndWrite(at: url)
-            expect(first != second, "transient credential, not a stored one")
-        }
-    }
-
-    Harness.test("a token with broader permissions is refused on read") {
-        // Group- or world-readable means another account could already have taken a copy, so the
-        // secret is spent — refuse it rather than authenticate against it.
-        for mode in [0o644, 0o640, 0o604, 0o666] {
-            withScratchToken { url in
-                _ = try? MCPTokenManager.generateAndWrite(at: url)
-                try? FileManager.default.setAttributes(
-                    [.posixPermissions: mode], ofItemAtPath: url.path)
-                expect(MCPTokenManager.read(at: url) == nil, "refused mode \(String(mode, radix: 8))")
-            }
-        }
-        // 0400 is narrower than 0600, so it is still acceptable.
-        withScratchToken { url in
-            _ = try? MCPTokenManager.generateAndWrite(at: url)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: url.path)
-            expect(MCPTokenManager.read(at: url) != nil, "0400 is not broader than 0600")
-        }
-    }
-
-    Harness.test("a missing token reads as nil, and delete is what makes it missing") {
-        withScratchToken { url in
-            expect(MCPTokenManager.read(at: url) == nil, "nothing written yet")
-            _ = try? MCPTokenManager.generateAndWrite(at: url)
-            expect(MCPTokenManager.read(at: url) != nil, "present after write")
-            MCPTokenManager.delete(at: url)
-            expect(!FileManager.default.fileExists(atPath: url.path), "removed on shutdown")
-            expect(MCPTokenManager.read(at: url) == nil, "gone")
-        }
-    }
-
-    Harness.test("a client whose token file went over-permissive is refused, not admitted") {
-        // The two halves of the policy composed: the bridge reads the file to get its credential,
-        // a widened file reads as nil, so it has nothing to present — and the server answers 401
-        // rather than treating an absent credential as "no credential required".
-        withScratchToken { url in
-            let secret = (try? MCPTokenManager.generateAndWrite(at: url)) ?? ""
-            expect(!secret.isEmpty, "a token was written")
-            try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
-
-            let presented = MCPTokenManager.read(at: url) ?? ""
-            expect(presented.isEmpty, "an over-permissive file yields no credential")
-
-            let response = runAsync {
-                await NevermoreServer(mcpToken: secret).routeRequest(
-                    HTTPRequest(method: "POST", path: "/mcp/senders/list",
-                                headers: ["authorization": "Bearer \(presented)"]))
-            }
-            eq(response.statusCode, 401)
-        }
-    }
-
-    Harness.test("a token that fails to be written leaves nothing behind") {
-        // A directory that doesn't exist makes the write fail; the point is that no partial or
-        // over-permissive file survives the failure.
-        let url = URL.temporaryDirectory
-            .appending(path: "nevermore-missing-\(UUID().uuidString)")
-            .appending(path: ".nevermore-mcp-token")
-        var threw = false
-        do { _ = try MCPTokenManager.generateAndWrite(at: url) } catch { threw = true }
-        expect(threw, "the write failure is reported, not swallowed")
-        expect(!FileManager.default.fileExists(atPath: url.path), "no leftover file")
-    }
-}
-
-// MARK: - Local server lifecycle (TASK-48)
-
-Harness.suite("Local server lifecycle") {
-    /// A scratch token path, so starting and stopping a server here never disturbs the real
-    /// ~/.nevermore-mcp-token that a running Nevermore may own.
-    func withScratchTokenPath(_ body: (URL) -> Void) {
-        let dir = URL.temporaryDirectory.appending(path: "nevermore-lifecycle-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        body(dir.appending(path: ".nevermore-mcp-token"))
-    }
-
-    /// The status code for a POST to an /mcp/ route with whatever credential the token file holds.
-    /// 401 means the file and the running server disagree; 503 means they match and the request
-    /// got all the way to "no mailbox is open", which is as far as a controller started without an
-    /// account can go.
-    @Sendable func mcpStatus(port: UInt16, token: String?) async -> Int? {
-        guard let url = URL(string: "http://127.0.0.1:\(port)/mcp/senders/list") else { return nil }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 5
-        if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization") }
-        guard let (_, response) = try? await URLSession.shared.data(for: request) else { return nil }
-        return (response as? HTTPURLResponse)?.statusCode
-    }
-
-    Harness.test("starting binds a contract port and writes the token the server will accept") {
-        withScratchTokenPath { tokenURL in
-            let controller = LocalServerController(tokenURL: tokenURL, appVersion: "9.9.9")
-            let status = runAsync { await controller.start(isDemo: false) }
-            defer { runAsync { await controller.stop() } }
-
-            guard case let .running(port) = status else {
-                expect(false, "expected a running server, got \(status)")
-                return
-            }
-            expect(ServerPortContract.discoveryPorts.contains(port), "bound a discoverable port")
-
-            // The token file is the only channel to the bridge, so "started" has to mean the file
-            // on disk authenticates against the server that is actually listening.
-            let token = MCPTokenManager.read(at: tokenURL)
-            expect(token != nil, "a 0600 token exists while the server runs")
-            eq(runAsync { await mcpStatus(port: port, token: token) }, 503,
-               "the written token is accepted (503 is the absent mailbox, not the credential)")
-            eq(runAsync { await mcpStatus(port: port, token: nil) }, 401,
-               "and the gate is still closed without it")
-        }
-    }
-
-    Harness.test("stopping releases the port and removes the token file") {
-        withScratchTokenPath { tokenURL in
-            let controller = LocalServerController(tokenURL: tokenURL)
-            let started = runAsync { await controller.start(isDemo: false) }
-            guard case let .running(port) = started else {
-                expect(false, "expected a running server, got \(started)")
-                return
-            }
-            eq(runAsync { await controller.stop() }, LocalServerStatus.off)
-            expect(!FileManager.default.fileExists(atPath: tokenURL.path),
-                   "the credential does not outlive the server")
-            // Re-binding the port is the only honest proof the OS actually got it back.
-            guard let held = holdPort(port) else {
-                expect(false, "port \(port) was not released")
-                return
-            }
-            held.release()
-        }
-    }
-
-    Harness.test("stopping a server that never started is not an error") {
-        withScratchTokenPath { tokenURL in
-            let controller = LocalServerController(tokenURL: tokenURL)
-            eq(runAsync { await controller.stop() }, LocalServerStatus.off)
-        }
-    }
-
-    Harness.test("a bind failure is reported with the port range, and Retry works once it frees up") {
-        withScratchTokenPath { tokenURL in
-            var held: [HeldPort] = []
-            for p in ServerPortContract.discoveryPorts {
-                guard let l = holdPort(p) else { break }
-                held.append(l)
-            }
-            guard held.count == ServerPortContract.discoveryPorts.count else {
-                held.forEach { $0.release() }
-                expect(false, "could not occupy all \(ServerPortContract.discoveryPorts.count) ports")
-                return
-            }
-
-            let controller = LocalServerController(tokenURL: tokenURL)
-            let failed = runAsync { await controller.start(isDemo: false) }
-            guard case let .failed(message) = failed else {
-                held.forEach { $0.release() }
-                runAsync { await controller.stop() }
-                expect(false, "expected a reported failure, got \(failed)")
-                return
-            }
-            // The message is what Settings shows; naming the range is what makes it actionable.
-            expect(message.contains("8775"), "the failure names the port range: \(message)")
-            expect(message.contains("8779"), "the failure names the port range: \(message)")
-            expect(!FileManager.default.fileExists(atPath: tokenURL.path),
-                   "a failed start leaves no token behind")
-
-            // Whatever held the ports quits — which is exactly the case Retry exists for.
-            held.forEach { $0.release() }
-            let retried = runAsync { await controller.start(isDemo: false) }
-            defer { runAsync { await controller.stop() } }
-            expect(retried.isRunning, "retry succeeded after the ports freed up, got \(retried)")
-        }
-    }
-
-    Harness.test("the token path is shown before the server has ever run") {
-        withScratchTokenPath { tokenURL in
-            let controller = LocalServerController(tokenURL: tokenURL)
-            eq(controller.tokenPath, tokenURL.path)
-        }
-        // And the default is the real per-user path, not the scratch one.
-        eq(LocalServerController().tokenPath, MCPTokenManager.tokenURL.path)
-    }
-}
-
-// MARK: - One selection model for every collection (TASK-27)
-
-Harness.suite("SenderCollection membership") {
+@Suite("SenderCollection membership")
+struct SenderCollectionMembershipTests {
     func state(
         ignored: Bool = false, unsubscribed: Bool = false,
         reappeared: Bool = false, messages: Bool = true
@@ -1906,25 +2323,25 @@ Harness.suite("SenderCollection membership") {
             hasReappeared: reappeared, hasMessages: messages)
     }
 
-    Harness.test("a plain sender is in All Senders and nowhere else") {
+    @Test("a plain sender is in All Senders and nowhere else") func aPlainSenderIsInAllSendersAndNowhereElse() {
         let s = state()
         eq(SenderCollection.allCases.filter { $0.contains(s) }, [.allSenders])
     }
 
-    Harness.test("unsubscribing takes a sender out of the working list") {
+    @Test("unsubscribing takes a sender out of the working list") func unsubscribingTakesASenderOutOfTheWorkingList() {
         let s = state(unsubscribed: true)
         expect(!SenderCollection.allSenders.contains(s), "gone from All Senders")
         expect(SenderCollection.unsubscribed.contains(s), "listed under Unsubscribed")
         expect(!SenderCollection.reappeared.contains(s), "they haven't mailed again")
     }
 
-    Harness.test("mailing again moves a sender from Unsubscribed to Reappeared") {
+    @Test("mailing again moves a sender from Unsubscribed to Reappeared") func mailingAgainMovesASenderFromUnsubscribedToReappeared() {
         let s = state(unsubscribed: true, reappeared: true)
         expect(SenderCollection.reappeared.contains(s), "Reappeared")
         expect(!SenderCollection.unsubscribed.contains(s), "and only there — not both")
     }
 
-    Harness.test("ignoring hides a sender from All Senders and Reappeared") {
+    @Test("ignoring hides a sender from All Senders and Reappeared") func ignoringHidesASenderFromAllSendersAndReappeared() {
         expect(!SenderCollection.allSenders.contains(state(ignored: true)))
         expect(!SenderCollection.reappeared.contains(state(ignored: true, unsubscribed: true, reappeared: true)))
         expect(SenderCollection.ignored.contains(state(ignored: true)))
@@ -1933,47 +2350,50 @@ Harness.suite("SenderCollection membership") {
     // Inherited behaviour, pinned rather than endorsed: Unsubscribed doesn't
     // exclude ignored senders, so one that is both is listed twice. Changing it
     // is a product decision, not part of unifying the selection model.
-    Harness.test("an ignored sender with a record is listed in both archives") {
+    @Test("an ignored sender with a record is listed in both archives") func anIgnoredSenderWithARecordIsListedInBothArchives() {
         let s = state(ignored: true, unsubscribed: true)
         eq(SenderCollection.allCases.filter { $0.contains(s) }, [.unsubscribed, .ignored])
     }
 
-    Harness.test("losing their messages doesn't remove a record from Unsubscribed") {
+    @Test("losing their messages doesn't remove a record from Unsubscribed") func losingTheirMessagesDoesnTRemoveARecordFromUnsubscribed() {
         // The point of the durable log: the record outlives the mail.
         expect(SenderCollection.unsubscribed.contains(state(unsubscribed: true, messages: false)))
     }
 }
 
-Harness.suite("Selection across collections") {
+@Suite("Selection across collections")
+struct SelectionAcrossCollectionsTests {
     func ids(_ names: [String]) -> [GroupID] { names.map { GroupID(kind: .domain, key: $0) } }
     func set(_ names: [String]) -> Set<GroupID> { Set(ids(names)) }
-    let list = ids(["a", "b", "c"])
+    // As above: spelled out because a property initialiser cannot call `ids`.
+    let list = ["a", "b", "c"].map { GroupID(kind: .domain, key: $0) }
 
     // The decision recorded for this task: a selection does not survive a
     // collection switch. It is what fixes the inspector describing a sender the
     // visible list doesn't contain.
-    Harness.test("switching collections clears the selection outright") {
+    @Test("switching collections clears the selection outright") func switchingCollectionsClearsTheSelectionOutright() {
         eq(SelectionCursor.surviving(set(["a", "b"]), in: list, collectionChanged: true), [])
     }
 
-    Harness.test("a sender present in both collections is still dropped") {
+    @Test("a sender present in both collections is still dropped") func aSenderPresentInBothCollectionsIsStillDropped() {
         // "a" is on screen in the new collection too. It still goes: the same
         // sender is a different decision in each list.
         eq(SelectionCursor.surviving(set(["a"]), in: list, collectionChanged: true), [])
     }
 
-    Harness.test("within one collection the selection survives, minus what left") {
+    @Test("within one collection the selection survives, minus what left") func withinOneCollectionTheSelectionSurvivesMinusWhatLeft() {
         eq(
             SelectionCursor.surviving(set(["a", "z"]), in: list, collectionChanged: false),
             set(["a"]))
     }
 
-    Harness.test("nothing visible means nothing selected") {
+    @Test("nothing visible means nothing selected") func nothingVisibleMeansNothingSelected() {
         eq(SelectionCursor.surviving(set(["a"]), in: [], collectionChanged: false), [])
     }
 }
 
-Harness.suite("Selection action availability") {
+@Suite("Selection action availability")
+struct SelectionActionAvailabilityTests {
     func context(_ collection: SenderCollection, count: Int, withMessages: Int? = nil)
         -> SelectionContext
     {
@@ -1984,7 +2404,7 @@ Harness.suite("Selection action availability") {
         action.unavailability(in: context) == nil
     }
 
-    Harness.test("with nothing selected every action says so") {
+    @Test("with nothing selected every action says so") func withNothingSelectedEveryActionSaysSo() {
         for action in SelectionAction.allCases {
             eq(
                 action.unavailability(in: context(.allSenders, count: 0)),
@@ -1992,7 +2412,7 @@ Harness.suite("Selection action availability") {
         }
     }
 
-    Harness.test("All Senders can do everything except unignore and forget") {
+    @Test("All Senders can do everything except unignore and forget") func allSendersCanDoEverythingExceptUnignoreAndForget() {
         let c = context(.allSenders, count: 1)
         expect(can(.unsubscribe, c))
         expect(can(.unsubscribeAndDelete, c))
@@ -2003,7 +2423,7 @@ Harness.suite("Selection action availability") {
         expect(!can(.forget, c), "there's no record to forget")
     }
 
-    Harness.test("Ignored offers unignore, and refuses to unsubscribe with a reason") {
+    @Test("Ignored offers unignore, and refuses to unsubscribe with a reason") func ignoredOffersUnignoreAndRefusesToUnsubscribeWithAReason() {
         let c = context(.ignored, count: 2)
         expect(can(.unignore, c))
         expect(!can(.ignore, c))
@@ -2012,7 +2432,7 @@ Harness.suite("Selection action availability") {
             "Ignored senders are hidden, not unsubscribed. Unignore them first.")
     }
 
-    Harness.test("Unsubscribed refuses a second unsubscribe and says what to do") {
+    @Test("Unsubscribed refuses a second unsubscribe and says what to do") func unsubscribedRefusesASecondUnsubscribeAndSaysWhatToDo() {
         let c = context(.unsubscribed, count: 1)
         eq(
             SelectionAction.unsubscribe.unavailability(in: c),
@@ -2020,7 +2440,7 @@ Harness.suite("Selection action availability") {
         expect(can(.forget, c), "forgetting is the way back")
     }
 
-    Harness.test("a record whose messages are gone can't be opened or trashed") {
+    @Test("a record whose messages are gone can't be opened or trashed") func aRecordWhoseMessagesAreGoneCanTBeOpenedOrTrashed() {
         // The Unsubscribed row that outlived its mail. These used to be live
         // controls acting on a sender the app no longer had.
         let c = context(.unsubscribed, count: 1, withMessages: 0)
@@ -2029,7 +2449,7 @@ Harness.suite("Selection action availability") {
         expect(can(.forget, c), "the record itself is still there")
     }
 
-    Harness.test("Reappeared can unsubscribe again — that's what it's for") {
+    @Test("Reappeared can unsubscribe again — that's what it's for") func reappearedCanUnsubscribeAgainThatSWhatItSFor() {
         let c = context(.reappeared, count: 1)
         expect(can(.unsubscribe, c))
         expect(can(.unsubscribeAndDelete, c))
@@ -2038,14 +2458,14 @@ Harness.suite("Selection action availability") {
         expect(can(.forget, c))
     }
 
-    Harness.test("viewing the latest message needs exactly one sender") {
+    @Test("viewing the latest message needs exactly one sender") func viewingTheLatestMessageNeedsExactlyOneSender() {
         eq(
             SelectionAction.viewLatestMessage.unavailability(
                 in: context(.allSenders, count: 3)),
             "Select a single sender.")
     }
 
-    Harness.test("every refusal is a sentence, not an empty string") {
+    @Test("every refusal is a sentence, not an empty string") func everyRefusalIsASentenceNotAnEmptyString() {
         // The reason becomes the disabled control's tooltip; a blank one is no
         // better than the silent no-op this replaced.
         for collection in SenderCollection.allCases {
@@ -2061,57 +2481,8 @@ Harness.suite("Selection action availability") {
     }
 }
 
-
-// MARK: - MCP read surface (TASK-44)
-
-/// One header row, with everything the MCP surface reads off it under control.
-func mcpMessage(
-    _ uid: UInt32,
-    from: String,
-    subject: String = "Subject",
-    daysAgo: Double = 0,
-    unread: Bool = false,
-    unsub: String? = "<https://ex.com/u>",
-    oneClick: Bool = false,
-    listID: String? = nil
-) -> EmailMessage {
-    EmailMessage(
-        uid: MessageUID(uid),
-        sender: EmailSender(header: from),
-        subject: subject,
-        receivedAt: Date(timeIntervalSince1970: 1_700_000_000 - daysAgo * 86400),
-        isUnread: unread,
-        unsubscribe: ListUnsubscribe(
-            header: unsub, postHeader: oneClick ? "List-Unsubscribe=One-Click" : nil),
-        listID: listID)
-}
-
-/// A snapshot built the way the server builds one: through a real store, so the
-/// round-trip that reconstitutes `ListUnsubscribe` from the stored header is
-/// part of every route test rather than something the tests fake past.
-func mcpSnapshot(_ store: MessageStore, account: String = "me@example.com") throws -> MCPSnapshot {
-    try MCPSnapshot.load(MCPContext(account: account, store: store))
-}
-
-func mcpCall(_ path: String, _ snapshot: MCPSnapshot, _ arguments: [String: Any] = [:])
-    -> HTTPResponse
-{
-    let body = try? JSONSerialization.data(withJSONObject: arguments)
-    let request = HTTPRequest(
-        method: "POST", path: path, headers: ["content-type": "application/json"], body: body)
-    return MCPRoutes.handle(path: path, request: request, snapshot: snapshot)
-        ?? .error("no such route", code: 404)
-}
-
-func mcpJSON(_ response: HTTPResponse) -> [String: Any] {
-    (try? JSONSerialization.jsonObject(with: response.body)) as? [String: Any] ?? [:]
-}
-
-func mcpRows(_ response: HTTPResponse, _ key: String = "senders") -> [[String: Any]] {
-    mcpJSON(response)[key] as? [[String: Any]] ?? []
-}
-
-Harness.suite("Unsubscribe method partition") {
+@Suite("Unsubscribe method partition")
+struct UnsubscribeMethodPartitionTests {
     func method(_ header: String?, oneClick: Bool = false) -> UnsubscribeMethod {
         UnsubscribeMethod.of(
             SenderGroup(
@@ -2119,29 +2490,29 @@ Harness.suite("Unsubscribe method partition") {
                 messages: [mcpMessage(1, from: "A <a@x.com>", unsub: header, oneClick: oneClick)]))
     }
 
-    Harness.test("an RFC 8058 sender is one-click, the same link without it is web") {
+    @Test("an RFC 8058 sender is one-click, the same link without it is web") func anRFC8058SenderIsOneClickTheSameLinkWithoutItIsWeb() {
         eq(method("<https://ex.com/u>", oneClick: true), .oneClick)
         eq(method("<https://ex.com/u>"), .web)
     }
 
-    Harness.test("a mailto-only sender is mailto, and no header at all is none") {
+    @Test("a mailto-only sender is mailto, and no header at all is none") func aMailtoOnlySenderIsMailtoAndNoHeaderAtAllIsNone() {
         eq(method("<mailto:stop@ex.com?subject=off>"), .mailto)
         eq(method(nil), UnsubscribeMethod.none)
     }
 
-    Harness.test("a web target wins over a mailto, matching what the engine would do") {
+    @Test("a web target wins over a mailto, matching what the engine would do") func aWebTargetWinsOverAMailtoMatchingWhatTheEngineWouldDo() {
         // UnsubscribeEngine tries the web target first, so reporting `mailto`
         // here would tell an agent about an attempt the app would never make.
         eq(method("<https://ex.com/u>, <mailto:stop@ex.com>"), .web)
     }
 
-    Harness.test("only 'none' needs a browser — every other method has an automated path") {
+    @Test("only 'none' needs a browser — every other method has an automated path") func onlyNoneNeedsABrowserEveryOtherMethodHasAnAutomatedPath() {
         for method in UnsubscribeMethod.allCases {
             eq(method.needsBrowser, method == .none, method.rawValue)
         }
     }
 
-    Harness.test("the method is taken from the newest message that has a target") {
+    @Test("the method is taken from the newest message that has a target") func theMethodIsTakenFromTheNewestMessageThatHasATarget() {
         // Senders drop the header from the odd message; falling back to "none"
         // because the newest one happens to lack it would wrongly queue a sender
         // for the browser.
@@ -2155,8 +2526,9 @@ Harness.suite("Unsubscribe method partition") {
     }
 }
 
-Harness.suite("MCP snapshot") {
-    Harness.test("rebuilds the app's collections from the store alone") {
+@Suite("MCP snapshot")
+struct MCPSnapshotTests {
+    @Test("rebuilds the app's collections from the store alone") func rebuildsTheAppSCollectionsFromTheStoreAlone() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([
@@ -2186,7 +2558,7 @@ Harness.suite("MCP snapshot") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("a decision on any address in a merged group rolls up to the row") {
+    @Test("a decision on any address in a merged group rolls up to the row") func aDecisionOnAnyAddressInAMergedGroupRollsUpToTheRow() {
         // The whole reason TASK-43 keys decisions by address: regrouping must not
         // throw the agent's judgement away.
         do {
@@ -2205,7 +2577,8 @@ Harness.suite("MCP snapshot") {
     }
 }
 
-Harness.suite("MCP read routes") {
+@Suite("MCP read routes")
+struct MCPReadRoutesTests {
     /// A mailbox big enough that paging is not theoretical.
     func bigStore(senders: Int) throws -> MessageStore {
         let store = try MessageStore.inMemory()
@@ -2222,7 +2595,7 @@ Harness.suite("MCP read routes") {
         return store
     }
 
-    Harness.test("list_senders defaults to a limit that won't swamp an agent") {
+    @Test("list_senders defaults to a limit that won't swamp an agent") func list_sendersDefaultsToALimitThatWonTSwampAnAgent() {
         do {
             let snapshot = try mcpSnapshot(try bigStore(senders: 400))
             let page = mcpJSON(mcpCall("/mcp/senders/list", snapshot))
@@ -2235,7 +2608,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("paging walks the whole list exactly once") {
+    @Test("paging walks the whole list exactly once") func pagingWalksTheWholeListExactlyOnce() {
         do {
             let snapshot = try mcpSnapshot(try bigStore(senders: 120))
             var seen: Set<String> = []
@@ -2254,7 +2627,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("a limit above the cap is reduced and says so, rather than refused") {
+    @Test("a limit above the cap is reduced and says so, rather than refused") func aLimitAboveTheCapIsReducedAndSaysSoRatherThanRefused() {
         do {
             let snapshot = try mcpSnapshot(try bigStore(senders: 400))
             let page = mcpJSON(mcpCall("/mcp/senders/list", snapshot, ["limit": 5000]))
@@ -2265,7 +2638,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("every response names the account it is about") {
+    @Test("every response names the account it is about") func everyResponseNamesTheAccountItIsAbout() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
@@ -2283,7 +2656,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("every response repeats that message bodies do not exist here") {
+    @Test("every response repeats that message bodies do not exist here") func everyResponseRepeatsThatMessageBodiesDoNotExistHere() {
         // An agent may only ever see one response, without the tool description
         // that came with it — so the ceiling on what it can know has to travel
         // on the data.
@@ -2300,7 +2673,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("senders are partitioned by unsubscribe method without attempting anything") {
+    @Test("senders are partitioned by unsubscribe method without attempting anything") func sendersArePartitionedByUnsubscribeMethodWithoutAttemptingAnything() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([
@@ -2325,7 +2698,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("a sender that ignored an unsubscribe also needs the browser") {
+    @Test("a sender that ignored an unsubscribe also needs the browser") func aSenderThatIgnoredAnUnsubscribeAlsoNeedsTheBrowser() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([mcpMessage(1, from: "Back <d@back.com>", oneClick: true)])
@@ -2341,7 +2714,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("filters narrow on count, read rate, recency and list status") {
+    @Test("filters narrow on count, read rate, recency and list status") func filtersNarrowOnCountReadRateRecencyAndListStatus() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([
@@ -2366,7 +2739,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("classification and context filter on what a previous session decided") {
+    @Test("classification and context filter on what a previous session decided") func classificationAndContextFilterOnWhatAPreviousSessionDecided() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([
@@ -2389,7 +2762,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("an unknown collection is refused with the names that would have worked") {
+    @Test("an unknown collection is refused with the names that would have worked") func anUnknownCollectionIsRefusedWithTheNamesThatWouldHaveWorked() {
         do {
             let snapshot = try mcpSnapshot(try bigStore(senders: 2))
             let response = mcpCall("/mcp/senders/list", snapshot, ["collection": "inbox"])
@@ -2399,7 +2772,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("the collection an agent would guess from the wire format is accepted") {
+    @Test("the collection an agent would guess from the wire format is accepted") func theCollectionAnAgentWouldGuessFromTheWireFormatIsAccepted() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
@@ -2408,7 +2781,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("get_sender reports the parsed targets and what was already tried") {
+    @Test("get_sender reports the parsed targets and what was already tried") func get_senderReportsTheParsedTargetsAndWhatWasAlreadyTried() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([
@@ -2437,7 +2810,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("get_sender and list_messages refuse an id that isn't there") {
+    @Test("get_sender and list_messages refuse an id that isn't there") func get_senderAndList_messagesRefuseAnIdThatIsnTThere() {
         do {
             let snapshot = try mcpSnapshot(try bigStore(senders: 1))
             for path in ["/mcp/senders/get", "/mcp/senders/messages"] {
@@ -2447,7 +2820,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("list_messages pages subjects newest first") {
+    @Test("list_messages pages subjects newest first") func list_messagesPagesSubjectsNewestFirst() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert(
@@ -2470,7 +2843,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("search reaches senders already unsubscribed from or ignored") {
+    @Test("search reaches senders already unsubscribed from or ignored") func searchReachesSendersAlreadyUnsubscribedFromOrIgnored() {
         // "Did I already deal with these people" is what a search is asked, and
         // answering it from the working list alone says no when the answer is yes.
         do {
@@ -2488,7 +2861,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("unsubscribe_history reports reappearance alongside the outcome") {
+    @Test("unsubscribe_history reports reappearance alongside the outcome") func unsubscribe_historyReportsReappearanceAlongsideTheOutcome() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([
@@ -2520,7 +2893,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("mailbox_summary orients without returning rows") {
+    @Test("mailbox_summary orients without returning rows") func mailbox_summaryOrientsWithoutReturningRows() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([
@@ -2546,7 +2919,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("sync_status reports the token, and says so when there isn't one") {
+    @Test("sync_status reports the token, and says so when there isn't one") func sync_statusReportsTheTokenAndSaysSoWhenThereIsnTOne() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
@@ -2567,7 +2940,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("list_by_context returns the cohort, including decisions whose mail is gone") {
+    @Test("list_by_context returns the cohort, including decisions whose mail is gone") func list_by_contextReturnsTheCohortIncludingDecisionsWhoseMailIsGone() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([mcpMessage(1, from: "Still <a@still.com>")])
@@ -2595,7 +2968,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("list_by_context without a label lists the labels that exist") {
+    @Test("list_by_context without a label lists the labels that exist") func list_by_contextWithoutALabelListsTheLabelsThatExist() {
         do {
             let store = try MessageStore.inMemory()
             try store.recordDecision(
@@ -2608,7 +2981,7 @@ Harness.suite("MCP read routes") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("the whole surface is read-only — driving every route changes nothing") {
+    @Test("the whole surface is read-only — driving every route changes nothing") func theWholeSurfaceIsReadOnlyDrivingEveryRouteChangesNothing() {
         // The safety argument for TASK-46 rests on this: the token does not bound
         // what an agent can do, so the read surface has to be incapable of acting.
         do {
@@ -2638,119 +3011,9 @@ Harness.suite("MCP read routes") {
     }
 }
 
-Harness.suite("MCP server dispatch") {
-    func serve(
-        path: String, token: String = "s3cret", presented: String = "s3cret", isDemo: Bool = false,
-        context: MCPContext?
-    ) -> HTTPResponse {
-        runAsync {
-            let server = NevermoreServer(appVersion: "9.9.9", isDemo: isDemo, mcpToken: token)
-            await server.setMCPContext(context)
-            return await server.routeRequest(
-                HTTPRequest(
-                    method: "POST", path: path,
-                    headers: ["authorization": "Bearer \(presented)"],
-                    body: Data("{}".utf8)))
-        }
-    }
-
-    Harness.test("a real route serves the open account") {
-        do {
-            let store = try MessageStore.inMemory()
-            try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
-            let response = serve(
-                path: "/mcp/senders/list",
-                context: MCPContext(account: "me@example.com", store: store))
-            eq(response.statusCode, 200)
-            eq(mcpJSON(response)["account"] as? String, "me@example.com")
-        } catch { expect(false, "threw: \(error)") }
-    }
-
-    Harness.test("with no mailbox open the answer is 503, never an empty mailbox") {
-        // "This person has no senders" and "no account is open" are answers an
-        // agent would act on very differently.
-        let response = serve(path: "/mcp/senders/list", context: nil)
-        eq(response.statusCode, 503)
-        expect(
-            (mcpJSON(response)["error"] as? String ?? "").contains("No mailbox is open"),
-            "says which it is")
-    }
-
-    Harness.test("demo mode refuses every tool") {
-        do {
-            let store = try MessageStore.inMemory()
-            try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
-            let context = MCPContext(account: "me@example.com", store: store)
-            for path in MCPRoutes.paths.sorted() {
-                let response = serve(path: path, isDemo: true, context: context)
-                eq(response.statusCode, 403, path)
-                expect(
-                    (mcpJSON(response)["error"] as? String ?? "").contains("demo mode"), path)
-            }
-        } catch { expect(false, "threw: \(error)") }
-    }
-
-    Harness.test("the four refusals stay distinguishable, demo mode included") {
-        // A bridge reads its situation off these codes: 401 fix your token, 404
-        // that tool doesn't exist, 403 leave demo mode, 503 open an account.
-        do {
-            let store = try MessageStore.inMemory()
-            let context = MCPContext(account: "me@example.com", store: store)
-            eq(
-                serve(path: "/mcp/senders/list", presented: "wrong", isDemo: true, context: context)
-                    .statusCode, 401, "credential first, even in demo mode")
-            eq(
-                serve(path: "/mcp/not-a-tool", isDemo: true, context: context).statusCode, 404,
-                "an unknown route is still about the route in demo mode")
-            eq(
-                serve(path: "/mcp/senders/list", isDemo: true, context: nil).statusCode, 403,
-                "demo mode is reported before the absent mailbox")
-        } catch { expect(false, "threw: \(error)") }
-    }
-
-    Harness.test("the local server hands the context on to a server it starts later") {
-        // The account and the server come up in either order, so whichever is
-        // second has to find the other already recorded.
-        do {
-            let store = try MessageStore.inMemory()
-            try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
-            let dir = URL.temporaryDirectory.appending(path: "nevermore-mcp-\(UUID().uuidString)")
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: dir) }
-            let tokenURL = dir.appending(path: ".nevermore-mcp-token")
-
-            let controller = LocalServerController(tokenURL: tokenURL, appVersion: "9.9.9")
-            runAsync {
-                await controller.setMCPContext(
-                    MCPContext(account: "me@example.com", store: store))
-            }
-            let status = runAsync { await controller.start(isDemo: false) }
-            defer { runAsync { await controller.stop() } }
-            guard case let .running(port) = status, let token = MCPTokenManager.read(at: tokenURL)
-            else {
-                expect(false, "expected a running server with a token, got \(status)")
-                return
-            }
-            let result: (status: Int, body: String)? = runAsync {
-                guard let url = URL(string: "http://127.0.0.1:\(port)/mcp/mailbox/summary")
-                else { return nil }
-                var request = URLRequest(url: url)
-                request.httpMethod = "POST"
-                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-                request.httpBody = Data("{}".utf8)
-                guard let (data, response) = try? await URLSession.shared.data(for: request),
-                    let http = response as? HTTPURLResponse
-                else { return nil }
-                return (http.statusCode, String(data: data, encoding: .utf8) ?? "")
-            }
-            eq(result?.status, 200, "the tool answers over the socket, not just in-process")
-            expect(result?.body.contains("me@example.com") ?? false, "and names the account")
-        } catch { expect(false, "threw: \(error)") }
-    }
-}
-
-Harness.suite("MCP tool catalog") {
-    Harness.test("the surface is nine read tools and thirteen narrow writes, and nothing else") {
+@Suite("MCP tool catalog")
+struct MCPToolCatalogTests {
+    @Test("the surface is nine read tools and thirteen narrow writes, and nothing else") func theSurfaceIsNineReadToolsAndThirteenNarrowWritesAndNothingElse() {
         let names = Set(MCPToolCatalog.tools.map(\.name))
         eq(MCPToolCatalog.tools.count, 22, "and no tool is defined twice")
         eq(
@@ -2779,7 +3042,7 @@ Harness.suite("MCP tool catalog") {
         }
     }
 
-    Harness.test("no tool takes a review token, because an agent can never hold one") {
+    @Test("no tool takes a review token, because an agent can never hold one") func noToolTakesAReviewTokenBecauseAnAgentCanNeverHoldOne() {
         // The gate is that the batch path needs a human confirmation the MCP
         // surface has no way to produce. A token argument here — however
         // carefully validated — would be the surface offering to carry one.
@@ -2800,7 +3063,7 @@ Harness.suite("MCP tool catalog") {
         }
     }
 
-    Harness.test("the policy tells an agent there is no batch unsubscribe") {
+    @Test("the policy tells an agent there is no batch unsubscribe") func thePolicyTellsAnAgentThereIsNoBatchUnsubscribe() {
         let policy = MCPWriteRoutes.policy
         expect(!policy.batchUnsubscribeAvailable, "and it is not a capability")
         expect(policy.noBatchUnsubscribe.contains("no bulk unsubscribe"))
@@ -2819,7 +3082,7 @@ Harness.suite("MCP tool catalog") {
         eq(writes.subtracting(described), [], "writes with no stated policy")
     }
 
-    Harness.test("every description states that message bodies are unavailable") {
+    @Test("every description states that message bodies are unavailable") func everyDescriptionStatesThatMessageBodiesAreUnavailable() {
         for tool in MCPToolCatalog.tools {
             let description = MCPToolCatalog.fullDescription(of: tool).lowercased()
             expect(description.contains("bodies are unavailable"), tool.name)
@@ -2827,7 +3090,7 @@ Harness.suite("MCP tool catalog") {
         }
     }
 
-    Harness.test("every description states the account rule and that the app must be running") {
+    @Test("every description states the account rule and that the app must be running") func everyDescriptionStatesTheAccountRuleAndThatTheAppMustBeRunning() {
         for tool in MCPToolCatalog.tools {
             let description = MCPToolCatalog.fullDescription(of: tool)
             expect(description.contains("account currently open"), tool.name)
@@ -2836,7 +3099,7 @@ Harness.suite("MCP tool catalog") {
         }
     }
 
-    Harness.test("every schema is valid JSON describing an object of arguments") {
+    @Test("every schema is valid JSON describing an object of arguments") func everySchemaIsValidJSONDescribingAnObjectOfArguments() {
         for tool in MCPToolCatalog.tools {
             guard let data = tool.schemaJSON.data(using: .utf8),
                 let schema = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -2849,7 +3112,7 @@ Harness.suite("MCP tool catalog") {
         }
     }
 
-    Harness.test("every tool points at a route the server actually serves") {
+    @Test("every tool points at a route the server actually serves") func everyToolPointsAtARouteTheServerActuallyServes() {
         let served = MCPRoutes.paths.union(MCPWriteRoutes.paths)
         for tool in MCPToolCatalog.tools {
             expect(served.contains(tool.path), "\(tool.name) -> \(tool.path)")
@@ -2863,7 +3126,7 @@ Harness.suite("MCP tool catalog") {
         eq(MCPRoutes.paths.intersection(MCPWriteRoutes.paths), [])
     }
 
-    Harness.test("the paging contract in the schema matches the one the server enforces") {
+    @Test("the paging contract in the schema matches the one the server enforces") func thePagingContractInTheSchemaMatchesTheOneTheServerEnforces() {
         guard let list = MCPToolCatalog.tool(named: "list_senders") else {
             expect(false, "list_senders is missing")
             return
@@ -2876,8 +3139,9 @@ Harness.suite("MCP tool catalog") {
     }
 }
 
-Harness.suite("MCP bridge protocol") {
-    Harness.test("recognises the three methods a client actually sends") {
+@Suite("MCP bridge protocol")
+struct MCPBridgeProtocolTests {
+    @Test("recognises the three methods a client actually sends") func recognisesTheThreeMethodsAClientActuallySends() {
         eq(MCPBridge.parse(#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#), .initialize(id: .number(1)))
         eq(MCPBridge.parse(#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#), .toolsList(id: .number(2)))
         eq(
@@ -2886,18 +3150,18 @@ Harness.suite("MCP bridge protocol") {
             .toolsCall(id: .string("a"), name: "sync_status", argumentsJSON: Data("{}".utf8)))
     }
 
-    Harness.test("a notification is answered with silence, as the spec requires") {
+    @Test("a notification is answered with silence, as the spec requires") func aNotificationIsAnsweredWithSilenceAsTheSpecRequires() {
         eq(MCPBridge.parse(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#),
            .notification(method: "notifications/initialized"))
     }
 
-    Harness.test("garbage on stdin is a parse error rather than a crash") {
+    @Test("garbage on stdin is a parse error rather than a crash") func garbageOnStdinIsAParseErrorRatherThanACrash() {
         eq(MCPBridge.parse("not json"), .parseError)
         eq(MCPBridge.parse("{}"), .parseError, "no method")
         eq(MCPBridge.parse(""), .parseError)
     }
 
-    Harness.test("the request id comes back exactly as it was sent") {
+    @Test("the request id comes back exactly as it was sent") func theRequestIdComesBackExactlyAsItWasSent() {
         for line in [
             #"{"id":7,"method":"initialize"}"#, #"{"id":"seven","method":"initialize"}"#,
         ] {
@@ -2912,7 +3176,7 @@ Harness.suite("MCP bridge protocol") {
         }
     }
 
-    Harness.test("tool arguments are forwarded verbatim, not re-interpreted") {
+    @Test("tool arguments are forwarded verbatim, not re-interpreted") func toolArgumentsAreForwardedVerbatimNotReInterpreted() {
         // The bridge holds no schema of its own; the server is the only place
         // that decides what an argument means.
         let line =
@@ -2928,7 +3192,7 @@ Harness.suite("MCP bridge protocol") {
         eq(arguments["collection"] as? String, "ignored")
     }
 
-    Harness.test("tools/list ships every catalogued tool with a parsed schema") {
+    @Test("tools/list ships every catalogued tool with a parsed schema") func toolsListShipsEveryCataloguedToolWithAParsedSchema() {
         let response =
             (try? JSONSerialization.jsonObject(
                 with: Data(MCPBridge.toolsListResponse(id: .number(1)).utf8))) as? [String: Any]
@@ -2943,7 +3207,7 @@ Harness.suite("MCP bridge protocol") {
         }
     }
 
-    Harness.test("a failed tool call is a result carrying isError, not a transport error") {
+    @Test("a failed tool call is a result carrying isError, not a transport error") func aFailedToolCallIsAResultCarryingIsErrorNotATransportError() {
         // A JSON-RPC error would tell the client the bridge broke; the call
         // reached the server and came back with a refusal.
         let response =
@@ -2954,7 +3218,7 @@ Harness.suite("MCP bridge protocol") {
         eq((response?["result"] as? [String: Any])?["isError"] as? Bool, true)
     }
 
-    Harness.test("a 401 refreshes the token only; a dead connection re-probes the port") {
+    @Test("a 401 refreshes the token only; a dead connection re-probes the port") func a401RefreshesTheTokenOnlyADeadConnectionReProbesThePort() {
         // The bridge outlives the app: a relaunch rotates the token and may move
         // the port, and without this every later call fails until the MCP client
         // itself is restarted.
@@ -2964,7 +3228,7 @@ Harness.suite("MCP bridge protocol") {
         expect(MCPBridge.refreshNeedsPortProbe(status: 500), "so the port may have moved")
     }
 
-    Harness.test("a real error from the app is not retried into a second failure") {
+    @Test("a real error from the app is not retried into a second failure") func aRealErrorFromTheAppIsNotRetriedIntoASecondFailure() {
         expect(!MCPBridge.shouldRefresh(status: 500, hasBody: true), "the app answered")
         expect(!MCPBridge.shouldRefresh(status: 503, hasBody: true), "no mailbox open")
         expect(!MCPBridge.shouldRefresh(status: 403, hasBody: true), "demo mode")
@@ -2973,7 +3237,8 @@ Harness.suite("MCP bridge protocol") {
     }
 }
 
-Harness.suite("Store build excludes the bridge") {
+@Suite("Store build excludes the bridge")
+struct StoreBuildExcludesTheBridgeTests {
     /// The repo root, from this file's own path.
     let root = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()  // NevermoreTests
@@ -2982,7 +3247,7 @@ Harness.suite("Store build excludes the bridge") {
         .deletingLastPathComponent()  // Packages
         .deletingLastPathComponent()  // repo root
 
-    Harness.test("Project.swift names neither the bridge target nor its product") {
+    @Test("Project.swift names neither the bridge target nor its product") func projectSwiftNamesNeitherTheBridgeTargetNorItsProduct() {
         // The Mac App Store target depends on the NevermoreKit *library* product,
         // so the bridge cannot ride along — but "cannot" is only true while
         // nothing here mentions it, which is what this pins.
@@ -2998,7 +3263,7 @@ Harness.suite("Store build excludes the bridge") {
             "the store target still builds only the app's sources")
     }
 
-    Harness.test("the package declares the bridge as its own executable product") {
+    @Test("the package declares the bridge as its own executable product") func thePackageDeclaresTheBridgeAsItsOwnExecutableProduct() {
         guard let manifest = try? String(
             contentsOf: root.appending(path: "Packages/NevermoreKit/Package.swift"),
             encoding: .utf8) else {
@@ -3011,29 +3276,15 @@ Harness.suite("Store build excludes the bridge") {
     }
 }
 
-// MARK: - Agent proposals (TASK-45)
-
-/// One proposal item, with only the field under test spelled out.
-func proposalItem(_ key: String, reason: String = "no reason given") -> SenderProposal.Item {
-    SenderProposal.Item(
-        groupKey: "domain:\(key)", senderName: key.capitalized, senderEmail: "hello@\(key)",
-        reason: reason)
-}
-
-func proposalGroup(_ key: String, messages: Int = 1) -> SenderGroup {
-    SenderGroup(
-        id: GroupID(kind: .domain, key: key),
-        messages: (0..<messages).map { mcpMessage(UInt32(abs(key.hashValue % 1000) + $0), from: "X <a@\(key)>") })
-}
-
-Harness.suite("Agent proposals") {
-    Harness.test("a proposal under the cap is left alone") {
+@Suite("Agent proposals")
+struct AgentProposalsTests {
+    @Test("a proposal under the cap is left alone") func aProposalUnderTheCapIsLeftAlone() {
         let (proposal, dropped) = SenderProposal.capped(items: [proposalItem("a"), proposalItem("b")])
         eq(proposal.items.count, 2)
         eq(dropped, 0)
     }
 
-    Harness.test("an oversized proposal is truncated and says how much was cut") {
+    @Test("an oversized proposal is truncated and says how much was cut") func anOversizedProposalIsTruncatedAndSaysHowMuchWasCut() {
         let items = (0..<40).map { proposalItem("s\($0)") }
         let (proposal, dropped) = SenderProposal.capped(items: items)
         // Reviewability is the safety mechanism, so the cap is the product
@@ -3044,7 +3295,7 @@ Harness.suite("Agent proposals") {
         eq(proposal.items.first?.groupKey, "domain:s0", "kept the agent's first choices")
     }
 
-    Harness.test("one sender proposed twice is one row, and doesn't spend two of the cap") {
+    @Test("one sender proposed twice is one row, and doesn't spend two of the cap") func oneSenderProposedTwiceIsOneRowAndDoesnTSpendTwoOfTheCap() {
         let items = (0..<30).map { proposalItem("s\($0)") } + [proposalItem("s0", reason: "again")]
         let (proposal, dropped) = SenderProposal.capped(items: items)
         eq(proposal.items.count, SenderProposal.maxItems)
@@ -3055,27 +3306,27 @@ Harness.suite("Agent proposals") {
         eq(proposal.items.first?.reason, "no reason given", "the first mention wins")
     }
 
-    Harness.test("removing a sender leaves the rest in the agent's order") {
+    @Test("removing a sender leaves the rest in the agent's order") func removingASenderLeavesTheRestInTheAgentSOrder() {
         let proposal = SenderProposal(items: [proposalItem("a"), proposalItem("b"), proposalItem("c")])
         let edited = proposal.removing(groupKeys: ["domain:b"])
         eq(edited?.items.map(\.groupKey), ["domain:a", "domain:c"])
         eq(edited?.id, proposal.id, "still the same proposal")
     }
 
-    Harness.test("removing the last sender clears the proposal outright") {
+    @Test("removing the last sender clears the proposal outright") func removingTheLastSenderClearsTheProposalOutright() {
         // Nil rather than an empty proposal: the sidebar row exists only while
         // there is something to review, so emptying it must remove it.
         let proposal = SenderProposal(items: [proposalItem("a")])
         expect(proposal.removing(groupKeys: ["domain:a"]) == nil)
     }
 
-    Harness.test("rows come back in the agent's order, not the mailbox's") {
+    @Test("rows come back in the agent's order, not the mailbox's") func rowsComeBackInTheAgentSOrderNotTheMailboxS() {
         let proposal = SenderProposal(items: [proposalItem("c"), proposalItem("a"), proposalItem("b")])
         let groups = [proposalGroup("a"), proposalGroup("b"), proposalGroup("c")]
         eq(proposal.senders(in: groups).map(\.id.key), ["c", "a", "b"])
     }
 
-    Harness.test("a sender whose mail has gone still gets a row") {
+    @Test("a sender whose mail has gone still gets a row") func aSenderWhoseMailHasGoneStillGetsARow() {
         // Trashed between the proposal and the review, which are hours apart.
         // The row stays so the human reviews the proposal that was actually
         // made; it simply has no group behind it.
@@ -3087,7 +3338,7 @@ Harness.suite("Agent proposals") {
         expect(rows[1].group != nil)
     }
 
-    Harness.test("search matches the agent's reason, not only the sender") {
+    @Test("search matches the agent's reason, not only the sender") func searchMatchesTheAgentSReasonNotOnlyTheSender() {
         let proposal = SenderProposal(items: [
             proposalItem("acme", reason: "left over from the 2026 job search"),
             proposalItem("shop", reason: "unread for two years"),
@@ -3098,7 +3349,7 @@ Harness.suite("Agent proposals") {
         eq(proposal.senders(in: groups, matching: "  ").count, 2, "blank search filters nothing")
     }
 
-    Harness.test("an unreadable group key is dropped rather than crashing the list") {
+    @Test("an unreadable group key is dropped rather than crashing the list") func anUnreadableGroupKeyIsDroppedRatherThanCrashingTheList() {
         let proposal = SenderProposal(items: [
             SenderProposal.Item(
                 groupKey: "not-a-key", senderName: "?", senderEmail: "?", reason: "?"),
@@ -3108,20 +3359,21 @@ Harness.suite("Agent proposals") {
     }
 }
 
-Harness.suite("Proposed collection") {
-    Harness.test("Proposed holds exactly the senders under review") {
+@Suite("Proposed collection")
+struct ProposedCollectionTests {
+    @Test("Proposed holds exactly the senders under review") func proposedHoldsExactlyTheSendersUnderReview() {
         expect(SenderCollection.proposed.contains(SenderState(isProposed: true)))
         expect(!SenderCollection.proposed.contains(SenderState()))
     }
 
-    Harness.test("being proposed doesn't move a sender out of where it lives") {
+    @Test("being proposed doesn't move a sender out of where it lives") func beingProposedDoesnTMoveASenderOutOfWhereItLives() {
         // The overlay rule: a proposal is a suggestion, and until the human
         // says otherwise nothing has happened to the sender.
         let s = SenderState(isProposed: true)
         eq(SenderCollection.allCases.filter { $0.contains(s) }, [.allSenders, .proposed])
     }
 
-    Harness.test("Proposed sorts last, so 'which collection is this sender in' is unchanged") {
+    @Test("Proposed sorts last, so 'which collection is this sender in' is unchanged") func proposedSortsLastSoWhichCollectionIsThisSenderInIsUnchanged() {
         // `MCPSnapshot.collection(of:)` takes the first match. Proposed must
         // never be that answer, or an agent would read "under review" as the
         // sender's state.
@@ -3131,7 +3383,7 @@ Harness.suite("Proposed collection") {
             .allSenders)
     }
 
-    Harness.test("adding Proposed did not renumber the collection shortcuts") {
+    @Test("adding Proposed did not renumber the collection shortcuts") func addingProposedDidNotRenumberTheCollectionShortcuts() {
         // ⌘1…⌘4 are positions in `allCases` (Commands.swift). Documented in
         // UI_SPEC.md §8, and in muscle memory.
         eq(
@@ -3139,7 +3391,7 @@ Harness.suite("Proposed collection") {
             [.allSenders, .reappeared, .unsubscribed, .ignored, .proposed])
     }
 
-    Harness.test("reviewing an untouched sender can do everything All Senders can") {
+    @Test("reviewing an untouched sender can do everything All Senders can") func reviewingAnUntouchedSenderCanDoEverythingAllSendersCan() {
         // A review you can't act on sends the user to another list to finish it.
         // (The one divergence — a row already unsubscribed — is the next test.)
         for action in SelectionAction.allCases {
@@ -3156,7 +3408,7 @@ Harness.suite("Proposed collection") {
         }
     }
 
-    Harness.test("a proposed sender who is already done can't be unsubscribed twice") {
+    @Test("a proposed sender who is already done can't be unsubscribed twice") func aProposedSenderWhoIsAlreadyDoneCanTBeUnsubscribedTwice() {
         // Acting on a row doesn't remove it from the proposal — the proposal is
         // the record of what was proposed — so this is the one list that can
         // still be showing a sender who is finished.
@@ -3178,7 +3430,7 @@ Harness.suite("Proposed collection") {
             "and forget isn't offered for a selection that isn't all records")
     }
 
-    Harness.test("the read-only MCP surface refuses to list Proposed") {
+    @Test("the read-only MCP surface refuses to list Proposed") func theReadOnlyMCPSurfaceRefusesToListProposed() {
         // It lives in the running app, not the database a snapshot is built
         // from, so serving it would always be an empty list — which an agent
         // would read as the human having cleared it.
@@ -3193,7 +3445,8 @@ Harness.suite("Proposed collection") {
     }
 }
 
-Harness.suite("Proposals survive a relaunch") {
+@Suite("Proposals survive a relaunch")
+struct ProposalsSurviveARelaunchTests {
     /// A store on a real path, so it can be closed and opened again — which is
     /// the only way to prove "survives quitting and reopening the app" without
     /// a UI.
@@ -3202,7 +3455,7 @@ Harness.suite("Proposals survive a relaunch") {
             .appendingPathComponent("nevermore-proposal-\(UUID().uuidString).sqlite").path
     }
 
-    Harness.test("a proposal is still there after the store is closed and reopened") {
+    @Test("a proposal is still there after the store is closed and reopened") func aProposalIsStillThereAfterTheStoreIsClosedAndReopened() {
         let path = temporaryPath()
         let proposal = SenderProposal(
             summary: "left over from the 2026 job search",
@@ -3225,18 +3478,18 @@ Harness.suite("Proposals survive a relaunch") {
             Int(proposal.createdAt.timeIntervalSince1970))
     }
 
-    Harness.test("a fresh mailbox has no proposal") {
+    @Test("a fresh mailbox has no proposal") func aFreshMailboxHasNoProposal() {
         expect(try! MessageStore.inMemory().proposal() == nil)
     }
 
-    Harness.test("a second proposal replaces the first rather than queueing") {
+    @Test("a second proposal replaces the first rather than queueing") func aSecondProposalReplacesTheFirstRatherThanQueueing() {
         let store = try! MessageStore.inMemory()
         try! store.setProposal(SenderProposal(items: [proposalItem("a")]))
         try! store.setProposal(SenderProposal(items: [proposalItem("b"), proposalItem("c")]))
         eq(store.proposal()?.items.map(\.groupKey), ["domain:b", "domain:c"])
     }
 
-    Harness.test("dismissing clears the proposal and acts on nothing") {
+    @Test("dismissing clears the proposal and acts on nothing") func dismissingClearsTheProposalAndActsOnNothing() {
         // The whole safety argument: declining must be inert. Nothing about the
         // senders — ignored, unsubscribed, or their mail — may move.
         let store = try! MessageStore.inMemory()
@@ -3257,23 +3510,13 @@ Harness.suite("Proposals survive a relaunch") {
     }
 }
 
-// MARK: - TASK-46: the agent acts only on a selection the human confirmed
-
-/// `Harness.test` for a body that has to await something.
-///
-/// The action layer, the token vault and the outcome ledger are all actors —
-/// they are reached from the server's actor and from the main actor — so nearly
-/// every test below is async. This keeps `runAsync` out of thirty test bodies.
-func asyncTest(_ name: String, _ body: @escaping @Sendable () async -> Void) {
-    Harness.test(name) { runAsync { await body() } }
-}
-
-Harness.suite("Review tokens") {
+@Suite("Review tokens")
+struct ReviewTokensTests {
     let acme = "domain:acme.com"
     let shop = "domain:shop.com"
     let news = "domain:news.com"
 
-    asyncTest("a confirmed selection can be acted on, once") {
+    @Test("a confirmed selection can be acted on, once") func aConfirmedSelectionCanBeActedOnOnce() async {
         let vault = ReviewTokenVault()
         let token = await vault.mint(confirming: [acme, shop])
         do {
@@ -3281,7 +3524,7 @@ Harness.suite("Review tokens") {
         } catch { expect(false, "the confirmed set was refused: \(error)") }
     }
 
-    asyncTest("a token cannot be replayed") {
+    @Test("a token cannot be replayed") func aTokenCannotBeReplayed() async {
         // The captured-token case: whatever else went wrong, spending it twice
         // must not work, because the human said yes once.
         let vault = ReviewTokenVault()
@@ -3293,7 +3536,7 @@ Harness.suite("Review tokens") {
         } catch { eq(error as? ReviewTokenError, .notOutstanding) }
     }
 
-    asyncTest("a token is worthless against a set the user never saw") {
+    @Test("a token is worthless against a set the user never saw") func aTokenIsWorthlessAgainstASetTheUserNeverSaw() async {
         let vault = ReviewTokenVault()
         let token = await vault.mint(confirming: [acme, shop])
         // One extra sender smuggled into the batch.
@@ -3319,7 +3562,7 @@ Harness.suite("Review tokens") {
         } catch { expect(false, "a failed attempt spent the real confirmation: \(error)") }
     }
 
-    asyncTest("an expired token is refused, and stays refused") {
+    @Test("an expired token is refused, and stays refused") func anExpiredTokenIsRefusedAndStaysRefused() async {
         let vault = ReviewTokenVault()
         let issued = Date(timeIntervalSince1970: 1_700_000_000)
         let token = await vault.mint(confirming: [acme], now: issued)
@@ -3339,7 +3582,7 @@ Harness.suite("Review tokens") {
         } catch { eq(error as? ReviewTokenError, .notOutstanding) }
     }
 
-    asyncTest("a token nobody minted is refused") {
+    @Test("a token nobody minted is refused") func aTokenNobodyMintedIsRefused() async {
         // Belt and braces on the type's non-public initializer: a second vault
         // is as close as anything can get to fabricating one.
         let real = ReviewTokenVault()
@@ -3351,7 +3594,7 @@ Harness.suite("Review tokens") {
         } catch { eq(error as? ReviewTokenError, .notOutstanding) }
     }
 
-    asyncTest("the fingerprint is about the senders, not the order or the duplicates") {
+    @Test("the fingerprint is about the senders, not the order or the duplicates") func theFingerprintIsAboutTheSendersNotTheOrderOrTheDuplicates() async {
         eq(
             ReviewToken.fingerprint(of: [acme, shop]),
             ReviewToken.fingerprint(of: [shop, acme, acme]))
@@ -3364,7 +3607,7 @@ Harness.suite("Review tokens") {
             "the separator isn't forgeable through a key")
     }
 
-    asyncTest("expired tokens don't accumulate") {
+    @Test("expired tokens don't accumulate") func expiredTokensDonTAccumulate() async {
         let vault = ReviewTokenVault()
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         for _ in 0 ..< 5 {
@@ -3382,155 +3625,9 @@ Harness.suite("Review tokens") {
     }
 }
 
-/// A stub action layer, so the write routes can be driven without a running app.
-///
-/// TASK-41 refuses the MCP surface in demo mode, so there is no mailbox a test
-/// may drive these through — the harness is the only place they can be proven,
-/// by design rather than by omission. It records what it was asked to do, which
-/// is what most of these tests are actually asserting: that the route passed the
-/// right thing along, or refused before it got here.
-actor StubActions: MCPActions {
-    struct Call: Equatable {
-        let verb: String
-        let detail: String
-    }
-
-    private(set) var calls: [Call] = []
-    var proposalOutcome: AgentActionOutcome?
-
-    private func note(_ verb: String, _ detail: String = "") {
-        calls.append(Call(verb: verb, detail: detail))
-    }
-
-    func verbs() -> [String] { calls.map(\.verb) }
-    func details(of verb: String) -> [String] {
-        calls.filter { $0.verb == verb }.map(\.detail)
-    }
-
-    func propose(summary: String?, requests: [AgentProposalRequest]) async -> AgentActionOutcome {
-        note(
-            "propose",
-            requests.map { "\($0.senderId)|\($0.recommendation.rawValue)" }
-                .joined(separator: ","))
-        let items = requests.map {
-            SenderProposal.Item(
-                groupKey: $0.senderId, senderName: $0.senderId, senderEmail: "x@\($0.senderId)",
-                reason: $0.reason, recommendation: $0.recommendation)
-        }
-        return .proposal(
-            AgentProposalBuilder.build(
-                summary: summary, resolved: items, candidatesReceived: requests.count
-            ).result)
-    }
-
-    func proposalStatus() async -> AgentActionOutcome {
-        note("status")
-        return .status(
-            AgentProposalStatus(
-                state: AgentProposalStatus.awaitingReview, proposalId: "p", createdAt: nil,
-                summary: nil, proposedCount: 1, remainingCount: 1, removedByHuman: [],
-                outcomes: [], note: "note"))
-    }
-
-    func requestUnsubscribe(senderId: String) async -> AgentActionOutcome {
-        note("unsubscribe", senderId)
-        return .result(
-            AgentActionResult(
-                status: AgentActionResult.awaitingConfirmation, senderId: senderId,
-                detail: "asking the user"))
-    }
-
-    func requestTrash(senderId: String) async -> AgentActionOutcome {
-        note("trash", senderId)
-        return .result(
-            AgentActionResult(
-                status: AgentActionResult.awaitingConfirmation, senderId: senderId,
-                detail: "asking the user"))
-    }
-
-    /// The browser queue this stub pretends to hold (TASK-47). Real enough to
-    /// prove the thing that matters: routes can fill it and read it, and nothing
-    /// on the surface can work it.
-    private var browserQueue = BrowserQueue()
-
-    func queue() -> BrowserQueue { browserQueue }
-
-    func queueForBrowser(senderIds: [String]) async -> AgentActionOutcome {
-        note("queue_for_browser", senderIds.joined(separator: ","))
-        var results: [AgentSenderResult] = []
-        for senderId in senderIds {
-            let queued = browserQueue.queue(
-                BrowserQueue.Entry(
-                    groupKey: senderId, senderName: senderId, senderEmail: "x@\(senderId)",
-                    reason: .noPublishedTarget))
-            results.append(
-                AgentSenderResult(
-                    senderId: senderId, senderName: senderId, applied: queued,
-                    detail: queued ? "queued" : "already waiting"))
-        }
-        return .browserQueue(
-            AgentBrowserQueueStatus(queue: browserQueue, results: results, note: "queued."))
-    }
-
-    func browserQueueStatus() async -> AgentActionOutcome {
-        note("browser_queue_status")
-        return .browserQueue(AgentBrowserQueueStatus(queue: browserQueue))
-    }
-
-    /// Only a test may do this — it stands in for the human working the sheet,
-    /// which is the one thing no route can reach.
-    func humanRecords(_ outcome: BrowserQueue.Outcome, for senderId: String) {
-        browserQueue.record(outcome, for: senderId)
-    }
-
-    func setIgnored(_ ignored: Bool, senderIds: [String]) async -> AgentActionOutcome {
-        note(ignored ? "ignore" : "unignore", senderIds.joined(separator: ","))
-        return .result(
-            AgentActionResult(
-                status: AgentActionResult.done, detail: "done",
-                results: senderIds.map {
-                    AgentSenderResult(senderId: $0, senderName: $0, applied: true, detail: "ok")
-                }))
-    }
-
-    func setClassification(
-        senderId: String, classification: String, reason: String, context: String?
-    ) async -> AgentActionOutcome {
-        note("classify", "\(senderId)|\(classification)|\(reason)|\(context ?? "-")")
-        return .result(
-            AgentActionResult(status: AgentActionResult.done, senderId: senderId, detail: "done"))
-    }
-
-    func startSync() async -> AgentActionOutcome {
-        note("sync")
-        return .result(AgentActionResult(status: AgentActionResult.done, detail: "started"))
-    }
-
-    func setGrouping(senderId: String, mode: AgentGroupingMode) async -> AgentActionOutcome {
-        note("grouping", "\(senderId)|\(mode.rawValue)")
-        return .result(
-            AgentActionResult(status: AgentActionResult.done, senderId: senderId, detail: "done"))
-    }
-
-    func forgetUnsubscribeRecord(senderId: String) async -> AgentActionOutcome {
-        note("forget", senderId)
-        return .result(
-            AgentActionResult(status: AgentActionResult.done, senderId: senderId, detail: "done"))
-    }
-}
-
-func mcpWrite(_ path: String, _ arguments: [String: Any] = [:], actions: (any MCPActions)?)
-    async -> HTTPResponse
-{
-    let body = try? JSONSerialization.data(withJSONObject: arguments)
-    let request = HTTPRequest(
-        method: "POST", path: path, headers: ["content-type": "application/json"], body: body)
-    return await MCPWriteRoutes.handle(path: path, request: request, actions: actions)
-        ?? .error("no such route", code: 404)
-}
-
-Harness.suite("MCP write routes") {
-    asyncTest("a proposal over the cap is truncated and the agent is told") {
+@Suite("MCP write routes")
+struct MCPWriteRoutesTests {
+    @Test("a proposal over the cap is truncated and the agent is told") func aProposalOverTheCapIsTruncatedAndTheAgentIsTold() async {
         // AC #3. The half that matters is the reporting: the human sees 25 of
         // the 40, and an agent that wasn't told would go on to report on 15
         // senders nobody ever looked at.
@@ -3553,7 +3650,7 @@ Harness.suite("MCP write routes") {
         expect(note.contains("Do not report them as proposed"), "and says what not to do")
     }
 
-    asyncTest("a proposal under the cap says so too, rather than saying nothing") {
+    @Test("a proposal under the cap says so too, rather than saying nothing") func aProposalUnderTheCapSaysSoTooRatherThanSayingNothing() async {
         let response = await mcpWrite(
             "/mcp/proposal/create",
             ["senders": [
@@ -3570,7 +3667,7 @@ Harness.suite("MCP write routes") {
             "and is clear that proposing is not acting")
     }
 
-    asyncTest("a sender with no reason is refused rather than shown blank") {
+    @Test("a sender with no reason is refused rather than shown blank") func aSenderWithNoReasonIsRefusedRatherThanShownBlank() async {
         // The reason is the only thing that makes the agent's judgement
         // checkable; a row without one can only be rubber-stamped.
         let actions = StubActions()
@@ -3587,14 +3684,14 @@ Harness.suite("MCP write routes") {
         expect(message.contains("rubber-stamp"), "and says why: \(message)")
     }
 
-    asyncTest("an empty proposal is refused") {
+    @Test("an empty proposal is refused") func anEmptyProposalIsRefused() async {
         eq(await mcpWrite("/mcp/proposal/create", [:], actions: StubActions()).statusCode, 400)
         eq(
             await mcpWrite("/mcp/proposal/create", ["senders": []], actions: StubActions())
                 .statusCode, 400)
     }
 
-    asyncTest("unsubscribe takes one sender, and says why when asked for more") {
+    @Test("unsubscribe takes one sender, and says why when asked for more") func unsubscribeTakesOneSenderAndSaysWhyWhenAskedForMore() async {
         // AC #1 at the surface: the batch path an agent would reach for isn't
         // refused for lack of a token — it does not exist, and the refusal says
         // what to do instead.
@@ -3614,7 +3711,7 @@ Harness.suite("MCP write routes") {
         eq(await actions.details(of: "unsubscribe"), ["domain:a"])
     }
 
-    asyncTest("trash asks the user, whatever else is in the request") {
+    @Test("trash asks the user, whatever else is in the request") func trashAsksTheUserWhateverElseIsInTheRequest() async {
         // AC #6. There is no argument that changes this, so the ones an agent
         // might try are simply ignored.
         let actions = StubActions()
@@ -3632,7 +3729,7 @@ Harness.suite("MCP write routes") {
         eq(await actions.verbs().count, 4, "each one reached the app as a request, not an action")
     }
 
-    asyncTest("ignore and unignore report per sender, never a total") {
+    @Test("ignore and unignore report per sender, never a total") func ignoreAndUnignoreReportPerSenderNeverATotal() async {
         let actions = StubActions()
         let response = await mcpWrite(
             "/mcp/senders/ignore", ["sender_ids": ["domain:a", "domain:b"]], actions: actions)
@@ -3649,7 +3746,7 @@ Harness.suite("MCP write routes") {
         eq(await mcpWrite("/mcp/senders/ignore", [:], actions: actions).statusCode, 400)
     }
 
-    asyncTest("a classification needs a label and a reason") {
+    @Test("a classification needs a label and a reason") func aClassificationNeedsALabelAndAReason() async {
         let actions = StubActions()
         eq(
             await mcpWrite(
@@ -3674,7 +3771,7 @@ Harness.suite("MCP write routes") {
             ["domain:a|expired-situation|the job search ended|job-search-2026"])
     }
 
-    asyncTest("grouping takes one of two modes") {
+    @Test("grouping takes one of two modes") func groupingTakesOneOfTwoModes() async {
         let actions = StubActions()
         eq(
             await mcpWrite(
@@ -3690,7 +3787,7 @@ Harness.suite("MCP write routes") {
         }
     }
 
-    asyncTest("every write refuses when no mailbox is open") {
+    @Test("every write refuses when no mailbox is open") func everyWriteRefusesWhenNoMailboxIsOpen() async {
         // A 200 for a write that landed nowhere would be reported to the user as
         // done. Only the policy answers without an app behind it.
         for path in MCPWriteRoutes.paths.sorted() {
@@ -3703,7 +3800,7 @@ Harness.suite("MCP write routes") {
         }
     }
 
-    asyncTest("the policy route answers with the surface's own rules") {
+    @Test("the policy route answers with the surface's own rules") func thePolicyRouteAnswersWithTheSurfaceSOwnRules() async {
         let json = mcpJSON(await mcpWrite("/mcp/policy", [:], actions: nil))
         eq(json["batch_unsubscribe_available"] as? Bool, false)
         eq(json["proposal_cap"] as? Int, SenderProposal.maxItems)
@@ -3711,7 +3808,7 @@ Harness.suite("MCP write routes") {
         eq(Set(confirmed), ["unsubscribe", "trash_sender_messages"])
     }
 
-    asyncTest("a path that isn't a write route is left for the read surface") {
+    @Test("a path that isn't a write route is left for the read surface") func aPathThatIsnTAWriteRouteIsLeftForTheReadSurface() async {
         let request = HTTPRequest(method: "POST", path: "/mcp/senders/list", headers: [:], body: nil)
         let response = await MCPWriteRoutes.handle(
             path: "/mcp/senders/list", request: request, actions: StubActions())
@@ -3719,8 +3816,9 @@ Harness.suite("MCP write routes") {
     }
 }
 
-Harness.suite("Agent outcome honesty") {
-    asyncTest("the four outcomes reach the agent as four outcomes") {
+@Suite("Agent outcome honesty")
+struct AgentOutcomeHonestyTests {
+    @Test("the four outcomes reach the agent as four outcomes") func theFourOutcomesReachTheAgentAsFourOutcomes() async {
         // AC #4/#5. The app itself only says 'confirmed' when a human watched
         // the sender's confirmation page, so an agent reporting 'unsubscribed'
         // for a 'requested' would be inventing evidence Nevermore refuses to.
@@ -3737,7 +3835,7 @@ Harness.suite("Agent outcome honesty") {
         eq(names.count, 4)
     }
 
-    asyncTest("the engine's own words survive the trip") {
+    @Test("the engine's own words survive the trip") func theEngineSOwnWordsSurviveTheTrip() async {
         eq(
             UnsubscribeEngine.Outcome.requested(detail: "one-click accepted (HTTP 202), unverifiable")
                 .agentDetail,
@@ -3747,7 +3845,7 @@ Harness.suite("Agent outcome honesty") {
             "no unsubscribe link")
     }
 
-    asyncTest("a success flag would have hidden three of the four") {
+    @Test("a success flag would have hidden three of the four") func aSuccessFlagWouldHaveHiddenThreeOfTheFour() async {
         // Why the wire carries the name rather than isSuccess: an endpoint
         // answering 'success' proves nothing about an unsubscribe.
         let requested = UnsubscribeEngine.Outcome.requested(detail: "accepted, unverifiable")
@@ -3755,7 +3853,7 @@ Harness.suite("Agent outcome honesty") {
         eq(requested.agentOutcomeName, "requested", "and still never calls it confirmed")
     }
 
-    asyncTest("the ledger answers per sender, and only about the senders asked for") {
+    @Test("the ledger answers per sender, and only about the senders asked for") func theLedgerAnswersPerSenderAndOnlyAboutTheSendersAskedFor() async {
         let ledger = AgentOutcomeLedger()
         await ledger.record([
             AgentOutcome(
@@ -3771,7 +3869,7 @@ Harness.suite("Agent outcome honesty") {
         eq(await ledger.outcomes(for: ["domain:z"]).count, 0)
     }
 
-    asyncTest("the ledger is bounded, keeping the newest") {
+    @Test("the ledger is bounded, keeping the newest") func theLedgerIsBoundedKeepingTheNewest() async {
         let ledger = AgentOutcomeLedger()
         let overflow = AgentOutcomeLedger.capacity + 10
         for index in 0 ..< overflow {
@@ -3784,7 +3882,7 @@ Harness.suite("Agent outcome honesty") {
         eq(kept.last?.senderId, "domain:s\(overflow - 1)")
     }
 
-    asyncTest("an outcome serialises with the distinction intact") {
+    @Test("an outcome serialises with the distinction intact") func anOutcomeSerialisesWithTheDistinctionIntact() async {
         let encoder = JSONEncoder()
         encoder.keyEncodingStrategy = .convertToSnakeCase
         let payload = AgentProposalStatus(
@@ -3808,8 +3906,9 @@ Harness.suite("Agent outcome honesty") {
     }
 }
 
-Harness.suite("Agent-initiated trash always confirms") {
-    asyncTest("an agent's trash prompts however low the user's threshold is") {
+@Suite("Agent-initiated trash always confirms")
+struct AgentInitiatedTrashAlwaysConfirmsTests {
+    @Test("an agent's trash prompts however low the user's threshold is") func anAgentSTrashPromptsHoweverLowTheUserSThresholdIs() async {
         // AC #6, as a rule rather than as a code path: no message count and no
         // threshold makes an agent-initiated trash silent.
         for threshold in [0, 1, 25, 1000] {
@@ -3822,7 +3921,7 @@ Harness.suite("Agent-initiated trash always confirms") {
         }
     }
 
-    asyncTest("an agent's unsubscribe confirms even with confirmations turned off") {
+    @Test("an agent's unsubscribe confirms even with confirmations turned off") func anAgentSUnsubscribeConfirmsEvenWithConfirmationsTurnedOff() async {
         // "Ask before unsubscribing" is the user saying *my* keystroke should
         // just go. The MCP route answers awaiting_confirmation, and that has to
         // be true in both settings of that switch or the answer is a lie.
@@ -3840,7 +3939,7 @@ Harness.suite("Agent-initiated trash always confirms") {
             "including when they turned it off")
     }
 
-    asyncTest("the user's own threshold still applies to the user") {
+    @Test("the user's own threshold still applies to the user") func theUserSOwnThresholdStillAppliesToTheUser() async {
         expect(
             !TrashConfirmation.requiresPrompt(origin: .user, messageCount: 5, threshold: 25),
             "a small trash the user asked for doesn't prompt")
@@ -3850,86 +3949,9 @@ Harness.suite("Agent-initiated trash always confirms") {
     }
 }
 
-/// A server with a token and no mailbox, so what's under test is the order of
-/// the checks rather than what any route would answer.
-func guardedCall(
-    _ path: String, token: String? = "secret", method: String = "POST", isDemo: Bool = false
-) async -> HTTPResponse {
-    let server = NevermoreServer(isDemo: isDemo, mcpToken: "secret")
-    var headers = ["content-type": "application/json"]
-    if let token { headers["authorization"] = "Bearer \(token)" }
-    return await server.routeRequest(
-        HTTPRequest(method: method, path: path, headers: headers, body: Data("{}".utf8)))
-}
-
-Harness.suite("The write surface is guarded like the read surface") {
-    asyncTest("a write with the wrong credential is 401, before anything else") {
-        for path in MCPWriteRoutes.paths.sorted() {
-            eq(await guardedCall(path, token: "wrong").statusCode, 401, path)
-            eq(await guardedCall(path, token: nil).statusCode, 401, "\(path) with no header")
-        }
-    }
-
-    asyncTest("a write refuses in demo mode") {
-        // TASK-41: the demo mailbox is fabricated, so acting on it is acting on
-        // senders that do not exist. Including the policy — an agent that read a
-        // policy here would think it had a mailbox to apply it to.
-        for path in MCPWriteRoutes.paths.sorted() {
-            let response = await guardedCall(path, isDemo: true)
-            eq(response.statusCode, 403, path)
-        }
-    }
-
-    asyncTest("a write over GET is 405, not a silent no-op") {
-        eq(await guardedCall("/mcp/senders/ignore", method: "GET").statusCode, 405)
-    }
-
-    asyncTest("an unconfigured server refuses writes rather than opening them up") {
-        let server = NevermoreServer(mcpToken: "")
-        let response = await server.routeRequest(
-            HTTPRequest(
-                method: "POST", path: "/mcp/senders/ignore",
-                headers: ["authorization": "Bearer anything"], body: nil))
-        eq(response.statusCode, 503)
-    }
-
-    asyncTest("a write reaches the app once one is attached") {
-        let actions = StubActions()
-        let server = NevermoreServer(mcpToken: "secret")
-        await server.setMCPActions(actions)
-        let response = await server.routeRequest(
-            HTTPRequest(
-                method: "POST", path: "/mcp/senders/ignore",
-                headers: [
-                    "authorization": "Bearer secret", "content-type": "application/json",
-                ],
-                body: try! JSONSerialization.data(withJSONObject: ["sender_id": "domain:a"])))
-        eq(response.statusCode, 200)
-        eq(await actions.details(of: "ignore"), ["domain:a"])
-        // And it needed no snapshot: the write surface acts on the live app, so
-        // a server with actions and no mailbox context still serves it.
-    }
-}
-
-// MARK: - TASK-47: the browser queue
-
-/// A group with one message, so `BrowserQueue.reason` has something to read.
-func queueGroup(
-    _ key: String = "acme.com", unsub: String? = "<https://ex.com/u>", oneClick: Bool = false
-) -> SenderGroup {
-    SenderGroup(
-        id: GroupID(kind: .domain, key: key),
-        messages: [mcpMessage(1, from: "A <a@\(key)>", unsub: unsub, oneClick: oneClick)])
-}
-
-func queueEntry(_ key: String, reason: BrowserReason = .noPublishedTarget) -> BrowserQueue.Entry {
-    BrowserQueue.Entry(
-        groupKey: "domain:\(key)", senderName: key, senderEmail: "hello@\(key)", reason: reason,
-        queuedAt: Date(timeIntervalSince1970: 1_700_000_000))
-}
-
-Harness.suite("Browser queue") {
-    Harness.test("the queue is worked in the order it was filled") {
+@Suite("Browser queue")
+struct BrowserQueueTests {
+    @Test("the queue is worked in the order it was filled") func theQueueIsWorkedInTheOrderItWasFilled() {
         var queue = BrowserQueue()
         queue.queue([queueEntry("a"), queueEntry("b"), queueEntry("c")])
         eq(queue.next?.groupKey, "domain:a")
@@ -3940,14 +3962,14 @@ Harness.suite("Browser queue") {
         eq(queue.count, 3, "the total doesn't shrink under the user as they go")
     }
 
-    Harness.test("queueing the same sender twice is one row") {
+    @Test("queueing the same sender twice is one row") func queueingTheSameSenderTwiceIsOneRow() {
         // A duplicate is a page the user would be sent to twice for no reason.
         var queue = BrowserQueue()
         eq(queue.queue([queueEntry("a"), queueEntry("a"), queueEntry("b")]), ["domain:a", "domain:b"])
         eq(queue.count, 2)
     }
 
-    Harness.test("re-queueing a sender that was already worked asks to redo it") {
+    @Test("re-queueing a sender that was already worked asks to redo it") func reQueueingASenderThatWasAlreadyWorkedAsksToRedoIt() {
         var queue = BrowserQueue()
         queue.queue([queueEntry("a"), queueEntry("b")])
         queue.record(.abandoned, for: "domain:a")
@@ -3957,7 +3979,7 @@ Harness.suite("Browser queue") {
         eq(queue.pendingCount, 2)
     }
 
-    Harness.test("an answer is terminal") {
+    @Test("an answer is terminal") func anAnswerIsTerminal() {
         // A stale sheet answering twice must not rewrite what happened.
         var queue = BrowserQueue()
         queue.queue(queueEntry("a"))
@@ -3967,7 +3989,7 @@ Harness.suite("Browser queue") {
         expect(!queue.record(.confirmed, for: "domain:nobody"), "and an unqueued sender is refused")
     }
 
-    Harness.test("a confirmed unsubscribe is not the same fact as an abandoned one") {
+    @Test("a confirmed unsubscribe is not the same fact as an abandoned one") func aConfirmedUnsubscribeIsNotTheSameFactAsAnAbandonedOne() {
         // AC #3. Three outcomes and not a Bool: "I did it", "their page wouldn't
         // let me", and "I gave up" are different, and only the first is the
         // sender being unsubscribed from.
@@ -3984,7 +4006,7 @@ Harness.suite("Browser queue") {
         expect(!BrowserQueue.Outcome.couldNotUnsubscribe.isUnsubscribed)
     }
 
-    Harness.test("leaving part-way keeps the rest") {
+    @Test("leaving part-way keeps the rest") func leavingPartWayKeepsTheRest() {
         // AC #5, as a value: stopping is simply not recording anything more.
         var queue = BrowserQueue()
         queue.queue((0 ..< 5).map { queueEntry("s\($0)") })
@@ -3994,7 +4016,7 @@ Harness.suite("Browser queue") {
         eq(queue.next?.groupKey, "domain:s2")
     }
 
-    Harness.test("the queue survives being written down and read back") {
+    @Test("the queue survives being written down and read back") func theQueueSurvivesBeingWrittenDownAndReadBack() {
         var queue = BrowserQueue()
         queue.queue([queueEntry("a", reason: .ignoredAnUnsubscribe), queueEntry("b")])
         queue.record(.couldNotUnsubscribe, for: "domain:a", at: Date(timeIntervalSince1970: 1))
@@ -4009,7 +4031,7 @@ Harness.suite("Browser queue") {
         eq(read.next?.groupKey, "domain:b")
     }
 
-    Harness.test("removing takes a sender out without working them") {
+    @Test("removing takes a sender out without working them") func removingTakesASenderOutWithoutWorkingThem() {
         var queue = BrowserQueue()
         queue.queue([queueEntry("a"), queueEntry("b")])
         expect(queue.remove("domain:a"))
@@ -4020,22 +4042,23 @@ Harness.suite("Browser queue") {
     }
 }
 
-Harness.suite("Who needs a browser") {
+@Suite("Who needs a browser")
+struct WhoNeedsABrowserTests {
     // AC #1's other half: the set is decided from stored headers and the
     // unsubscribe record, so it is knowable before anything is attempted.
-    Harness.test("a sender with no published target needs a browser") {
+    @Test("a sender with no published target needs a browser") func aSenderWithNoPublishedTargetNeedsABrowser() {
         eq(
             BrowserQueue.reason(for: queueGroup(unsub: nil), hasReappeared: false),
             .noPublishedTarget)
     }
 
-    Harness.test("a sender who ignored an unsubscribe needs a browser") {
+    @Test("a sender who ignored an unsubscribe needs a browser") func aSenderWhoIgnoredAnUnsubscribeNeedsABrowser() {
         eq(
             BrowserQueue.reason(for: queueGroup(), hasReappeared: true),
             .ignoredAnUnsubscribe)
     }
 
-    Harness.test("a bare mailto to an alias we can't send as needs a browser") {
+    @Test("a bare mailto to an alias we can't send as needs a browser") func aBareMailtoToAnAliasWeCanTSendAsNeedsABrowser() {
         // The case the engine already refuses to guess at: sending from the
         // wrong identity is a request that quietly goes nowhere.
         let group = queueGroup(unsub: "<mailto:unsub@ex.com>")
@@ -4054,13 +4077,13 @@ Harness.suite("Who needs a browser") {
                 hasReappeared: false, canSendAsDeliveredAddress: false) == nil)
     }
 
-    Harness.test("a sender something automated can still finish does not") {
+    @Test("a sender something automated can still finish does not") func aSenderSomethingAutomatedCanStillFinishDoesNot() {
         expect(BrowserQueue.reason(for: queueGroup(), hasReappeared: false) == nil)
         expect(
             BrowserQueue.reason(for: queueGroup(oneClick: true), hasReappeared: false) == nil)
     }
 
-    Harness.test("no target beats every other reason") {
+    @Test("no target beats every other reason") func noTargetBeatsEveryOtherReason() {
         // Whatever else is true of them, there is nothing to send.
         eq(
             BrowserQueue.reason(
@@ -4069,7 +4092,7 @@ Harness.suite("Who needs a browser") {
             .noPublishedTarget)
     }
 
-    Harness.test("the needs_browser filter and the queue agree about who qualifies") {
+    @Test("the needs_browser filter and the queue agree about who qualifies") func theNeeds_browserFilterAndTheQueueAgreeAboutWhoQualifies() {
         // One definition, so an agent cannot select a set with list_senders that
         // queue_for_browser then declines.
         let store = try! MessageStore.inMemory()
@@ -4089,13 +4112,14 @@ Harness.suite("Who needs a browser") {
     }
 }
 
-Harness.suite("The browser queue survives a relaunch") {
+@Suite("The browser queue survives a relaunch")
+struct TheBrowserQueueSurvivesARelaunchTests {
     func temporaryPath() -> String {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("nevermore-queue-\(UUID().uuidString).sqlite").path
     }
 
-    Harness.test("a half-worked sitting is still there after the store is reopened") {
+    @Test("a half-worked sitting is still there after the store is reopened") func aHalfWorkedSittingIsStillThereAfterTheStoreIsReopened() {
         // AC #5 end to end: the user stops, quits, and comes back to the rest.
         let path = temporaryPath()
         var queue = BrowserQueue()
@@ -4113,11 +4137,11 @@ Harness.suite("The browser queue survives a relaunch") {
         eq(read.entry(for: "domain:b")?.reason, .noPublishedTarget)
     }
 
-    Harness.test("a fresh mailbox has an empty queue") {
+    @Test("a fresh mailbox has an empty queue") func aFreshMailboxHasAnEmptyQueue() {
         expect(try! MessageStore.inMemory().browserQueue().isEmpty)
     }
 
-    Harness.test("clearing the queue acts on nothing") {
+    @Test("clearing the queue acts on nothing") func clearingTheQueueActsOnNothing() {
         let store = try! MessageStore.inMemory()
         try! store.upsert([mcpMessage(1, from: "A <a@acme.com>")])
         try! store.setBrowserQueue(BrowserQueue(entries: [queueEntry("acme.com")]))
@@ -4128,8 +4152,9 @@ Harness.suite("The browser queue survives a relaunch") {
     }
 }
 
-Harness.suite("Browser queue over MCP") {
-    asyncTest("an agent can queue senders without attempting an unsubscribe") {
+@Suite("Browser queue over MCP")
+struct BrowserQueueOverMCPTests {
+    @Test("an agent can queue senders without attempting an unsubscribe") func anAgentCanQueueSendersWithoutAttemptingAnUnsubscribe() async {
         // AC #1. The route's whole job: collect, and touch nothing.
         let actions = StubActions()
         let response = await mcpWrite(
@@ -4145,7 +4170,7 @@ Harness.suite("Browser queue over MCP") {
             "queueing is not an unsubscribe")
     }
 
-    asyncTest("queueing reports per sender, including the ones already waiting") {
+    @Test("queueing reports per sender, including the ones already waiting") func queueingReportsPerSenderIncludingTheOnesAlreadyWaiting() async {
         let actions = StubActions()
         _ = await mcpWrite("/mcp/browser-queue/add", ["sender_id": "domain:a"], actions: actions)
         let again = await mcpWrite(
@@ -4157,7 +4182,7 @@ Harness.suite("Browser queue over MCP") {
         eq(mcpJSON(again)["total"] as? Int, 2, "and no duplicate row was added")
     }
 
-    asyncTest("queueing nothing is refused with a pointer to the filter") {
+    @Test("queueing nothing is refused with a pointer to the filter") func queueingNothingIsRefusedWithAPointerToTheFilter() async {
         let actions = StubActions()
         let response = await mcpWrite("/mcp/browser-queue/add", [:], actions: actions)
         eq(response.statusCode, 400)
@@ -4167,7 +4192,7 @@ Harness.suite("Browser queue over MCP") {
         eq(await actions.verbs(), [], "and never reached the app")
     }
 
-    asyncTest("an agent can read progress but cannot make any") {
+    @Test("an agent can read progress but cannot make any") func anAgentCanReadProgressButCannotMakeAny() async {
         // AC #4, and the point of the whole feature. The human's answers arrive
         // through the sheet; every route on the surface is driven here and the
         // queue is unchanged by all of them.
@@ -4201,7 +4226,7 @@ Harness.suite("Browser queue over MCP") {
         eq(await actions.queue().entry(for: "domain:b")?.outcome, nil)
     }
 
-    Harness.test("there is no route that advances the queue") {
+    @Test("there is no route that advances the queue") func thereIsNoRouteThatAdvancesTheQueue() {
         // Structural, not a policy: the only two paths are add and status.
         eq(
             MCPWriteRoutes.paths.filter { $0.hasPrefix("/mcp/browser-queue") }.sorted(),
@@ -4223,14 +4248,14 @@ Harness.suite("Browser queue over MCP") {
         }
     }
 
-    Harness.test("queueing is unattended, and is not a way to unsubscribe") {
+    @Test("queueing is unattended, and is not a way to unsubscribe") func queueingIsUnattendedAndIsNotAWayToUnsubscribe() {
         expect(MCPWriteRoutes.unattendedTools.contains("queue_for_browser"))
         expect(MCPWriteRoutes.unattendedTools.contains("get_browser_queue"))
         expect(!MCPWriteRoutes.confirmedTools.contains("queue_for_browser"))
         expect(!MCPWriteRoutes.policy.batchUnsubscribeAvailable)
     }
 
-    Harness.test("every browser-queue answer says nothing was sent") {
+    @Test("every browser-queue answer says nothing was sent") func everyBrowserQueueAnswerSaysNothingWasSent() {
         let queue = BrowserQueue(entries: [queueEntry("a")])
         for status in [
             AgentBrowserQueueStatus(queue: queue),
@@ -4242,9 +4267,8 @@ Harness.suite("Browser queue over MCP") {
     }
 }
 
-// MARK: - Removing an account takes the whole database with it
-
-Harness.suite("Account removal leaves no database file behind") {
+@Suite("Account removal leaves no database file behind")
+struct AccountRemovalLeavesNoDatabaseFileBehindTests {
     // A SQLite database is a family of files, not one file: `-wal` holds writes
     // that have not been checkpointed, and MessageStore leaves a `.pre-*.bak`
     // copy behind before a migration. Removing an account used to delete only
@@ -4259,7 +4283,7 @@ Harness.suite("Account removal leaves no database file behind") {
         return all.filter { $0.hasPrefix(url.lastPathComponent) }.sorted()
     }
 
-    Harness.test("every file sharing the database's name is gone") {
+    @Test("every file sharing the database's name is gone") func everyFileSharingTheDatabaseSNameIsGone() {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("nevermore-remove-\(UUID().uuidString)")
         let registry = AccountRegistry(directory: dir)
@@ -4286,7 +4310,7 @@ Harness.suite("Account removal leaves no database file behind") {
         try? FileManager.default.removeItem(at: dir)
     }
 
-    Harness.test("another account's database is not swept up with it") {
+    @Test("another account's database is not swept up with it") func anotherAccountSDatabaseIsNotSweptUpWithIt() {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("nevermore-remove-\(UUID().uuidString)")
         let registry = AccountRegistry(directory: dir)
@@ -4311,7 +4335,7 @@ Harness.suite("Account removal leaves no database file behind") {
         try? FileManager.default.removeItem(at: dir)
     }
 
-    Harness.test("resetting the demo database takes its siblings too") {
+    @Test("resetting the demo database takes its siblings too") func resettingTheDemoDatabaseTakesItsSiblingsToo() {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("nevermore-demo-\(UUID().uuidString)")
         let registry = AccountRegistry(directory: dir)
@@ -4328,15 +4352,9 @@ Harness.suite("Account removal leaves no database file behind") {
     }
 }
 
-// MARK: - Unsubscribe results report (TASK-28)
-
-/// A run of `n` senders, all with the same outcome.
-func report(_ outcome: UnsubscribeEngine.Outcome?, _ n: Int) -> UnsubscribeReport {
-    UnsubscribeReport(outcomes: Array(repeating: outcome, count: n))
-}
-
-Harness.suite("UnsubscribeReport") {
-    Harness.test("sorts what needs the user above what needs nothing") {
+@Suite("UnsubscribeReport")
+struct UnsubscribeReportTests {
+    @Test("sorts what needs the user above what needs nothing") func sortsWhatNeedsTheUserAboveWhatNeedsNothing() {
         let mixed = UnsubscribeReport(outcomes: [
             .confirmed(detail: "ok"),
             .requested(detail: "HTTP 204"),
@@ -4352,19 +4370,19 @@ Harness.suite("UnsubscribeReport") {
         expect(UnsubscribeReport.order.suffix(2).allSatisfy { !$0.needsUser })
     }
 
-    Harness.test("empty buckets do not render") {
+    @Test("empty buckets do not render") func emptyBucketsDoNotRender() {
         let all = report(.confirmed(detail: "ok"), 3)
         eq(all.buckets, [.confirmed])
         eq(all.count(.failed), 0)
     }
 
-    Harness.test("needsManual is a failure, because the user still has to finish it") {
+    @Test("needsManual is a failure, because the user still has to finish it") func needsmanualIsAFailureBecauseTheUserStillHasToFinishIt() {
         eq(UnsubscribeReport.bucket(for: .needsManual(reason: "no link")), .failed)
         eq(UnsubscribeReport.bucket(for: .failed(detail: "HTTP 500")), .failed)
         expect(UnsubscribeReportBucket.failed.needsUser)
     }
 
-    Harness.test("a cancelled sender lands in NOT ATTEMPTED rather than nowhere") {
+    @Test("a cancelled sender lands in NOT ATTEMPTED rather than nowhere") func aCancelledSenderLandsInNOTATTEMPTEDRatherThanNowhere() {
         eq(UnsubscribeReport.bucket(for: nil), .notAttempted)
         let cancelled = UnsubscribeReport(outcomes: [.confirmed(detail: "ok"), nil, nil])
         eq(cancelled.count(.notAttempted), 2)
@@ -4372,7 +4390,7 @@ Harness.suite("UnsubscribeReport") {
         expect(cancelled.buckets.contains(.notAttempted))
     }
 
-    Harness.test("requested is never counted as confirmed") {
+    @Test("requested is never counted as confirmed") func requestedIsNeverCountedAsConfirmed() {
         let r = report(.requested(detail: "accepted (HTTP 204), unverifiable"), 4)
         eq(r.count(.confirmed), 0)
         eq(r.count(.requested), 4)
@@ -4382,14 +4400,14 @@ Harness.suite("UnsubscribeReport") {
         eq(r.headline, "Unsubscribed from 4 senders")
     }
 
-    Harness.test("the headline never claims success a run did not have") {
+    @Test("the headline never claims success a run did not have") func theHeadlineNeverClaimsSuccessARunDidNotHave() {
         eq(report(.failed(detail: "HTTP 404"), 1).headline, "No senders were unsubscribed")
         eq(report(.failed(detail: "HTTP 404"), 10).headline, "No senders were unsubscribed")
         eq(report(nil, 5).headline, "No senders were unsubscribed")
         eq(UnsubscribeReport(outcomes: []).headline, "No senders were unsubscribed")
     }
 
-    Harness.test("the headline reconciles with the buckets when a run has failures") {
+    @Test("the headline reconciles with the buckets when a run has failures") func theHeadlineReconcilesWithTheBucketsWhenARunHasFailures() {
         var outcomes: [UnsubscribeEngine.Outcome?] = Array(
             repeating: .requested(detail: "sent"), count: 10)
         outcomes.append(.failed(detail: "endpoint returned HTTP 404"))
@@ -4402,19 +4420,19 @@ Harness.suite("UnsubscribeReport") {
         eq(r.needingUser, 1)
     }
 
-    Harness.test("no 'of' when there is nothing to reconcile") {
+    @Test("no 'of' when there is nothing to reconcile") func noOfWhenThereIsNothingToReconcile() {
         eq(report(.confirmed(detail: "ok"), 1).headline, "Unsubscribed from 1 sender")
         eq(report(.confirmed(detail: "ok"), 10).headline, "Unsubscribed from 10 senders")
         eq(report(.confirmed(detail: "ok"), 50).headline, "Unsubscribed from 50 senders")
     }
 
-    Harness.test("the contents line states the size of the report") {
+    @Test("the contents line states the size of the report") func theContentsLineStatesTheSizeOfTheReport() {
         eq(report(.confirmed(detail: "ok"), 1).contentsLine, "1 sender in this report")
         eq(report(.confirmed(detail: "ok"), 10).contentsLine, "10 senders in this report")
         eq(report(.confirmed(detail: "ok"), 50).contentsLine, "50 senders in this report")
     }
 
-    Harness.test("the contents line says what is still waiting on the user") {
+    @Test("the contents line says what is still waiting on the user") func theContentsLineSaysWhatIsStillWaitingOnTheUser() {
         var outcomes: [UnsubscribeEngine.Outcome?] = Array(
             repeating: .confirmed(detail: "ok"), count: 9)
         outcomes.append(.failed(detail: "HTTP 404"))
@@ -4430,7 +4448,7 @@ Harness.suite("UnsubscribeReport") {
 
     // The three sizes from the defect report, plus the run where everything
     // failed — the case that used to be announced as a success.
-    Harness.test("holds up at 1, 10 and 50 senders, and at an all-failed run") {
+    @Test("holds up at 1, 10 and 50 senders, and at an all-failed run") func holdsUpAt110And50SendersAndAtAnAllFailedRun() {
         for n in [1, 10, 50] {
             let good = report(.confirmed(detail: "ok"), n)
             eq(good.total, n)
@@ -4455,7 +4473,7 @@ Harness.suite("UnsubscribeReport") {
         }
     }
 
-    Harness.test("every bucket carries the label and symbol the sheet draws") {
+    @Test("every bucket carries the label and symbol the sheet draws") func everyBucketCarriesTheLabelAndSymbolTheSheetDraws() {
         for bucket in UnsubscribeReportBucket.allCases {
             expect(!bucket.title.isEmpty, "\(bucket) has no title")
             expect(bucket.title == bucket.title.uppercased(), "\(bucket) title is not a heading")
@@ -4466,14 +4484,9 @@ Harness.suite("UnsubscribeReport") {
     }
 }
 
-// MARK: - The action a proposal recommends (TASK-52)
-
-/// Found in use: an agent proposed two cold-outreach senders with reasons
-/// beginning "IGNORE, do not unsubscribe", and both were unsubscribed, because
-/// the row's primary button said Unsubscribe and `u` was already in the fingers.
-/// Prose cannot override a button, so the recommendation is data now.
-Harness.suite("A proposal carries the action, not prose about it") {
-    Harness.test("an item keeps the action the agent chose, through a round trip") {
+@Suite("A proposal carries the action, not prose about it")
+struct AProposalCarriesTheActionNotProseAboutItTests {
+    @Test("an item keeps the action the agent chose, through a round trip") func anItemKeepsTheActionTheAgentChoseThroughARoundTrip() {
         for action in RecommendedAction.allCases {
             let item = SenderProposal.Item(
                 groupKey: "domain:a", senderName: "A", senderEmail: "a@a", reason: "why",
@@ -4484,7 +4497,7 @@ Harness.suite("A proposal carries the action, not prose about it") {
         }
     }
 
-    Harness.test("a proposal stored before recommendations existed still opens") {
+    @Test("a proposal stored before recommendations existed still opens") func aProposalStoredBeforeRecommendationsExistedStillOpens() {
         // The stored proposal survives a relaunch, so the decoder has to cope
         // with rows written by the previous build. Unsubscribe is what those
         // rows already meant; the difference is that the row now says so.
@@ -4497,7 +4510,7 @@ Harness.suite("A proposal carries the action, not prose about it") {
         eq(item.reason, "unread")
     }
 
-    Harness.test("the contradiction check finds only the rows that disagree") {
+    @Test("the contradiction check finds only the rows that disagree") func theContradictionCheckFindsOnlyTheRowsThatDisagree() {
         let proposal = SenderProposal(items: [
             SenderProposal.Item(
                 groupKey: "domain:a", senderName: "A", senderEmail: "a@a", reason: "recurring",
@@ -4520,7 +4533,7 @@ Harness.suite("A proposal carries the action, not prose about it") {
         expect(proposal.items(contradicting: .unsubscribe, in: ["domain:zz"]).isEmpty)
     }
 
-    Harness.test("the override warning names the sender and repeats the agent's words") {
+    @Test("the override warning names the sender and repeats the agent's words") func theOverrideWarningNamesTheSenderAndRepeatsTheAgentSWords() {
         let items = [
             SenderProposal.Item(
                 groupKey: "domain:b", senderName: "Cold Outreach Co", senderEmail: "b@b",
@@ -4539,8 +4552,9 @@ Harness.suite("A proposal carries the action, not prose about it") {
     }
 }
 
-Harness.suite("propose_selection requires an action") {
-    asyncTest("the three recommendations reach the action layer intact") {
+@Suite("propose_selection requires an action")
+struct Propose_selectionRequiresAnActionTests {
+    @Test("the three recommendations reach the action layer intact") func theThreeRecommendationsReachTheActionLayerIntact() async {
         for action in RecommendedAction.allCases {
             let actions = StubActions()
             let response = await mcpWrite(
@@ -4556,7 +4570,7 @@ Harness.suite("propose_selection requires an action") {
         }
     }
 
-    asyncTest("a sender with no recommendation is refused rather than assumed to mean unsubscribe") {
+    @Test("a sender with no recommendation is refused rather than assumed to mean unsubscribe") func aSenderWithNoRecommendationIsRefusedRatherThanAssumedToMeanUnsubscribe() async {
         // The defect, in one test. Defaulting here is what turned "IGNORE, do
         // not unsubscribe" into two unsubscribes.
         let actions = StubActions()
@@ -4578,7 +4592,7 @@ Harness.suite("propose_selection requires an action") {
         }
     }
 
-    asyncTest("a recommendation Nevermore does not have is refused, with the list") {
+    @Test("a recommendation Nevermore does not have is refused, with the list") func aRecommendationNevermoreDoesNotHaveIsRefusedWithTheList() async {
         let actions = StubActions()
         let response = await mcpWrite(
             "/mcp/proposal/create",
@@ -4591,7 +4605,7 @@ Harness.suite("propose_selection requires an action") {
             "says the value was the problem")
     }
 
-    Harness.test("the tool says when each action is appropriate, and warns off the default") {
+    @Test("the tool says when each action is appropriate, and warns off the default") func theToolSaysWhenEachActionIsAppropriateAndWarnsOffTheDefault() {
         let tool = MCPToolCatalog.tools.first { $0.name == "propose_selection" }!
         for action in RecommendedAction.allCases {
             expect(tool.description.contains(action.rawValue), "describes \(action.rawValue)")
@@ -4615,7 +4629,8 @@ Harness.suite("propose_selection requires an action") {
     }
 }
 
-Harness.suite("get_proposal_status reports followed or overrode") {
+@Suite("get_proposal_status reports followed or overrode")
+struct Get_proposal_statusReportsFollowedOrOverrodeTests {
     let sent = SenderProposal(items: [
         SenderProposal.Item(
             groupKey: "domain:a", senderName: "A", senderEmail: "a@a", reason: "recurring",
@@ -4631,7 +4646,7 @@ Harness.suite("get_proposal_status reports followed or overrode") {
             recommendation: .ignore),
     ])
 
-    Harness.test("following, overriding, striking out and not deciding are four answers") {
+    @Test("following, overriding, striking out and not deciding are four answers") func followingOverridingStrikingOutAndNotDecidingAreFourAnswers() {
         let decisions = AgentProposalDecisions.build(
             sent: sent,
             humanActions: ["domain:a": .unsubscribe, "domain:b": .unsubscribe],
@@ -4649,7 +4664,7 @@ Harness.suite("get_proposal_status reports followed or overrode") {
         eq(decisions[3].followedRecommendation, nil, "struck out is neither")
     }
 
-    Harness.test("the override note names them and says not to re-propose") {
+    @Test("the override note names them and says not to re-propose") func theOverrideNoteNamesThemAndSaysNotToRePropose() {
         let decisions = AgentProposalDecisions.build(
             sent: sent, humanActions: ["domain:b": .unsubscribe], stillUnderReview: [])
         let overrides = AgentProposalDecisions.overrides(in: decisions)
@@ -4662,7 +4677,7 @@ Harness.suite("get_proposal_status reports followed or overrode") {
             "and there is no note when nothing was overridden")
     }
 
-    Harness.test("the status serialises decisions in the snake case the wire uses") {
+    @Test("the status serialises decisions in the snake case the wire uses") func theStatusSerialisesDecisionsInTheSnakeCaseTheWireUses() {
         let status = AgentProposalStatus(
             state: AgentProposalStatus.inProgress, proposalId: "p", createdAt: nil, summary: nil,
             proposedCount: 4, remainingCount: 1, removedByHuman: [], outcomes: [],
@@ -4684,7 +4699,7 @@ Harness.suite("get_proposal_status reports followed or overrode") {
         eq(decisions[2]["human_action"] as? String, AgentProposalDecision.undecided)
     }
 
-    Harness.test("get_proposal_status tells the agent what an override means") {
+    @Test("get_proposal_status tells the agent what an override means") func get_proposal_statusTellsTheAgentWhatAnOverrideMeans() {
         let tool = MCPToolCatalog.tools.first { $0.name == "get_proposal_status" }!
         expect(tool.description.contains("decisions"), tool.description)
         expect(tool.description.contains("overrode"), "and names the case")
@@ -4694,171 +4709,16 @@ Harness.suite("get_proposal_status reports followed or overrode") {
     }
 }
 
-// MARK: - DNS rebinding / pinned HTTP client (TASK-4)
-
-/// A plain HTTP server on loopback that answers a canned response per request
-/// and records what it was asked. Stands in for an unsubscribe endpoint.
-///
-/// Note this is a *test* listener. The app itself never binds one — the App
-/// Sandbox entitlements grant `network.client` only, which is exactly why the
-/// fix connects outbound rather than running a local proxy.
-final class StubHTTPServer: @unchecked Sendable {
-    private(set) var port: UInt16 = 0
-    private let listener: NWListener
-    private let respond: @Sendable (String) -> String
-    private let lock = NSLock()
-    private var seen: [String] = []
-
-    var requests: [String] { lock.withLock { seen } }
-    var requestLines: [String] { requests.map { $0.components(separatedBy: "\r\n").first ?? "" } }
-
-    /// Accepts the connection and then says nothing, ever. A hostile endpoint
-    /// costs nothing to run and this is the cheapest thing it can do to you.
-    private let staysSilent: Bool
-
-    init?(staysSilent: Bool = false, respond: @escaping @Sendable (String) -> String = { _ in "" }) {
-        self.respond = respond
-        self.staysSilent = staysSilent
-        let params = NWParameters.tcp
-        params.requiredInterfaceType = .loopback
-        guard let listener = try? NWListener(using: params, on: .any) else { return nil }
-        self.listener = listener
-        // Both handlers must be in place before start(), or the listener fails
-        // instead of binding.
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.handle(connection)
-        }
-        let ready = DispatchSemaphore(value: 0)
-        listener.stateUpdateHandler = { state in
-            switch state {
-            case .ready, .failed, .cancelled, .waiting: ready.signal()
-            default: break
-            }
-        }
-        listener.start(queue: .global())
-        guard ready.wait(timeout: .now() + 3) == .success,
-              case .ready = listener.state,
-              let bound = listener.port?.rawValue
-        else {
-            listener.cancel()
-            return nil
-        }
-        port = bound
-    }
-
-    private func handle(_ connection: NWConnection) {
-        connection.start(queue: .global())
-        read(connection, accumulated: Data())
-    }
-
-    private func read(_ connection: NWConnection, accumulated: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) {
-            [weak self] data, _, isComplete, error in
-            guard let self else { return }
-            var buffer = accumulated
-            if let data { buffer.append(data) }
-            if let range = buffer.range(of: Data("\r\n\r\n".utf8)) {
-                let head = String(decoding: buffer[buffer.startIndex..<range.lowerBound], as: UTF8.self)
-                self.lock.withLock { self.seen.append(head) }
-                // Hold the connection open and answer nothing.
-                if self.staysSilent { return }
-                connection.send(
-                    content: Data(self.respond(head).utf8),
-                    completion: .contentProcessed { _ in connection.cancel() })
-                return
-            }
-            if error != nil || isComplete {
-                connection.cancel()
-                return
-            }
-            self.read(connection, accumulated: buffer)
-        }
-    }
-
-    func stop() { listener.cancel() }
-
-    static func ok(_ body: String) -> String {
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: \(body.utf8.count)\r\n"
-            + "Connection: close\r\n\r\n\(body)"
-    }
-
-    static func redirect(to location: String, status: Int = 302) -> String {
-        "HTTP/1.1 \(status) Found\r\nLocation: \(location)\r\nContent-Length: 0\r\n"
-            + "Connection: close\r\n\r\n"
-    }
-}
-
-/// Records every lookup and can change its answer between them — the whole
-/// point of the exercise.
-final class RecordingResolver: @unchecked Sendable {
-    private let lock = NSLock()
-    private var calls: [String] = []
-    private let answer: @Sendable (String, Int) -> [DestinationGuard.PinnedAddress]
-
-    /// `answer` receives the host and the 1-based number of times *that host*
-    /// has been looked up.
-    init(_ answer: @escaping @Sendable (String, Int) -> [DestinationGuard.PinnedAddress]) {
-        self.answer = answer
-    }
-
-    var hosts: [String] { lock.withLock { calls } }
-    var callCount: Int { lock.withLock { calls.count } }
-    func callCount(for host: String) -> Int { lock.withLock { calls.filter { $0 == host }.count } }
-
-    var resolver: PinnedHTTPClient.Resolver {
-        { [self] host in
-            let nth: Int = lock.withLock {
-                calls.append(host)
-                return calls.filter { $0 == host }.count
-            }
-            return answer(host, nth)
-        }
-    }
-}
-
-private func loopbackPin(_ host: String) -> DestinationGuard.PinnedAddress {
-    DestinationGuard.PinnedAddress(host: host, literal: "127.0.0.1", isIPv6: false)
-}
-
-/// TEST-NET-2. Routable nowhere, so a connection attempt cannot succeed — which
-/// is how "the client used the *other* answer" would show up as a failure.
-private func unreachablePin(_ host: String) -> DestinationGuard.PinnedAddress {
-    DestinationGuard.PinnedAddress(host: host, literal: "198.51.100.1", isIPv6: false)
-}
-
-private func send(
-    _ client: PinnedHTTPClient, _ method: String, _ urlString: String,
-    body: Data? = nil, timeout: TimeInterval = 8
-) -> Result<PinnedHTTPClient.Response, PinnedHTTPClient.Failure> {
-    runAsync {
-        await client.send(
-            method: method, url: URL(string: urlString)!, body: body, timeout: timeout)
-    }
-}
-
-private func status(
-    _ result: Result<PinnedHTTPClient.Response, PinnedHTTPClient.Failure>
-) -> Int? {
-    guard case .success(let response) = result else { return nil }
-    return response.statusCode
-}
-
-private func failure(
-    _ result: Result<PinnedHTTPClient.Response, PinnedHTTPClient.Failure>
-) -> PinnedHTTPClient.Failure? {
-    guard case .failure(let failure) = result else { return nil }
-    return failure
-}
-
-Harness.suite("DestinationGuard pinning") {
-    Harness.test("a public literal pins to itself") {
+@Suite("DestinationGuard pinning")
+struct DestinationGuardPinningTests {
+    @Test("a public literal pins to itself") func aPublicLiteralPinsToItself() {
         let pin = DestinationGuard.pin(for: "93.184.216.34")
         eq(pin?.literal, "93.184.216.34")
         eq(pin?.isIPv6, false)
         eq(pin?.host, "93.184.216.34")
     }
 
-    Harness.test("a public IPv6 literal pins, and is marked as v6") {
+    @Test("a public IPv6 literal pins, and is marked as v6") func aPublicIPv6LiteralPinsAndIsMarkedAsV6() {
         let pin = DestinationGuard.pin(for: "2606:2800:220:1:248:1893:25c8:1946")
         expect(pin != nil, "public v6 literal pins")
         eq(pin?.isIPv6, true)
@@ -4867,7 +4727,7 @@ Harness.suite("DestinationGuard pinning") {
     // The pin is the address the connection uses, so anything isAllowed refuses
     // must be unpinnable too — otherwise the two could drift apart and the one
     // that matters would be the looser one.
-    Harness.test("refuses to pin anything the guard would block") {
+    @Test("refuses to pin anything the guard would block") func refusesToPinAnythingTheGuardWouldBlock() {
         for host in [
             "127.0.0.1", "10.0.0.5", "192.168.1.1", "172.16.4.4", "169.254.169.254",
             "0.0.0.0", "::1", "[::1]", "fe80::1", "fc00::1", "::ffff:127.0.0.1",
@@ -4876,12 +4736,12 @@ Harness.suite("DestinationGuard pinning") {
         }
     }
 
-    Harness.test("refuses to pin a name that does not resolve") {
+    @Test("refuses to pin a name that does not resolve") func refusesToPinANameThatDoesNotResolve() {
         expect(DestinationGuard.pin(for: "nevermore-nothing-here.invalid") == nil, ".invalid")
         expect(DestinationGuard.pinnedAddresses(for: "nevermore-nothing-here.invalid").isEmpty)
     }
 
-    Harness.test("pin is the first of the addresses, not a separate lookup") {
+    @Test("pin is the first of the addresses, not a separate lookup") func pinIsTheFirstOfTheAddressesNotASeparateLookup() {
         // If these two ever disagreed, the address that was checked and the
         // address that gets dialled could differ — which is the entire bug.
         let all = DestinationGuard.pinnedAddresses(for: "93.184.216.34")
@@ -4889,12 +4749,13 @@ Harness.suite("DestinationGuard pinning") {
     }
 }
 
-Harness.suite("PinnedHTTPClient wire format") {
+@Suite("PinnedHTTPClient wire format")
+struct PinnedHTTPClientWireFormatTests {
     func hop(_ urlString: String) -> PinnedHTTPClient.Hop? {
         PinnedHTTPClient.Hop(URL(string: urlString)!)
     }
 
-    Harness.test("Host omits the scheme's default port and keeps any other") {
+    @Test("Host omits the scheme's default port and keeps any other") func hostOmitsTheSchemeSDefaultPortAndKeepsAnyOther() {
         eq(hop("http://acme.test/x")?.hostHeader, "acme.test")
         eq(hop("https://acme.test/x")?.hostHeader, "acme.test")
         eq(hop("http://acme.test:8080/x")?.hostHeader, "acme.test:8080")
@@ -4903,18 +4764,18 @@ Harness.suite("PinnedHTTPClient wire format") {
         eq(hop("https://acme.test:80/x")?.hostHeader, "acme.test:80")
     }
 
-    Harness.test("the request target keeps the query and defaults to /") {
+    @Test("the request target keeps the query and defaults to /") func theRequestTargetKeepsTheQueryAndDefaultsTo() {
         eq(hop("http://acme.test")?.pathAndQuery, "/")
         eq(hop("http://acme.test/unsub?id=7&k=v")?.pathAndQuery, "/unsub?id=7&k=v")
     }
 
-    Harness.test("only http and https are destinations at all") {
+    @Test("only http and https are destinations at all") func onlyHttpAndHttpsAreDestinationsAtAll() {
         expect(hop("ftp://acme.test/x") == nil, "ftp")
         expect(hop("file:///etc/passwd") == nil, "file")
         expect(PinnedHTTPClient.Hop(URL(string: "mailto:a@b.com")!) == nil, "mailto")
     }
 
-    Harness.test("a request carries one Host, a length, and closes the connection") {
+    @Test("a request carries one Host, a length, and closes the connection") func aRequestCarriesOneHostALengthAndClosesTheConnection() {
         let text = String(
             decoding: PinnedHTTPClient.requestBytes(
                 hop: hop("http://acme.test/unsub?a=1")!,
@@ -4931,7 +4792,7 @@ Harness.suite("PinnedHTTPClient wire format") {
         expect(text.hasSuffix("\r\n\r\nList-Unsubscribe=One-Click"), "body follows the head")
     }
 
-    Harness.test("a response head parses into status and lowercased headers") {
+    @Test("a response head parses into status and lowercased headers") func aResponseHeadParsesIntoStatusAndLowercasedHeaders() {
         let response = PinnedHTTPClient.parseResponseHead(
             Data("HTTP/1.1 302 Found\r\nLocation: https://a.test/x\r\nX-Odd-CASE: 1".utf8))
         eq(response?.statusCode, 302)
@@ -4939,382 +4800,22 @@ Harness.suite("PinnedHTTPClient wire format") {
         eq(response?.headers["x-odd-case"], "1", "lookup does not depend on the sender's casing")
     }
 
-    Harness.test("a first Location wins, so a second cannot override it") {
+    @Test("a first Location wins, so a second cannot override it") func aFirstLocationWinsSoASecondCannotOverrideIt() {
         let response = PinnedHTTPClient.parseResponseHead(
             Data("HTTP/1.1 302 Found\r\nLocation: https://a.test/\r\nLocation: http://10.0.0.1/".utf8))
         eq(response?.headers["location"], "https://a.test/")
     }
 
-    Harness.test("a malformed head is refused rather than guessed at") {
+    @Test("a malformed head is refused rather than guessed at") func aMalformedHeadIsRefusedRatherThanGuessedAt() {
         for head in ["", "not http at all", "HTTP/1.1\r\n", "HTTP/1.1 abc OK\r\n", "HTTP/1.1 999 X\r\n"] {
             expect(PinnedHTTPClient.parseResponseHead(Data(head.utf8)) == nil, "accepted: \(head)")
         }
     }
 }
 
-Harness.suite("PinnedHTTPClient (DNS rebinding)") {
-    // AC #4, and the heart of the matter. The resolver answers with a reachable
-    // address the first time and an unreachable one every time after, which is
-    // the rebinding shape: check one address, connect to another.
-    //
-    // Two things are asserted and both are needed. That the request arrives at
-    // the *first* answer proves the validated address is the one dialled. That
-    // the host was looked up exactly once proves there was no second lookup for
-    // a hostile resolver to answer differently — the window is gone, not merely
-    // narrowed.
-    Harness.test("a resolver that changes its answer cannot move the connection") {
-        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("first-answer") })
-        else { return expect(false, "could not start stub origin") }
-        defer { origin.stop() }
-
-        let resolver = RecordingResolver { host, nth in
-            nth == 1 ? [loopbackPin(host)] : [unreachablePin(host)]
-        }
-        let result = send(
-            PinnedHTTPClient(resolve: resolver.resolver), "GET",
-            "http://rebind.invalid:\(origin.port)/unsub")
-
-        eq(status(result), 200, "reached the first, validated answer (\(String(describing: failure(result)))")
-        eq(resolver.callCount(for: "rebind.invalid"), 1, "exactly one lookup, so nothing to rebind")
-        eq(origin.requestLines.first, "GET /unsub HTTP/1.1")
-    }
-
-    // The same setup carries a second proof: `rebind.invalid` has no DNS record
-    // anywhere (RFC 6761 guarantees it), so a request that succeeds is one
-    // nothing but our own resolver could have routed. That is the pre-fix defect
-    // stated as an assertion — a second resolver existing at all.
-    Harness.test("nothing but the injected resolver ever looks the host up") {
-        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("pinned") })
-        else { return expect(false, "could not start stub origin") }
-        defer { origin.stop() }
-
-        // Independently confirm the name really is unresolvable, so this can't
-        // quietly pass because some resolver started answering for it.
-        expect(DestinationGuard.pin(for: "unresolvable.invalid") == nil, "name does not resolve")
-
-        let resolver = RecordingResolver { host, _ in [loopbackPin(host)] }
-        let result = send(
-            PinnedHTTPClient(resolve: resolver.resolver), "GET",
-            "http://unresolvable.invalid:\(origin.port)/x")
-        eq(status(result), 200, "delivered despite no DNS record anywhere")
-    }
-
-    // AC #2 on the wire rather than in a unit test: the origin has to see the
-    // name it serves, or every virtual host breaks.
-    Harness.test("the origin sees the real hostname in Host") {
-        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("ok") })
-        else { return expect(false, "could not start stub origin") }
-        defer { origin.stop() }
-
-        let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
-        _ = send(client, "GET", "http://vhost.invalid:\(origin.port)/path?a=1")
-
-        guard let seen = origin.requests.first else {
-            return expect(false, "origin received nothing")
-        }
-        expect(
-            seen.contains("Host: vhost.invalid:\(origin.port)"),
-            "Host carries the name and the non-default port; saw:\n\(seen)")
-        expect(seen.hasPrefix("GET /path?a=1 HTTP/1.1"), "request line; saw:\n\(seen)")
-    }
-
-    Harness.test("a refused host is never dialled") {
-        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
-        else { return expect(false, "could not start stub origin") }
-        defer { origin.stop() }
-
-        // Nil is what the real resolver returns for a private, local, or
-        // unresolvable answer.
-        let client = PinnedHTTPClient(resolve: { _ in [] })
-        let result = send(client, "GET", "http://blocked.invalid:\(origin.port)/")
-        eq(failure(result), .blocked(host: "blocked.invalid"))
-        expect(origin.requests.isEmpty, "the origin was never contacted")
-    }
-
-    // Pinning one address would otherwise throw away the failover a resolver's
-    // several answers exist to give. A CDN endpoint with a PoP out of rotation
-    // must not read to the user as an unsubscribe link that doesn't work.
-    Harness.test("a dead first address fails over to the next validated one") {
-        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("second-address") })
-        else { return expect(false, "could not start stub origin") }
-        defer { origin.stop() }
-
-        let client = PinnedHTTPClient(resolve: { host in
-            // Both were validated by the same single lookup; only the first is dead.
-            [unreachablePin(host), loopbackPin(host)]
-        })
-        // 8s across two addresses is a 4s slice each, so the dead one is given
-        // up on quickly rather than stranding the request.
-        let result = send(
-            client, "GET", "http://multi.invalid:\(origin.port)/unsub", timeout: 8)
-        eq(status(result), 200, "reached the live address (\(String(describing: failure(result))))")
-    }
-
-    // Found by measurement, not by reasoning: the timeout fired and reported
-    // itself accurately while `send` went on running for 30s, because
-    // Network.framework ignores Swift task cancellation and the sibling task sat
-    // in a continuation until the OS gave up. A budget nobody honours is worse
-    // than none, so this asserts the elapsed time, not the error message.
-    Harness.test("a timeout ends the request, not just the waiting for it") {
-        let client = PinnedHTTPClient(resolve: { host in
-            // TEST-NET-2: a connection here can never complete.
-            [DestinationGuard.PinnedAddress(host: host, literal: "198.51.100.1", isIPv6: false)]
-        })
-        let began = Date()
-        let result = send(client, "GET", "http://blackhole.invalid/x", timeout: 4)
-        let elapsed = Date().timeIntervalSince(began)
-        expect(failure(result) != nil, "the attempt failed")
-        expect(elapsed < 12, "returned in \(String(format: "%.1f", elapsed))s, budget was 4s")
-    }
-
-    // A host that accepts the connection and then answers nothing is the
-    // cheapest thing a hostile endpoint can do, and the deadline has to cover
-    // the response read — not just the connect — or an unsubscribe hangs on
-    // whatever a stranger put in a header.
-    Harness.test("a silent endpoint does not hang the request forever") {
-        guard let origin = StubHTTPServer(staysSilent: true)
-        else { return expect(false, "could not start stub origin") }
-        defer { origin.stop() }
-
-        let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
-        let began = Date()
-        let result = send(client, "GET", "http://silent.invalid:\(origin.port)/unsub", timeout: 4)
-        let elapsed = Date().timeIntervalSince(began)
-        expect(failure(result) != nil, "did not invent a response")
-        expect(elapsed < 12, "gave up in \(String(format: "%.1f", elapsed))s, budget was 4s")
-        expect(!origin.requests.isEmpty, "the request was actually sent and read")
-    }
-
-    Harness.test("failover only ever tries addresses that passed the check") {
-        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
-        else { return expect(false, "could not start stub origin") }
-        defer { origin.stop() }
-
-        // An empty answer is the guard's refusal, and there is nothing to fall
-        // back to — a refused host must not become a reachable one.
-        let client = PinnedHTTPClient(resolve: { _ in [] })
-        let result = send(client, "GET", "http://refused.invalid:\(origin.port)/")
-        eq(failure(result), .blocked(host: "refused.invalid"))
-        expect(origin.requests.isEmpty, "nothing was dialled")
-    }
-
-    Harness.test("a non-http scheme is refused before any lookup") {
-        let resolver = RecordingResolver { host, _ in [loopbackPin(host)] }
-        let client = PinnedHTTPClient(resolve: resolver.resolver)
-        let result = send(client, "GET", "ftp://acme.invalid/x")
-        expect(failure(result) != nil, "refused")
-        eq(resolver.callCount, 0, "never even resolved")
-    }
-
-    // AC #3. Each hop is resolved, checked and pinned on its own account.
-    Harness.test("a redirect to another host is pinned again, not inherited") {
-        guard let second = StubHTTPServer(respond: { _ in StubHTTPServer.ok("second-hop") })
-        else { return expect(false, "could not start second origin") }
-        defer { second.stop() }
-        let secondPort = second.port
-        guard let first = StubHTTPServer(respond: { _ in
-            StubHTTPServer.redirect(to: "http://hop-two.invalid:\(secondPort)/done")
-        }) else { return expect(false, "could not start first origin") }
-        defer { first.stop() }
-
-        let resolver = RecordingResolver { host, _ in [loopbackPin(host)] }
-        let result = send(
-            PinnedHTTPClient(resolve: resolver.resolver), "GET",
-            "http://hop-one.invalid:\(first.port)/start")
-
-        eq(status(result), 200, "followed the redirect")
-        expect(resolver.hosts.contains("hop-one.invalid"), "hop one was pinned")
-        expect(resolver.hosts.contains("hop-two.invalid"), "hop two got its own pin")
-        eq(second.requestLines.first, "GET /done HTTP/1.1")
-    }
-
-    // The hop-two guard has to survive, and has to stay distinguishable from a
-    // sender who simply answered 302 — the engine reports them differently.
-    Harness.test("a redirect into a refused host surfaces the 3xx unfollowed") {
-        guard let second = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
-        else { return expect(false, "could not start second origin") }
-        defer { second.stop() }
-        let secondPort = second.port
-        guard let first = StubHTTPServer(respond: { _ in
-            StubHTTPServer.redirect(to: "http://internal.invalid:\(secondPort)/admin")
-        }) else { return expect(false, "could not start first origin") }
-        defer { first.stop() }
-
-        let client = PinnedHTTPClient(resolve: { host in
-            host == "hop-one.invalid" ? [loopbackPin(host)] : []
-        })
-        let result = send(client, "GET", "http://hop-one.invalid:\(first.port)/start")
-
-        eq(status(result), 302, "the 3xx comes back unfollowed, for the engine to report")
-        expect(second.requests.isEmpty, "the internal host was never contacted")
-    }
-
-    Harness.test("a relative Location is resolved against the hop it came from") {
-        let box = ResultBox<UInt16>()
-        guard let origin = StubHTTPServer(respond: { head in
-            head.hasPrefix("GET /start")
-                ? StubHTTPServer.redirect(to: "/moved") : StubHTTPServer.ok("relative")
-        }) else { return expect(false, "could not start stub origin") }
-        defer { origin.stop() }
-        box.value = origin.port
-
-        let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
-        let result = send(client, "GET", "http://relative.invalid:\(origin.port)/start")
-        eq(status(result), 200)
-        eq(origin.requestLines.last, "GET /moved HTTP/1.1")
-    }
-
-    Harness.test("a redirect loop ends rather than running forever") {
-        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.redirect(to: "/again") })
-        else { return expect(false, "could not start stub origin") }
-        defer { origin.stop() }
-
-        let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
-        let result = send(client, "GET", "http://loop.invalid:\(origin.port)/start")
-        eq(failure(result), .tooManyRedirects)
-        expect(
-            origin.requests.count <= PinnedHTTPClient.maxRedirects + 1,
-            "bounded at \(PinnedHTTPClient.maxRedirects) hops; made \(origin.requests.count)")
-    }
-
-    // RFC 9110: 301/302/303 turn into GET, 307/308 keep the method. One-click is
-    // a POST, so getting this wrong either drops the body or replays it.
-    Harness.test("a 302 turns a one-click POST into a GET, and 307 does not") {
-        for (code, expected) in [(302, "GET /next HTTP/1.1"), (307, "POST /next HTTP/1.1")] {
-            guard let origin = StubHTTPServer(respond: { head in
-                head.hasPrefix("POST /start")
-                    ? StubHTTPServer.redirect(to: "/next", status: code) : StubHTTPServer.ok("done")
-            }) else { return expect(false, "could not start stub origin") }
-            defer { origin.stop() }
-
-            let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
-            let result = send(
-                client, "POST", "http://method.invalid:\(origin.port)/start",
-                body: Data("List-Unsubscribe=One-Click".utf8))
-            eq(status(result), 200, "HTTP \(code) chain completed")
-            eq(origin.requestLines.last, expected, "after HTTP \(code)")
-        }
-    }
-}
-
-// The engine's own vocabulary, driven through an injected client so the
-// outcomes a user actually sees are the thing under test.
-Harness.suite("UnsubscribeEngine over a pinned client") {
-    @Sendable func engine(_ resolve: @escaping PinnedHTTPClient.Resolver) -> UnsubscribeEngine {
-        UnsubscribeEngine(
-            sendMail: { _, _, _, _ in },
-            client: PinnedHTTPClient(resolve: resolve))
-    }
-
-    Harness.test("a refused destination reads as blocked, not as a dead link") {
-        guard let target = ListUnsubscribe(header: "<http://blocked.invalid/unsub>") else {
-            return expect(false, "could not parse header")
-        }
-        let outcome = runAsync { await engine({ _ in [] }).run(target) }
-        guard case .failed(let detail) = outcome else {
-            return expect(false, "expected failure, got \(outcome)")
-        }
-        expect(detail.contains("private or local address"), "says why; got: \(detail)")
-    }
-
-    Harness.test("a redirect into a private address is reported as blocked") {
-        guard let second = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
-        else { return expect(false, "could not start second origin") }
-        defer { second.stop() }
-        let secondPort = second.port
-        guard let first = StubHTTPServer(respond: { _ in
-            StubHTTPServer.redirect(to: "http://internal.invalid:\(secondPort)/admin")
-        }) else { return expect(false, "could not start first origin") }
-        defer { first.stop() }
-
-        guard let target = ListUnsubscribe(header: "<http://sender.invalid:\(first.port)/unsub>")
-        else { return expect(false, "could not parse header") }
-        let outcome = runAsync {
-            await engine({ host in host == "sender.invalid" ? [loopbackPin(host)] : [] }).run(target)
-        }
-        guard case .failed(let detail) = outcome else {
-            return expect(false, "expected failure, got \(outcome)")
-        }
-        expect(detail.contains("redirected to a private or local address"), "got: \(detail)")
-        expect(second.requests.isEmpty, "the internal host was never contacted")
-    }
-
-    // 0.1.0 shipped exactly this bug — "A blocked SSRF redirect was recorded as
-    // a successful unsubscribe" — because the unfollowed 3xx fell under
-    // `code < 400`. The sender was then moved out of the working list as though
-    // it had worked. Nothing in the suite guarded it before this: `main` has no
-    // redirect test of any kind. `isSuccess` is the exact property that
-    // regressed, so it is what gets asserted, across every redirect status.
-    Harness.test("a blocked redirect is never recorded as a success") {
-        for code in [301, 302, 303, 307, 308] {
-            guard let internalHost = StubHTTPServer(respond: { _ in StubHTTPServer.ok("owned") })
-            else { return expect(false, "could not start internal origin") }
-            defer { internalHost.stop() }
-            let internalPort = internalHost.port
-            guard let sender = StubHTTPServer(respond: { _ in
-                StubHTTPServer.redirect(to: "http://internal.invalid:\(internalPort)/admin", status: code)
-            }) else { return expect(false, "could not start sender origin") }
-            defer { sender.stop() }
-
-            guard let target = ListUnsubscribe(header: "<http://sender.invalid:\(sender.port)/unsub>")
-            else { return expect(false, "could not parse header") }
-            let outcome = runAsync {
-                await engine({ host in host == "sender.invalid" ? [loopbackPin(host)] : [] })
-                    .run(target)
-            }
-            expect(!outcome.isSuccess, "HTTP \(code) into a private host read as success: \(outcome)")
-            expect(internalHost.requests.isEmpty, "HTTP \(code): the internal host was contacted")
-        }
-    }
-
-    // An HTTP status can never prove an unsubscribe took effect, so a 200 is
-    // still only `requested`. This is load-bearing for the whole UI.
-    Harness.test("a 200 is still only requested, never confirmed") {
-        guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("bye") })
-        else { return expect(false, "could not start stub origin") }
-        defer { origin.stop() }
-
-        guard let target = ListUnsubscribe(
-            header: "<http://sender.invalid:\(origin.port)/unsub>",
-            postHeader: "List-Unsubscribe=One-Click")
-        else { return expect(false, "could not parse header") }
-        expect(target.supportsOneClick, "this is the one-click path")
-
-        let outcome = runAsync { await engine({ host in [loopbackPin(host)] }).run(target) }
-        guard case .requested(let detail) = outcome else {
-            return expect(false, "expected requested, got \(outcome)")
-        }
-        expect(detail.contains("unverifiable"), "the outcome says so; got: \(detail)")
-        expect(origin.requestLines.first?.hasPrefix("POST ") ?? false, "sent as a POST")
-        expect(
-            origin.requests.first?.contains("Content-Length: 26") ?? false,
-            "carried the one-click body")
-    }
-
-    Harness.test("a sender that answers 500 falls back to its mailto target") {
-        guard let origin = StubHTTPServer(respond: { _ in
-            "HTTP/1.1 500 Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        }) else { return expect(false, "could not start stub origin") }
-        defer { origin.stop() }
-
-        guard let target = ListUnsubscribe(
-            header: "<http://sender.invalid:\(origin.port)/unsub>, <mailto:off@sender.invalid>")
-        else { return expect(false, "could not parse header") }
-
-        let mailed = ResultBox<String>()
-        let engine = UnsubscribeEngine(
-            sendMail: { to, _, _, _ in mailed.value = to },
-            client: PinnedHTTPClient(resolve: { host in [loopbackPin(host)] }))
-        let outcome = runAsync { await engine.run(target) }
-        expect(outcome.isSuccess, "the mailto fallback carried it; got \(outcome)")
-        eq(mailed.value, "off@sender.invalid", "the fallback actually sent")
-    }
-}
-
-// MARK: - The backlog offer after a confirmed browser unsubscribe (TASK-23)
-
-Harness.suite("BacklogOffer") {
-    Harness.test("a sender with nothing left to clear is not offered anything") {
+@Suite("BacklogOffer")
+struct BacklogOfferTests {
+    @Test("a sender with nothing left to clear is not offered anything") func aSenderWithNothingLeftToClearIsNotOfferedAnything() {
         expect(
             BacklogOffer(senderName: "Acme", messageCount: 0, isEscalation: false) == nil,
             "no mail, no offer")
@@ -5323,14 +4824,14 @@ Harness.suite("BacklogOffer") {
             "and a count that cannot happen is still not an offer")
     }
 
-    Harness.test("the offer names the message count") {
+    @Test("the offer names the message count") func theOfferNamesTheMessageCount() {
         guard let offer = BacklogOffer(senderName: "Acme", messageCount: 42, isEscalation: false)
         else { return expect(false, "expected an offer") }
         expect(offer.question.contains("42"), "the question says how many: \(offer.question)")
         eq(offer.acceptLabel, "Delete 42 Messages")
     }
 
-    Harness.test("one message reads as one message") {
+    @Test("one message reads as one message") func oneMessageReadsAsOneMessage() {
         guard let offer = BacklogOffer(senderName: "Acme", messageCount: 1, isEscalation: false)
         else { return expect(false, "expected an offer") }
         eq(offer.acceptLabel, "Delete 1 Message")
@@ -5338,7 +4839,7 @@ Harness.suite("BacklogOffer") {
         expect(offer.question.contains("is still in your mailbox"), "singular verb agreement")
     }
 
-    Harness.test("an escalation offers trash and ignore, in the Reappeared row's words") {
+    @Test("an escalation offers trash and ignore, in the Reappeared row's words") func anEscalationOffersTrashAndIgnoreInTheReappearedRowSWords() {
         guard let offer = BacklogOffer(senderName: "Acme", messageCount: 9, isEscalation: true)
         else { return expect(false, "expected an offer") }
         eq(offer.acceptLabel, "Trash and Ignore")
@@ -5347,7 +4848,7 @@ Harness.suite("BacklogOffer") {
         expect(offer.question.contains("9"), "and still names the count: \(offer.question)")
     }
 
-    Harness.test("a first-time unsubscribe trashes without ignoring") {
+    @Test("a first-time unsubscribe trashes without ignoring") func aFirstTimeUnsubscribeTrashesWithoutIgnoring() {
         eq(
             BacklogOffer(senderName: "Acme", messageCount: 9, isEscalation: false)?.accept,
             .trash)
@@ -5356,7 +4857,7 @@ Harness.suite("BacklogOffer") {
     // The in-sheet offer stands in for the Settings trash-confirmation dialog
     // instead of being followed by one, which is only honest while it says what
     // that dialog says.
-    Harness.test("every offer states the count and where the mail goes") {
+    @Test("every offer states the count and where the mail goes") func everyOfferStatesTheCountAndWhereTheMailGoes() {
         for count in [1, 2, 17, 1_000] {
             for escalation in [false, true] {
                 guard let offer = BacklogOffer(
@@ -5372,13 +4873,13 @@ Harness.suite("BacklogOffer") {
         }
     }
 
-    Harness.test("declining is offered as plainly as accepting") {
+    @Test("declining is offered as plainly as accepting") func decliningIsOfferedAsPlainlyAsAccepting() {
         guard let offer = BacklogOffer(senderName: "Acme", messageCount: 3, isEscalation: false)
         else { return expect(false, "expected an offer") }
         eq(offer.declineLabel, "Keep Messages")
     }
 
-    Harness.test("the toast fallback carries the count in its button") {
+    @Test("the toast fallback carries the count in its button") func theToastFallbackCarriesTheCountInItsButton() {
         guard let plain = BacklogOffer(senderName: "Acme", messageCount: 12, isEscalation: false),
             let escalated = BacklogOffer(senderName: "Acme", messageCount: 12, isEscalation: true)
         else { return expect(false, "expected offers") }
@@ -5390,24 +4891,17 @@ Harness.suite("BacklogOffer") {
     }
 }
 
-// MARK: - Extended search results
-
-// The nil-vs-empty rule that replaced SwiftMail's deprecated `search`. Both
-// directions are pinned because getting either wrong fails silently: a window
-// that wrongly reads as "no matches" is indistinguishable from a genuinely
-// empty date window, so discovery stores fewer messages and still reports
-// success. There is no test here that reaches a real server — this pins the
-// result *interpretation* only, not that the search itself is correct.
-Harness.suite("IMAPBackend.matched") {
+@Suite("IMAPBackend.matched")
+struct IMAPBackendMatchedTests {
     // ESEARCH omits the ALL datum entirely when nothing matched, so a server
     // that found nothing answers COUNT 0 and no ALL. That is an answer, not a
     // missing one, and it must read as an empty set rather than a crash.
-    Harness.test("a result with no ALL datum is no matches, not a failure") {
+    @Test("a result with no ALL datum is no matches, not a failure") func aResultWithNoALLDatumIsNoMatchesNotAFailure() {
         let result = ExtendedSearchResult<UID>(count: 0, all: nil)
         expect(IMAPBackend.matched(result).isEmpty, "a nil ALL collapses to an empty set")
     }
 
-    Harness.test("a populated result round-trips its UIDs unchanged") {
+    @Test("a populated result round-trips its UIDs unchanged") func aPopulatedResultRoundTripsItsUIDsUnchanged() {
         let result = ExtendedSearchResult<UID>(
             count: 4, min: UID(10), max: UID(40), all: UIDSet(ranges: 10...12, 40...40))
         eq(
@@ -5416,15 +4910,9 @@ Harness.suite("IMAPBackend.matched") {
     }
 }
 
-// MARK: - App-password guidance
-
-// The app password is the one thing the user must go and get before Nevermore
-// works at all, and every provider hides it somewhere different. What is pinned
-// here is that the *right* guidance reaches the screen: the provider detected
-// from the address, the provider's own noun for the credential, and a link
-// rather than an invented UI path where the flow could not be checked.
-Harness.suite("AppPasswordGuide") {
-    Harness.test("every detectable provider has its own guidance, not the fallback") {
+@Suite("AppPasswordGuide")
+struct AppPasswordGuideTests {
+    @Test("every detectable provider has its own guidance, not the fallback") func everyDetectableProviderHasItsOwnGuidanceNotTheFallback() {
         for provider in MailProvider.known {
             let guide = AppPasswordGuide.forProvider(provider)
             eq(guide.providerID, provider.id, "\(provider.id) gets its own guide")
@@ -5432,7 +4920,7 @@ Harness.suite("AppPasswordGuide") {
         }
     }
 
-    Harness.test("an address maps to the guidance for the provider hosting it") {
+    @Test("an address maps to the guidance for the provider hosting it") func anAddressMapsToTheGuidanceForTheProviderHostingIt() {
         eq(AppPasswordGuide.forEmail("a@gmail.com").providerID, "gmail")
         eq(AppPasswordGuide.forEmail("a@googlemail.com").providerID, "gmail")
         eq(AppPasswordGuide.forEmail("a@me.com").providerID, "icloud")
@@ -5446,7 +4934,7 @@ Harness.suite("AppPasswordGuide") {
     // for a host name — it is a guess the user can correct. *Instructions* that
     // guess are not: they'd send someone to Google's website to look for a
     // setting their provider keeps somewhere else entirely.
-    Harness.test("an unrecognized domain gets the generic page, never Gmail's") {
+    @Test("an unrecognized domain gets the generic page, never Gmail's") func anUnrecognizedDomainGetsTheGenericPageNeverGmailS() {
         eq(AppPasswordGuide.forEmail("me@example.com").providerID, "imap")
         eq(AppPasswordGuide.forEmail("not-an-address").providerID, "imap")
         expect(
@@ -5460,7 +4948,7 @@ Harness.suite("AppPasswordGuide") {
     // Only Google and Apple gate the credential behind 2FA. Telling a Fastmail
     // user to turn on two-factor authentication first adds a step they don't
     // need to the exact screen where people give up.
-    Harness.test("two-factor is required only where the provider requires it") {
+    @Test("two-factor is required only where the provider requires it") func twoFactorIsRequiredOnlyWhereTheProviderRequiresIt() {
         eq(AppPasswordGuide.gmail.requiresTwoFactor, true)
         eq(AppPasswordGuide.icloud.requiresTwoFactor, true)
         eq(AppPasswordGuide.yahoo.requiresTwoFactor, false)
@@ -5470,13 +4958,13 @@ Harness.suite("AppPasswordGuide") {
 
     // Searching Apple's settings for "app password" finds nothing — Apple calls
     // it an app-specific password. The provider's own noun is most of the help.
-    Harness.test("each provider's own name for the credential is carried through") {
+    @Test("each provider's own name for the credential is carried through") func eachProviderSOwnNameForTheCredentialIsCarriedThrough() {
         eq(AppPasswordGuide.icloud.credentialName, "App-Specific Password")
         eq(AppPasswordGuide.fastmail.credentialName, "App Password")
         eq(AppPasswordGuide.gmail.credentialName, "App password")
     }
 
-    Harness.test("the console link is MailProvider's, so there is one place to fix it") {
+    @Test("the console link is MailProvider's, so there is one place to fix it") func theConsoleLinkIsMailProviderSSoThereIsOnePlaceToFixIt() {
         for provider in MailProvider.known {
             eq(
                 AppPasswordGuide.forProvider(provider).createURL, provider.appPasswordURL,
@@ -5485,7 +4973,7 @@ Harness.suite("AppPasswordGuide") {
         expect(AppPasswordGuide.generic.createURL == nil, "no console to link for a custom domain")
     }
 
-    Harness.test("every guide points at a distinct page on the support site") {
+    @Test("every guide points at a distinct page on the support site") func everyGuidePointsAtADistinctPageOnTheSupportSite() {
         var seen = Set<String>()
         for guide in AppPasswordGuide.all {
             let url = guide.helpPageURL
@@ -5502,7 +4990,7 @@ Harness.suite("AppPasswordGuide") {
     // Where a flow was checked against the provider's documentation, we say the
     // steps; where it wasn't, we link. Either way there is always somewhere to
     // send the user.
-    Harness.test("a provider with steps also cites the documentation they came from") {
+    @Test("a provider with steps also cites the documentation they came from") func aProviderWithStepsAlsoCitesTheDocumentationTheyCameFrom() {
         for guide in AppPasswordGuide.all where !guide.steps.isEmpty {
             expect(
                 guide.documentationURL != nil,
@@ -5518,7 +5006,7 @@ Harness.suite("AppPasswordGuide") {
     // Providers reject the account password with the same error they use for a
     // mistyped app password, so a generic "check your credentials" sends people
     // to retype the one thing that cannot work.
-    Harness.test("auth failure names the app-password policy as the likely cause") {
+    @Test("auth failure names the app-password policy as the likely cause") func authFailureNamesTheAppPasswordPolicyAsTheLikelyCause() {
         for provider in MailProvider.known {
             let text = AppPasswordGuide.forProvider(provider).authFailureExplanation
             expect(
@@ -5539,7 +5027,7 @@ Harness.suite("AppPasswordGuide") {
     // The backend can't know which provider an account uses, so it must not
     // offer provider-specific advice: this message used to tell every user,
     // Fastmail subscribers included, to check Google's 2-Step Verification.
-    Harness.test("the backend's auth error stays provider-neutral") {
+    @Test("the backend's auth error stays provider-neutral") func theBackendSAuthErrorStaysProviderNeutral() {
         let text = MailBackendError.authenticationFailed("LOGIN failed").errorDescription ?? ""
         expect(text.contains("LOGIN failed"), "the server's own answer survives")
         expect(!text.contains("2-Step"), "no Google-specific advice for non-Google accounts")
@@ -5547,54 +5035,30 @@ Harness.suite("AppPasswordGuide") {
     }
 }
 
-
-// MARK: - Keychain prompt prediction
-
-// These run against the maintainer's real login keychain, so they are
-// deliberately read-only: nothing here adds, updates or deletes an item. The
-// account name is one no keychain can hold an item for.
-//
-// What is therefore *not* covered here, and was verified by hand instead (see
-// TASK-6): the case the function exists for — an item that exists but whose ACL
-// excludes this binary. Reproducing it needs two differently signed binaries
-// and a real item, and getting it wrong puts a system dialog on the screen.
-Harness.suite("Keychain.readWouldPrompt") {
+@Suite("Keychain.readWouldPrompt")
+struct KeychainReadWouldPromptTests {
     let absent = "no-such-account@invalid.invalid"
 
-    Harness.test("an account with nothing saved needs no explanation") {
+    @Test("an account with nothing saved needs no explanation") func anAccountWithNothingSavedNeedsNoExplanation() {
         expect(
             !Keychain.readWouldPrompt(for: absent),
             "no stored item means no dialog to warn about")
     }
 
-    Harness.test("an account with nothing saved has no password") {
+    @Test("an account with nothing saved has no password") func anAccountWithNothingSavedHasNoPassword() {
         eq(Keychain.appPassword(for: absent), nil)
     }
 
     // The suppression flag is process-wide: leaving it off would make every
     // later keychain read in the app fail silently instead of prompting.
-    Harness.test("the probe restores user interaction on the way out") {
+    @Test("the probe restores user interaction on the way out") func theProbeRestoresUserInteractionOnTheWayOut() {
         _ = Keychain.readWouldPrompt(for: absent)
         expect(userInteractionAllowed(), "interaction is back on after the probe")
     }
 }
 
-/// Reads back the process-wide flag the probe toggles. The getter is deprecated
-/// with the rest of SecKeychain, and warns here for the same reason the setter
-/// warns in Keychain.swift: there is no modern spelling of this flag.
-func userInteractionAllowed() -> Bool {
-    var state: DarwinBoolean = false
-    guard SecKeychainGetUserInteractionAllowed(&state) == errSecSuccess else { return false }
-    return state.boolValue
-}
-
-
-// The Help menu links pages rather than restating them, so that help can be
-// fixed without shipping a build. A link to a page that isn't there is worse
-// than no link at all, and nothing in a menu item will tell you — so the checks
-// that can be made here are made here: the URLs are on the site, and each one
-// names a file that exists in `docs/`, which is what GitHub Pages publishes.
-Harness.suite("Support site links") {
+@Suite("Support site links")
+struct SupportSiteLinksTests {
     /// The repo root, from this file's own path.
     let root = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()  // NevermoreTests
@@ -5603,7 +5067,7 @@ Harness.suite("Support site links") {
         .deletingLastPathComponent()  // Packages
         .deletingLastPathComponent()  // repo root
 
-    Harness.test("every linked page is a real file in docs/") {
+    @Test("every linked page is a real file in docs/") func everyLinkedPageIsARealFileInDocs() {
         for url in SupportSite.all where url != SupportSite.home {
             let file = root.appending(path: "docs").appending(path: url.lastPathComponent)
             expect(
@@ -5619,7 +5083,7 @@ Harness.suite("Support site links") {
     // The whole point of linking the site is that someone without a GitHub
     // account — which is most people — can read it. PRIVACY.md rendered on
     // github.com was the previous destination and does not clear that bar.
-    Harness.test("the links go to the site, not to GitHub") {
+    @Test("the links go to the site, not to GitHub") func theLinksGoToTheSiteNotToGitHub() {
         for url in SupportSite.all {
             eq(url.scheme, "https", "\(url.lastPathComponent) is https")
             eq(url.host, "brooksc.github.io", "\(url.lastPathComponent) is on the published site")
@@ -5629,7 +5093,7 @@ Harness.suite("Support site links") {
 
     // AppPasswordGuide predates this list and used to carry its own copy of the
     // base URL. Two copies is how the app ends up linking a site that moved.
-    Harness.test("the per-provider guides share the one base URL") {
+    @Test("the per-provider guides share the one base URL") func thePerProviderGuidesShareTheOneBaseURL() {
         for guide in AppPasswordGuide.all {
             expect(
                 guide.helpPageURL.absoluteString.hasPrefix(SupportSite.home.absoluteString),
@@ -5643,7 +5107,7 @@ Harness.suite("Support site links") {
     // The index is what the Help menu links, because a menu has no address in
     // hand to pick a provider with. It is only useful if it leads on to the
     // per-provider pages the sheets link.
-    Harness.test("the app-passwords index links every provider guide") {
+    @Test("the app-passwords index links every provider guide") func theAppPasswordsIndexLinksEveryProviderGuide() {
         guard let html = try? String(
             contentsOf: root.appending(path: "docs/app-passwords.html"), encoding: .utf8) else {
             expect(false, "could not read docs/app-passwords.html")
@@ -5657,13 +5121,8 @@ Harness.suite("Support site links") {
     }
 }
 
-// MARK: - Smart selections (TASK-26)
-
-// A smart selection decides what a batch of live unsubscribe requests will be
-// aimed at, so every rule is checked at its boundary rather than in the middle.
-// The rules are in the kit and take plain numbers; the menu that calls them is
-// app-target and isn't reachable from here.
-Harness.suite("SmartSelection") {
+@Suite("SmartSelection")
+struct SmartSelectionTests {
     let now = Date(timeIntervalSince1970: 1_750_000_000)
     func daysAgo(_ n: Int) -> Date { now.addingTimeInterval(-Double(n) * 86_400) }
 
@@ -5686,7 +5145,7 @@ Harness.suite("SmartSelection") {
 
     // The task's starting set said "0% read" with no floor. A floor is the
     // difference between "you never open these" and "this arrived on Tuesday".
-    Harness.test("never opened needs enough messages to be evidence") {
+    @Test("never opened needs enough messages to be evidence") func neverOpenedNeedsEnoughMessagesToBeEvidence() {
         expect(
             SmartSelection.neverOpened.matches(
                 candidate("a", count: SmartSelection.minimumVolume), now: now),
@@ -5701,7 +5160,7 @@ Harness.suite("SmartSelection") {
             "one message read out of forty is not 'never'")
     }
 
-    Harness.test("rarely opened is a share of a real volume") {
+    @Test("rarely opened is a share of a real volume") func rarelyOpenedIsAShareOfARealVolume() {
         expect(
             SmartSelection.rarelyOpened.matches(
                 candidate("a", count: 100, unreadPercent: 91), now: now),
@@ -5716,7 +5175,7 @@ Harness.suite("SmartSelection") {
             "below the volume threshold, the share means little")
     }
 
-    Harness.test("dormant is a year of silence, at the boundary") {
+    @Test("dormant is a year of silence, at the boundary") func dormantIsAYearOfSilenceAtTheBoundary() {
         expect(
             SmartSelection.dormant.matches(
                 candidate("a", lastReceived: daysAgo(SmartSelection.dormantDays + 1)), now: now),
@@ -5732,7 +5191,7 @@ Harness.suite("SmartSelection") {
 
     // The point of this rule is that a whole batch can finish without a browser,
     // which is knowable from the stored RFC 8058 header alone.
-    Harness.test("one-click selects only senders that published the token") {
+    @Test("one-click selects only senders that published the token") func oneClickSelectsOnlySendersThatPublishedTheToken() {
         expect(
             SmartSelection.oneClick.matches(candidate("a", oneClick: true), now: now),
             "one-click sender matches")
@@ -5744,7 +5203,7 @@ Harness.suite("SmartSelection") {
     // The invariant the collection switch and the search field both maintain:
     // selection ⊆ the visible list. A rule that returned a sender who isn't in
     // this collection would select a row the list doesn't show.
-    Harness.test("a smart selection never leaves the collection it ran in") {
+    @Test("a smart selection never leaves the collection it ran in") func aSmartSelectionNeverLeavesTheCollectionItRanIn() {
         let ordinary = candidate("ordinary.com")
         let ignored = candidate("ignored.com", state: SenderState(isIgnored: true))
         let pool = [ordinary, ignored]
@@ -5758,7 +5217,7 @@ Harness.suite("SmartSelection") {
 
     // Reviewability is the safety mechanism, so the cap is part of the rule
     // rather than a detail of the view.
-    Harness.test("the selection is capped, and says so") {
+    @Test("the selection is capped, and says so") func theSelectionIsCappedAndSaysSo() {
         let pool = (0..<(SmartSelection.maxSelected + 10)).map { candidate("s\($0).com") }
         let result = SmartSelection.neverOpened.select(from: pool, in: .allSenders, now: now)
 
@@ -5773,7 +5232,7 @@ Harness.suite("SmartSelection") {
             "the kept rows are the first ones in display order")
     }
 
-    Harness.test("an uncapped selection doesn't claim to be capped") {
+    @Test("an uncapped selection doesn't claim to be capped") func anUncappedSelectionDoesnTClaimToBeCapped() {
         let pool = [candidate("a.com"), candidate("b.com")]
         let result = SmartSelection.neverOpened.select(from: pool, in: .allSenders, now: now)
         expect(!result.wasCapped, "two rows is under the cap")
@@ -5782,7 +5241,7 @@ Harness.suite("SmartSelection") {
 
     // An empty result must not read as an empty screen. Selecting nothing and
     // saying nothing is how a user concludes the menu item is broken.
-    Harness.test("no matches is stated, not silent") {
+    @Test("no matches is stated, not silent") func noMatchesIsStatedNotSilent() {
         let pool = [candidate("a.com", count: 1)]
         let result = SmartSelection.neverOpened.select(from: pool, in: .allSenders, now: now)
         expect(result.ids.isEmpty, "nothing matched")
@@ -5795,7 +5254,7 @@ Harness.suite("SmartSelection") {
     // AC #4. "Ask before unsubscribing" is a preference about a selection the
     // user built row by row. A rule-filled selection has never been looked at,
     // so the confirm sheet is the first sight of it and cannot be skipped.
-    Harness.test("a rule-filled selection always reaches the confirm step") {
+    @Test("a rule-filled selection always reaches the confirm step") func aRuleFilledSelectionAlwaysReachesTheConfirmStep() {
         expect(
             UnsubscribeConfirmation.requiresPrompt(
                 origin: .user, askBeforeUnsubscribe: false, selectionWasAutomatic: true),
@@ -5812,7 +5271,7 @@ Harness.suite("SmartSelection") {
 
     // Every rule is offered in a menu; a case added without a title or a help
     // line would ship a blank menu item.
-    Harness.test("every rule can describe itself") {
+    @Test("every rule can describe itself") func everyRuleCanDescribeItself() {
         for rule in SmartSelection.allCases {
             expect(!rule.title.isEmpty, "\(rule.rawValue) has a title")
             expect(!rule.help.isEmpty, "\(rule.rawValue) explains its rule")
@@ -5820,32 +5279,18 @@ Harness.suite("SmartSelection") {
     }
 }
 
-// MARK: - Undo of a trash restores where the message came from (TASK-8)
-
-// A message identified well enough for undo: undo finds messages again by
-// Message-ID, because a UID is only meaningful inside one mailbox.
-func trashedMessage(_ uid: UInt32, messageId: String) -> EmailMessage {
-    EmailMessage(
-        uid: MessageUID(uid),
-        sender: EmailSender(header: "News <news@ex.com>"),
-        subject: "s",
-        receivedAt: Date(timeIntervalSince1970: 1_700_000_000),
-        isUnread: false,
-        unsubscribe: ListUnsubscribe(header: "<https://ex.com/u>"),
-        messageId: messageId)
-}
-
-Harness.suite("Trash origin") {
+@Suite("Trash origin")
+struct TrashOriginTests {
     // Gmail says "in the inbox" with a label, not a folder. Everything else in
     // the label list is decoration as far as this decision goes.
-    Harness.test("a message carrying \\Inbox is not archived") {
+    @Test("a message carrying \\Inbox is not archived") func aMessageCarryingInboxIsNotArchived() {
         expect(!IMAPBackend.isArchived(labels: ["\\Inbox"]), "\\Inbox means the inbox")
         expect(
             !IMAPBackend.isArchived(labels: ["\\Important", "\\Inbox", "Receipts"]),
             "\\Inbox counts however many other labels sit beside it")
     }
 
-    Harness.test("a message without \\Inbox is archived") {
+    @Test("a message without \\Inbox is archived") func aMessageWithoutInboxIsArchived() {
         expect(IMAPBackend.isArchived(labels: []), "no labels at all is archived")
         expect(
             IMAPBackend.isArchived(labels: ["\\Important", "\\Starred"]),
@@ -5862,14 +5307,14 @@ Harness.suite("Trash origin") {
             "an unprefixed 'Inbox' is a user label, not \\Inbox")
     }
 
-    Harness.test("label matching ignores case, as IMAP atoms do") {
+    @Test("label matching ignores case, as IMAP atoms do") func labelMatchingIgnoresCaseAsIMAPAtomsDo() {
         expect(!IMAPBackend.isArchived(labels: ["\\INBOX"]))
         expect(!IMAPBackend.isArchived(labels: ["\\inbox"]))
     }
 
     // The probe is Gmail-only: X-GM-LABELS is a vendor extension, and every
     // other provider answers a tagged BAD.
-    Harness.test("only Gmail hosts are asked for labels") {
+    @Test("only Gmail hosts are asked for labels") func onlyGmailHostsAreAskedForLabels() {
         expect(IMAPBackend.isGmailHost("imap.gmail.com"))
         expect(IMAPBackend.isGmailHost("IMAP.GMAIL.COM"), "hostnames are case-insensitive")
         expect(IMAPBackend.isGmailHost("imap.googlemail.com"))
@@ -5879,11 +5324,12 @@ Harness.suite("Trash origin") {
     }
 }
 
-Harness.suite("Restore plan") {
+@Suite("Restore plan")
+struct RestorePlanTests {
     let inboxMessage = trashedMessage(1, messageId: "<a@ex.com>")
     let archivedMessage = trashedMessage(2, messageId: "<b@ex.com>")
 
-    Harness.test("archived messages are restored apart from inbox ones") {
+    @Test("archived messages are restored apart from inbox ones") func archivedMessagesAreRestoredApartFromInboxOnes() {
         let plan = TrashOutcome.restorePlan(
             for: [inboxMessage, archivedMessage], archived: [MessageUID(2)])
         eq(plan.inbox, ["<a@ex.com>"])
@@ -5892,13 +5338,13 @@ Harness.suite("Restore plan") {
 
     // The default, and every non-Gmail account: nothing is known to be
     // archived, so everything goes back to the inbox — which is where it was.
-    Harness.test("an empty archived set sends everything to the inbox") {
+    @Test("an empty archived set sends everything to the inbox") func anEmptyArchivedSetSendsEverythingToTheInbox() {
         let plan = TrashOutcome.restorePlan(for: [inboxMessage, archivedMessage], archived: [])
         eq(plan.inbox.count, 2)
         expect(plan.archive.isEmpty, "nothing to restore to the archive")
     }
 
-    Harness.test("a message with no Message-ID is not restorable and is dropped") {
+    @Test("a message with no Message-ID is not restorable and is dropped") func aMessageWithNoMessageIDIsNotRestorableAndIsDropped() {
         // Undo can only find a message in Trash by Message-ID. One without a
         // Message-ID must not be counted into either bucket, or the restore
         // would search for the empty string.
@@ -5908,15 +5354,16 @@ Harness.suite("Restore plan") {
         expect(plan.archive.isEmpty)
     }
 
-    Harness.test("an outcome defaults to nothing archived") {
+    @Test("an outcome defaults to nothing archived") func anOutcomeDefaultsToNothingArchived() {
         eq(TrashOutcome(moved: [MessageUID(1)]).archived.count, 0)
     }
 }
 
-Harness.suite("Demo trash") {
+@Suite("Demo trash")
+struct DemoTrashTests {
     // The demo mailbox is entirely inbox, so its undo has nowhere else to put
     // anything — and App Review must not see a restore silently archive mail.
-    asyncTest("the demo backend reports every trashed message as an inbox one") {
+    @Test("the demo backend reports every trashed message as an inbox one") func theDemoBackendReportsEveryTrashedMessageAsAnInboxOne() async {
         let backend = DemoBackend()
         let outcome = try? await backend.trash(
             [MessageUID(1), MessageUID(2)], recordOrigin: true)
@@ -5925,9 +5372,8 @@ Harness.suite("Demo trash") {
     }
 }
 
-// MARK: - Automatic update checks (TASK-9)
-
-Harness.suite("Automatic update checks") {
+@Suite("Automatic update checks")
+struct AutomaticUpdateChecksTests {
     let repo = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()  // NevermoreTests
         .deletingLastPathComponent()  // Tests
@@ -5939,7 +5385,7 @@ Harness.suite("Automatic update checks") {
         try? String(contentsOf: repo.appending(path: path), encoding: .utf8)
     }
 
-    Harness.test("the Settings toggle lives behind canImport(Sparkle)") {
+    @Test("the Settings toggle lives behind canImport(Sparkle)") func theSettingsToggleLivesBehindCanImportSparkle() {
         // The store build cannot show a switch for an updater it does not
         // contain, and a build without Sparkle must still compile — so the
         // section exists in both arms of the conditional, with the control
@@ -5966,7 +5412,7 @@ Harness.suite("Automatic update checks") {
             "and the stub offers no control")
     }
 
-    Harness.test("the privacy policy describes the toggle in both copies") {
+    @Test("the privacy policy describes the toggle in both copies") func thePrivacyPolicyDescribesTheToggleInBothCopies() {
         // PRIVACY.md backs the App Store privacy label and docs/privacy.html is
         // the published copy of it. A claim about update checks that is true in
         // one and not the other is the failure worth catching.
@@ -5985,84 +5431,31 @@ Harness.suite("Automatic update checks") {
     }
 }
 
-// MARK: - Unsubscribe report (TASK-32)
-
-/// A fixed clock, so nothing here depends on when the suite runs.
-let reportNow = Date(timeIntervalSince1970: 1_700_000_000)
-
-func reportMsg(_ uid: UInt32, daysAgo: Double) -> EmailMessage {
-    EmailMessage(
-        uid: MessageUID(uid),
-        sender: EmailSender(header: "Acme <news@acme.com>"),
-        subject: "s",
-        receivedAt: reportNow.addingTimeInterval(-daysAgo * 86400),
-        isUnread: false,
-        unsubscribe: ListUnsubscribe(header: "<https://ex.com/u>"))
-}
-
-func reportRecord(
-    _ key: String = "domain:acme.com",
-    daysAgo: Double,
-    outcome: MessageStore.Outcome = .requested
-) -> MessageStore.UnsubscribeRecord {
-    MessageStore.UnsubscribeRecord(
-        groupKey: key,
-        senderName: "Acme",
-        senderEmail: "news@acme.com",
-        senderDomain: "acme.com",
-        url: nil,
-        attemptedAt: reportNow.addingTimeInterval(-daysAgo * 86400),
-        outcome: outcome)
-}
-
-/// Mail every `every` days, from `from` days ago up to `until` days ago.
-func reportSeries(every: Double, from: Double, until: Double) -> [EmailMessage] {
-    var out: [EmailMessage] = []
-    var d = from
-    var uid: UInt32 = 1
-    while d >= until {
-        out.append(reportMsg(uid, daysAgo: d))
-        uid += 1
-        d -= every
-    }
-    return out
-}
-
-func makeReport(
-    _ records: [MessageStore.UnsubscribeRecord],
-    _ messages: [String: [EmailMessage]] = [:],
-    windowDays: Double = 30
-) -> UnsubscribePeriodReport {
-    UnsubscribePeriodReport.make(
-        records: records,
-        messagesByGroupKey: messages,
-        since: reportNow.addingTimeInterval(-windowDays * 86400),
-        now: reportNow)
-}
-
-Harness.suite("Reappearance rule") {
+@Suite("Reappearance rule")
+struct ReappearanceRuleTests {
     // The one definition of "mailed again", shared by the Reappeared collection,
     // the Unsubscribed log and the report — so they cannot disagree.
-    Harness.test("counts only mail strictly after the attempt") {
+    @Test("counts only mail strictly after the attempt") func countsOnlyMailStrictlyAfterTheAttempt() {
         let messages = [reportMsg(1, daysAgo: 20), reportMsg(2, daysAgo: 5), reportMsg(3, daysAgo: 1)]
         let attempted = reportNow.addingTimeInterval(-10 * 86400)
         expect(Reappearance.hasMailed(since: attempted, in: messages))
         eq(Reappearance.messageCount(since: attempted, in: messages), 2)
     }
-    Harness.test("a message arriving exactly at the attempt is not a reappearance") {
+    @Test("a message arriving exactly at the attempt is not a reappearance") func aMessageArrivingExactlyAtTheAttemptIsNotAReappearance() {
         // The unsubscribe and the message are simultaneous; the mail cannot have
         // been a response to the request, and calling it one would put a sender
         // in Reappeared for the message that was on screen when you acted.
         let attempted = reportNow.addingTimeInterval(-10 * 86400)
         expect(!Reappearance.hasMailed(since: attempted, in: [reportMsg(1, daysAgo: 10)]))
     }
-    Harness.test("no mail is not a reappearance") {
+    @Test("no mail is not a reappearance") func noMailIsNotAReappearance() {
         expect(!Reappearance.hasMailed(since: reportNow, in: []))
     }
 }
 
-Harness.suite("UnsubscribePeriodReport") {
-    Harness.test("reports a sender that kept mailing, with the count") {
+@Suite("UnsubscribePeriodReport")
+struct UnsubscribePeriodReportTests {
+    @Test("reports a sender that kept mailing, with the count") func reportsASenderThatKeptMailingWithTheCount() {
         let report = makeReport(
             [reportRecord(daysAgo: 10)],
             ["domain:acme.com": reportSeries(every: 3, from: 30, until: 1)])
@@ -6071,7 +5464,7 @@ Harness.suite("UnsubscribePeriodReport") {
         eq(report.entries.first?.observation, .mailedAgain(messages: 3))
     }
 
-    Harness.test("mail since the attempt outranks a failed request") {
+    @Test("mail since the attempt outranks a failed request") func mailSinceTheAttemptOutranksAFailedRequest() {
         // A failed request followed by more mail is still a sender who kept
         // mailing — that is the fact, whatever the request did.
         let report = makeReport(
@@ -6081,7 +5474,7 @@ Harness.suite("UnsubscribePeriodReport") {
         eq(report.requestFailedCount, 0)
     }
 
-    Harness.test("a failed request that was followed by silence is not counted as quiet") {
+    @Test("a failed request that was followed by silence is not counted as quiet") func aFailedRequestThatWasFollowedBySilenceIsNotCountedAsQuiet() {
         // Nothing was ever asked, so the silence is not a result. Reporting it
         // as one would credit the app for an unsubscribe that never happened.
         let report = makeReport(
@@ -6092,7 +5485,7 @@ Harness.suite("UnsubscribePeriodReport") {
         expect(report.findings.contains { $0.contains("didn't go through") })
     }
 
-    Harness.test("a sender whose mail is no longer on file is not counted as quiet") {
+    @Test("a sender whose mail is no longer on file is not counted as quiet") func aSenderWhoseMailIsNoLongerOnFileIsNotCountedAsQuiet() {
         // Absence of a mailbox is not absence of mail: their messages may have
         // been trashed. The Reappeared collection treats this as "not
         // reappeared", which must not become "honoured it" in a count.
@@ -6101,7 +5494,7 @@ Harness.suite("UnsubscribePeriodReport") {
         eq(report.quietCount, 0)
     }
 
-    Harness.test("a monthly sender silent for three weeks is too early to say") {
+    @Test("a monthly sender silent for three weeks is too early to say") func aMonthlySenderSilentForThreeWeeksIsTooEarlyToSay() {
         let report = makeReport(
             [reportRecord(daysAgo: 21)],
             ["domain:acme.com": reportSeries(every: 30, from: 180, until: 22)])
@@ -6109,7 +5502,7 @@ Harness.suite("UnsubscribePeriodReport") {
         eq(report.quietCount, 0)
     }
 
-    Harness.test("a monthly sender silent for ten weeks is reported as quiet") {
+    @Test("a monthly sender silent for ten weeks is reported as quiet") func aMonthlySenderSilentForTenWeeksIsReportedAsQuiet() {
         let report = makeReport(
             [reportRecord(daysAgo: 70)],
             ["domain:acme.com": reportSeries(every: 30, from: 300, until: 71)],
@@ -6118,7 +5511,7 @@ Harness.suite("UnsubscribePeriodReport") {
         eq(report.entries.first?.observation, .quiet(days: 70))
     }
 
-    Harness.test("a daily sender silent for three days is still too early") {
+    @Test("a daily sender silent for three days is still too early") func aDailySenderSilentForThreeDaysIsStillTooEarly() {
         // Twice a one-day gap is two days, but two days of silence from anyone
         // is noise. The floor stops the report concluding on a weekend.
         let report = makeReport(
@@ -6127,14 +5520,14 @@ Harness.suite("UnsubscribePeriodReport") {
         eq(report.tooEarlyCount, 1)
     }
 
-    Harness.test("a daily sender silent for a fortnight is quiet") {
+    @Test("a daily sender silent for a fortnight is quiet") func aDailySenderSilentForAFortnightIsQuiet() {
         let report = makeReport(
             [reportRecord(daysAgo: 15)],
             ["domain:acme.com": reportSeries(every: 1, from: 60, until: 16)])
         eq(report.quietCount, 1)
     }
 
-    Harness.test("a rare sender still concludes once the cap is passed") {
+    @Test("a rare sender still concludes once the cap is passed") func aRareSenderStillConcludesOnceTheCapIsPassed() {
         // Twice a quarterly gap would be six months, and the report would never
         // say anything about this sender at all.
         let report = makeReport(
@@ -6144,13 +5537,13 @@ Harness.suite("UnsubscribePeriodReport") {
         eq(report.quietCount, 1)
     }
 
-    Harness.test("a sender with a single earlier message falls back to the floor") {
+    @Test("a sender with a single earlier message falls back to the floor") func aSenderWithASingleEarlierMessageFallsBackToTheFloor() {
         let messages = ["domain:acme.com": [reportMsg(1, daysAgo: 40)]]
         eq(makeReport([reportRecord(daysAgo: 5)], messages).tooEarlyCount, 1)
         eq(makeReport([reportRecord(daysAgo: 20)], messages).quietCount, 1)
     }
 
-    Harness.test("mail sent after the attempt does not set the sender's usual gap") {
+    @Test("mail sent after the attempt does not set the sender's usual gap") func mailSentAfterTheAttemptDoesNotSetTheSenderSUsualGap() {
         // The rhythm is measured from what the sender did before being asked to
         // stop; counting the reappearance mail would let a burst of it shrink
         // the threshold and turn later silence into a conclusion.
@@ -6161,7 +5554,7 @@ Harness.suite("UnsubscribePeriodReport") {
             60 * 86400)
     }
 
-    Harness.test("only unsubscribes inside the window are reported") {
+    @Test("only unsubscribes inside the window are reported") func onlyUnsubscribesInsideTheWindowAreReported() {
         let report = makeReport([
             reportRecord("domain:a.com", daysAgo: 5),
             reportRecord("domain:b.com", daysAgo: 200),
@@ -6170,7 +5563,7 @@ Harness.suite("UnsubscribePeriodReport") {
         eq(report.entries.first?.groupKey, "domain:a.com")
     }
 
-    Harness.test("entries come back newest first") {
+    @Test("entries come back newest first") func entriesComeBackNewestFirst() {
         let report = makeReport([
             reportRecord("domain:a.com", daysAgo: 20),
             reportRecord("domain:b.com", daysAgo: 2),
@@ -6178,7 +5571,7 @@ Harness.suite("UnsubscribePeriodReport") {
         eq(report.entries.map(\.groupKey), ["domain:b.com", "domain:a.com"])
     }
 
-    Harness.test("headline names the window and the count") {
+    @Test("headline names the window and the count") func headlineNamesTheWindowAndTheCount() {
         eq(
             makeReport([reportRecord("domain:a.com", daysAgo: 2), reportRecord("domain:b.com", daysAgo: 3)]).headline,
             "You unsubscribed from 2 senders in the last 30 days.")
@@ -6187,14 +5580,14 @@ Harness.suite("UnsubscribePeriodReport") {
             "You unsubscribed from 1 sender in the last 30 days.")
     }
 
-    Harness.test("an empty window says so and has nothing to report") {
+    @Test("an empty window says so and has nothing to report") func anEmptyWindowSaysSoAndHasNothingToReport() {
         let report = makeReport([])
         expect(report.isEmpty)
         eq(report.headline, "No unsubscribes in the last 30 days.")
         expect(report.findings.isEmpty)
     }
 
-    Harness.test("every finding is stated as an observation about mail") {
+    @Test("every finding is stated as an observation about mail") func everyFindingIsStatedAsAnObservationAboutMail() {
         // The whole point of the report. If it ever claims a sender honoured or
         // respected anything, it is claiming knowledge the app does not have.
         let report = makeReport(
@@ -6222,27 +5615,9 @@ Harness.suite("UnsubscribePeriodReport") {
     }
 }
 
-// MARK: - Authentication-Results parsing (TASK-30)
-
-/// A Gmail header for mail that authenticated cleanly, comments and all.
-let authPassHeader = """
-    mx.google.com;
-           dkim=pass header.i=@substack.com header.s=google header.b=Xy1zAbc;
-           spf=pass (google.com: domain of bounces+1-abc@substack.com designates \
-    209.85.220.41 as permitted sender) smtp.mailfrom="bounces+1-abc@substack.com";
-           dmarc=pass (p=NONE sp=NONE dis=NONE) header.from=substack.com
-    """
-
-/// The shape a cold sender arrives in: nothing lines up, and DMARC says so.
-let authFailHeader = """
-    mx.google.com;
-           spf=softfail (google.com: domain of transitioning sales@coldoutreach.biz does not \
-    designate 45.9.1.2 as permitted sender) smtp.mailfrom=sales@coldoutreach.biz;
-           dmarc=fail (p=NONE sp=NONE dis=NONE) header.from=coldoutreach.biz
-    """
-
-Harness.suite("AuthenticationResults") {
-    Harness.test("reads the authority and all three verdicts out of a Gmail header") {
+@Suite("AuthenticationResults")
+struct AuthenticationResultsTests {
+    @Test("reads the authority and all three verdicts out of a Gmail header") func readsTheAuthorityAndAllThreeVerdictsOutOfAGmailHeader() {
         let auth = AuthenticationResults(header: authPassHeader)
         eq(auth?.authority, "mx.google.com")
         eq(auth?.spf, .pass)
@@ -6255,7 +5630,7 @@ Harness.suite("AuthenticationResults") {
     // The comment Google writes into the SPF clause contains both a semicolon's
     // worth of punctuation and several `=` signs. Splitting before stripping it
     // produces garbage, so this is the case that decides the parser works.
-    Harness.test("a comment full of punctuation does not derail the split") {
+    @Test("a comment full of punctuation does not derail the split") func aCommentFullOfPunctuationDoesNotDerailTheSplit() {
         let auth = AuthenticationResults(header: authFailHeader)
         eq(auth?.spf, .softfail)
         eq(auth?.dmarc, .fail)
@@ -6263,7 +5638,7 @@ Harness.suite("AuthenticationResults") {
         eq(auth?.dkim, nil)
     }
 
-    Harness.test("nested and escaped comment text is removed whole") {
+    @Test("nested and escaped comment text is removed whole") func nestedAndEscapedCommentTextIsRemovedWhole() {
         let auth = AuthenticationResults(
             header: #"mx.a.net; dkim=pass (a (nested; comment=here) tail) header.i=@a.net"#)
         eq(auth?.dkim, .pass)
@@ -6272,7 +5647,7 @@ Harness.suite("AuthenticationResults") {
 
     // A message can carry several signatures, and one verifying is what makes it
     // signed. Reporting the first would call a signed message unsigned.
-    Harness.test("one passing DKIM signature outweighs a failing one, in any order") {
+    @Test("one passing DKIM signature outweighs a failing one, in any order") func onePassingDKIMSignatureOutweighsAFailingOneInAnyOrder() {
         eq(
             AuthenticationResults(
                 header: "mx.a.net; dkim=fail header.i=@list.ex; dkim=pass header.i=@acme.com")?
@@ -6283,20 +5658,20 @@ Harness.suite("AuthenticationResults") {
                 .dkim, .pass)
     }
 
-    Harness.test("DMARC's header.from wins over another method's") {
+    @Test("DMARC's header.from wins over another method's") func dmarcSHeaderFromWinsOverAnotherMethodS() {
         let auth = AuthenticationResults(
             header: "mx.a.net; dkim=pass header.from=bounce.acme.com; "
                 + "dmarc=pass header.from=acme.com")
         eq(auth?.headerFrom, "acme.com")
     }
 
-    Harness.test("a full address in header.from reduces to its domain") {
+    @Test("a full address in header.from reduces to its domain") func aFullAddressInHeaderFromReducesToItsDomain() {
         eq(AuthenticationResults.domainPart("News <hi@Acme.COM>"), "acme.com")
         eq(AuthenticationResults.domainPart("acme.com"), "acme.com")
         eq(AuthenticationResults.domainPart(""), nil)
     }
 
-    Harness.test("a header that asserts nothing is silent rather than failing") {
+    @Test("a header that asserts nothing is silent rather than failing") func aHeaderThatAssertsNothingIsSilentRatherThanFailing() {
         let auth = AuthenticationResults(header: "example.com; none")
         expect(auth != nil, "still parses")
         expect(auth?.isSilent == true)
@@ -6305,14 +5680,14 @@ Harness.suite("AuthenticationResults") {
         expect(AuthenticationResults(header: "example.com; arc=pass")?.isSilent == true)
     }
 
-    Harness.test("nothing to parse gives nothing back") {
+    @Test("nothing to parse gives nothing back") func nothingToParseGivesNothingBack() {
         expect(AuthenticationResults(header: nil) == nil)
         expect(AuthenticationResults(header: "   ") == nil)
     }
 
     // The store keeps the raw header; whatever wrote it may or may not have kept
     // the field name, and a message can carry one header per hop.
-    Harness.test("takes the topmost of several headers, with or without field names") {
+    @Test("takes the topmost of several headers, with or without field names") func takesTheTopmostOfSeveralHeadersWithOrWithoutFieldNames() {
         let both = "Authentication-Results: mx.google.com; dmarc=fail header.from=a.com\n"
             + "Authentication-Results: relay.upstream.net; dmarc=pass header.from=a.com"
         let auth = AuthenticationResults(header: both)
@@ -6321,7 +5696,7 @@ Harness.suite("AuthenticationResults") {
         eq(AuthenticationResults(header: "Authentication-Results: mx.a.net; spf=pass")?.spf, .pass)
     }
 
-    Harness.test("a header folded across lines parses as one") {
+    @Test("a header folded across lines parses as one") func aHeaderFoldedAcrossLinesParsesAsOne() {
         let folded = "mx.google.com;\r\n\tdkim=pass header.i=@acme.com;\r\n\tdmarc=pass "
             + "header.from=acme.com"
         eq(AuthenticationResults(header: folded)?.dmarc, .pass)
@@ -6331,7 +5706,7 @@ Harness.suite("AuthenticationResults") {
     // The distinction the whole feature rests on: "I could not tell" is not
     // "this sender is lying", and treating it as one is how a warning starts
     // firing on ordinary mail.
-    Harness.test("only fail is a failure — not neutral, none, or either error") {
+    @Test("only fail is a failure — not neutral, none, or either error") func onlyFailIsAFailureNotNeutralNoneOrEitherError() {
         expect(AuthMethodResult.fail.isFailure)
         for result: AuthMethodResult in [.pass, .softfail, .neutral, .none, .policy,
                                          .permerror, .temperror] {
@@ -6339,7 +5714,7 @@ Harness.suite("AuthenticationResults") {
         }
     }
 
-    Harness.test("a method spelled with a version number still parses") {
+    @Test("a method spelled with a version number still parses") func aMethodSpelledWithAVersionNumberStillParses() {
         eq(AuthenticationResults.methodResult("dkim/1=pass")?.method, "dkim")
         eq(AuthenticationResults.methodResult("dkim/1=pass")?.result, .pass)
         expect(AuthenticationResults.methodResult("nonsense") == nil)
@@ -6347,46 +5722,18 @@ Harness.suite("AuthenticationResults") {
     }
 }
 
-// MARK: - The verdict a sender's own mail supports (TASK-30)
-
-func trustMessage(
-    _ uid: UInt32,
-    from: String = "news@acme.com",
-    name: String = "Acme",
-    unsubscribe: String? = "<https://acme.com/u?id=1>",
-    auth: String? = nil,
-    listID: String? = nil,
-    daysAgo: Double = 1
-) -> EmailMessage {
-    let host = from.contains("@") ? String(from.split(separator: "@").last!) : ""
-    return EmailMessage(
-        uid: MessageUID(uid),
-        sender: EmailSender(displayName: name, address: from, host: host),
-        subject: "Subject \(uid)",
-        receivedAt: Date().addingTimeInterval(-daysAgo * 86400),
-        isUnread: true,
-        unsubscribe: ListUnsubscribe(header: unsubscribe),
-        deliveredTo: "me@example.com",
-        messageId: "<\(uid)@acme.com>",
-        listID: listID,
-        authentication: AuthenticationResults(header: auth))
-}
-
-func trustGroup(_ messages: [EmailMessage], key: String = "acme.com") -> SenderGroup {
-    SenderGroup(id: GroupID(kind: .domain, key: key), messages: messages)
-}
-
-Harness.suite("SenderTrustVerdict — what the mail provider said") {
+@Suite("SenderTrustVerdict — what the mail provider said")
+struct SenderTrustVerdictWhatTheMailProviderSaidTests {
     // Today's state of the world, and the one that must stay quiet: the sync
     // does not fetch Authentication-Results yet, so every message has none.
-    Harness.test("no Authentication-Results anywhere means nothing is claimed") {
+    @Test("no Authentication-Results anywhere means nothing is claimed") func noAuthenticationResultsAnywhereMeansNothingIsClaimed() {
         let verdict = SenderTrustVerdict.of(trustGroup([trustMessage(1), trustMessage(2)]))
         expect(verdict.isEmpty, "found \(verdict.findings.map(\.title))")
         expect(!verdict.advisesAgainstUnsubscribing)
         expect(verdict.recommendedAction == nil)
     }
 
-    Harness.test("every checked message failing DMARC is a strong finding") {
+    @Test("every checked message failing DMARC is a strong finding") func everyCheckedMessageFailingDMARCIsAStrongFinding() {
         let messages = (1...3).map {
             trustMessage(
                 $0, from: "sales@coldoutreach.biz", name: "Sales",
@@ -6408,7 +5755,7 @@ Harness.suite("SenderTrustVerdict — what the mail provider said") {
     // Forwarded mail fails these checks constantly. A sender who sometimes
     // passes is a sender whose mail sometimes took an odd route, and warning
     // about that is how people learn to click through warnings.
-    Harness.test("a failure among passes is advisory only") {
+    @Test("a failure among passes is advisory only") func aFailureAmongPassesIsAdvisoryOnly() {
         let verdict = SenderTrustVerdict.of(
             trustGroup([
                 trustMessage(1, auth: authPassHeader.replacingOccurrences(
@@ -6425,7 +5772,7 @@ Harness.suite("SenderTrustVerdict — what the mail provider said") {
 
     // Mailing lists rewrite what they forward, which breaks DMARC by design.
     // A list failing is a fact about mailing lists, not about this sender.
-    Harness.test("a mailing list that fails throughout is advisory, not strong") {
+    @Test("a mailing list that fails throughout is advisory, not strong") func aMailingListThatFailsThroughoutIsAdvisoryNotStrong() {
         let messages = (1...3).map {
             trustMessage(
                 $0, from: "list@acme.com",
@@ -6439,14 +5786,14 @@ Harness.suite("SenderTrustVerdict — what the mail provider said") {
     }
 
     // A verdict about somebody else's domain is somebody else's verdict.
-    Harness.test("a verdict whose header.from is a different domain is not read at all") {
+    @Test("a verdict whose header.from is a different domain is not read at all") func aVerdictWhoseHeaderFromIsADifferentDomainIsNotReadAtAll() {
         let wrongDomain = "mx.google.com; dmarc=fail (p=NONE) header.from=forwarder.example"
         let verdict = SenderTrustVerdict.of(
             trustGroup([trustMessage(1, auth: wrongDomain)]))
         expect(verdict.findings.allSatisfy { $0.kind != .authenticationFailed })
     }
 
-    Harness.test("a subdomain in header.from still counts as the same sender") {
+    @Test("a subdomain in header.from still counts as the same sender") func aSubdomainInHeaderFromStillCountsAsTheSameSender() {
         let sub = "mx.google.com; dmarc=fail (p=NONE) header.from=mail.acme.com"
         let verdict = SenderTrustVerdict.of(trustGroup([trustMessage(1, auth: sub)]))
         eq(verdict.findings.first { $0.kind == .authenticationFailed }?.weight, .strong)
@@ -6454,7 +5801,7 @@ Harness.suite("SenderTrustVerdict — what the mail provider said") {
 
     // Without a DMARC verdict, neither SPF nor DKIM means much alone — both
     // break on forwarded mail. Together they are worth reporting.
-    Harness.test("SPF and DKIM are only read together, and only without DMARC") {
+    @Test("SPF and DKIM are only read together, and only without DMARC") func spfAndDKIMAreOnlyReadTogetherAndOnlyWithoutDMARC() {
         func verdict(_ header: String) -> SenderTrustVerdict {
             SenderTrustVerdict.of(trustGroup([trustMessage(1, auth: header)]))
         }
@@ -6467,20 +5814,19 @@ Harness.suite("SenderTrustVerdict — what the mail provider said") {
                 .advisesAgainstUnsubscribing)
     }
 
-    Harness.test("a silent header is not evidence") {
+    @Test("a silent header is not evidence") func aSilentHeaderIsNotEvidence() {
         let verdict = SenderTrustVerdict.of(
             trustGroup([trustMessage(1, auth: "mx.google.com; none")]))
         expect(verdict.findings.allSatisfy { $0.kind != .authenticationFailed })
     }
 }
 
-// MARK: - Where the unsubscribe would actually go (TASK-30 AC #4)
-
-Harness.suite("SenderTrustVerdict — the unsubscribe target") {
+@Suite("SenderTrustVerdict — the unsubscribe target")
+struct SenderTrustVerdictTheUnsubscribeTargetTests {
     // The single most important test in this file. Nearly all legitimate bulk
     // mail unsubscribes on the sending platform's domain, not the brand's. If
     // that produced a warning, the warning would be worthless within a day.
-    Harness.test("a bulk-mail platform's unsubscribe link raises nothing strong") {
+    @Test("a bulk-mail platform's unsubscribe link raises nothing strong") func aBulkMailPlatformSUnsubscribeLinkRaisesNothingStrong() {
         for target in [
             "https://acme.us1.list-manage.com/unsubscribe?u=1&id=2",
             "https://u1234.ct.sendgrid.net/wf/unsubscribe?tok=abc",
@@ -6495,7 +5841,7 @@ Harness.suite("SenderTrustVerdict — the unsubscribe target") {
         }
     }
 
-    Harness.test("a known platform is not even worth an advisory note") {
+    @Test("a known platform is not even worth an advisory note") func aKnownPlatformIsNotEvenWorthAnAdvisoryNote() {
         let verdict = SenderTrustVerdict.of(
             trustGroup([
                 trustMessage(1, unsubscribe: "<https://acme.us1.list-manage.com/unsubscribe?u=1>")
@@ -6503,7 +5849,7 @@ Harness.suite("SenderTrustVerdict — the unsubscribe target") {
         expect(verdict.isEmpty, "found \(verdict.findings.map(\.title))")
     }
 
-    Harness.test("the sender's own domain, or a subdomain of it, raises nothing") {
+    @Test("the sender's own domain, or a subdomain of it, raises nothing") func theSenderSOwnDomainOrASubdomainOfItRaisesNothing() {
         for target in ["https://acme.com/u", "https://email.acme.com/u", "https://a.b.acme.com/u"] {
             let verdict = SenderTrustVerdict.of(
                 trustGroup([trustMessage(1, unsubscribe: "<\(target)>")]))
@@ -6511,13 +5857,13 @@ Harness.suite("SenderTrustVerdict — the unsubscribe target") {
         }
     }
 
-    Harness.test("the same brand on another public suffix is the same brand") {
+    @Test("the same brand on another public suffix is the same brand") func theSameBrandOnAnotherPublicSuffixIsTheSameBrand() {
         let verdict = SenderTrustVerdict.of(
             trustGroup([trustMessage(1, unsubscribe: "<https://acme.co.uk/u>")]))
         expect(verdict.isEmpty, "found \(verdict.findings.map(\.title))")
     }
 
-    Harness.test("a mailing list's own domain explains its unsubscribe target") {
+    @Test("a mailing list's own domain explains its unsubscribe target") func aMailingListSOwnDomainExplainsItsUnsubscribeTarget() {
         let verdict = SenderTrustVerdict.of(
             trustGroup([
                 trustMessage(
@@ -6530,7 +5876,7 @@ Harness.suite("SenderTrustVerdict — the unsubscribe target") {
     // AC #4. Advisory and never more: the list of platforms above will never be
     // complete, so an unrecognised one has to read as "have a look" rather than
     // as an accusation.
-    Harness.test("an unexplained third-party target is flagged, and only advisory") {
+    @Test("an unexplained third-party target is flagged, and only advisory") func anUnexplainedThirdPartyTargetIsFlaggedAndOnlyAdvisory() {
         let verdict = SenderTrustVerdict.of(
             trustGroup([trustMessage(1, unsubscribe: "<https://tracking-partner.xyz/u?id=9>")]))
         let finding = verdict.findings.first { $0.kind == .unrelatedUnsubscribeTarget }
@@ -6543,14 +5889,14 @@ Harness.suite("SenderTrustVerdict — the unsubscribe target") {
         expect(finding?.detail.contains("That is normal") == true)
     }
 
-    Harness.test("a shortened unsubscribe link is strong") {
+    @Test("a shortened unsubscribe link is strong") func aShortenedUnsubscribeLinkIsStrong() {
         let verdict = SenderTrustVerdict.of(
             trustGroup([trustMessage(1, unsubscribe: "<https://bit.ly/3xYz>")]))
         eq(verdict.headline?.kind, .shortenedUnsubscribeTarget)
         eq(verdict.recommendedAction, .ignore)
     }
 
-    Harness.test("an unsubscribe link at a bare IP address is strong") {
+    @Test("an unsubscribe link at a bare IP address is strong") func anUnsubscribeLinkAtABareIPAddressIsStrong() {
         for target in ["https://45.9.1.2/unsub", "https://[2001:db8::1]/unsub"] {
             let verdict = SenderTrustVerdict.of(
                 trustGroup([trustMessage(1, unsubscribe: "<\(target)>")]))
@@ -6561,7 +5907,7 @@ Harness.suite("SenderTrustVerdict — the unsubscribe target") {
         expect(SenderTrustVerdict.isBareAddress("45.9.1.2"))
     }
 
-    Harness.test("an unsubscribe reply addressed to a free consumer mailbox is strong") {
+    @Test("an unsubscribe reply addressed to a free consumer mailbox is strong") func anUnsubscribeReplyAddressedToAFreeConsumerMailboxIsStrong() {
         let verdict = SenderTrustVerdict.of(
             trustGroup([
                 trustMessage(1, unsubscribe: "<mailto:leadgen.dave@gmail.com?subject=stop>")
@@ -6571,7 +5917,7 @@ Harness.suite("SenderTrustVerdict — the unsubscribe target") {
         expect(verdict.headline?.detail.contains("leadgen.dave@gmail.com") == true)
     }
 
-    Harness.test("a mailto at the sender's own domain is the ordinary case") {
+    @Test("a mailto at the sender's own domain is the ordinary case") func aMailtoAtTheSenderSOwnDomainIsTheOrdinaryCase() {
         let verdict = SenderTrustVerdict.of(
             trustGroup([trustMessage(1, unsubscribe: "<mailto:unsub@acme.com?subject=stop>")]))
         expect(verdict.isEmpty, "found \(verdict.findings.map(\.title))")
@@ -6579,7 +5925,7 @@ Harness.suite("SenderTrustVerdict — the unsubscribe target") {
 
     // The app acts on the newest message that has a target, so that is the
     // message the finding has to describe.
-    Harness.test("the target examined is the one the app would actually use") {
+    @Test("the target examined is the one the app would actually use") func theTargetExaminedIsTheOneTheAppWouldActuallyUse() {
         let verdict = SenderTrustVerdict.of(
             trustGroup([
                 trustMessage(1, unsubscribe: "<https://bit.ly/new>", daysAgo: 1),
@@ -6588,15 +5934,14 @@ Harness.suite("SenderTrustVerdict — the unsubscribe target") {
         eq(verdict.headline?.kind, .shortenedUnsubscribeTarget)
     }
 
-    Harness.test("a sender with nothing to unsubscribe from raises nothing") {
+    @Test("a sender with nothing to unsubscribe from raises nothing") func aSenderWithNothingToUnsubscribeFromRaisesNothing() {
         let verdict = SenderTrustVerdict.of(trustGroup([trustMessage(1, unsubscribe: nil)]))
         expect(verdict.isEmpty)
     }
 }
 
-// MARK: - Whose recommendation wins the badge (TASK-52 left this open)
-
-Harness.suite("SenderTrustVerdict.recommendation(given:)") {
+@Suite("SenderTrustVerdict.recommendation(given:)")
+struct SenderTrustVerdictRecommendationGivenTests {
     let strong = SenderTrustVerdict(findings: [
         TrustFinding(
             kind: .authenticationFailed, weight: .strong, title: "t", detail: "d")
@@ -6606,7 +5951,7 @@ Harness.suite("SenderTrustVerdict.recommendation(given:)") {
             kind: .unrelatedUnsubscribeTarget, weight: .advisory, title: "t", detail: "d")
     ])
 
-    Harness.test("the app's evidence vetoes an unsubscribe the agent asked for") {
+    @Test("the app's evidence vetoes an unsubscribe the agent asked for") func theAppSEvidenceVetoesAnUnsubscribeTheAgentAskedFor() {
         eq(strong.recommendation(given: .unsubscribe), .ignore)
         // And for a sender no agent ever looked at, which is most of them.
         eq(strong.recommendation(given: nil), .ignore)
@@ -6616,13 +5961,13 @@ Harness.suite("SenderTrustVerdict.recommendation(given:)") {
     // A spammer publishing SPF and DKIM for their own throwaway domain passes
     // DMARC first time. An agent that read the content and said "cold outreach"
     // knows something the headers cannot show.
-    Harness.test("a clean read never talks an agent out of ignoring a sender") {
+    @Test("a clean read never talks an agent out of ignoring a sender") func aCleanReadNeverTalksAnAgentOutOfIgnoringASender() {
         eq(SenderTrustVerdict.none.recommendation(given: .ignore), .ignore)
         eq(SenderTrustVerdict.none.recommendation(given: .trash), .trash)
         eq(advisoryOnly.recommendation(given: .ignore), .ignore)
     }
 
-    Harness.test("a clean read leaves an unsubscribe alone") {
+    @Test("a clean read leaves an unsubscribe alone") func aCleanReadLeavesAnUnsubscribeAlone() {
         eq(SenderTrustVerdict.none.recommendation(given: .unsubscribe), .unsubscribe)
         eq(SenderTrustVerdict.none.recommendation(given: nil), .unsubscribe)
         eq(advisoryOnly.recommendation(given: .unsubscribe), .unsubscribe)
@@ -6630,14 +5975,14 @@ Harness.suite("SenderTrustVerdict.recommendation(given:)") {
 
     // The verdict only ever argues against exposure. It has no evidence that
     // any sender is a genuine subscription, so it must never upgrade anything.
-    Harness.test("the verdict can veto an unsubscribe and can never mint one") {
+    @Test("the verdict can veto an unsubscribe and can never mint one") func theVerdictCanVetoAnUnsubscribeAndCanNeverMintOne() {
         for stated: RecommendedAction in [.ignore, .trash] {
             eq(strong.recommendation(given: stated), stated)
         }
         expect(SenderTrustVerdict.none.recommendedAction == nil)
     }
 
-    Harness.test("only a strong finding is allowed to change anything") {
+    @Test("only a strong finding is allowed to change anything") func onlyAStrongFindingIsAllowedToChangeAnything() {
         expect(!advisoryOnly.advisesAgainstUnsubscribing)
         expect(advisoryOnly.recommendedAction == nil)
         expect(advisoryOnly.headline == nil)
@@ -6645,9 +5990,8 @@ Harness.suite("SenderTrustVerdict.recommendation(given:)") {
     }
 }
 
-// MARK: - The one dialog both objections share (TASK-30 + TASK-52)
-
-Harness.suite("UnsubscribeExposureWarning") {
+@Suite("UnsubscribeExposureWarning")
+struct UnsubscribeExposureWarningTests {
     let agentObjection = UnsubscribeObjection(
         senderName: "Growth Partners",
         recommendation: .ignore,
@@ -6659,7 +6003,7 @@ Harness.suite("UnsubscribeExposureWarning") {
         reason: "Your mail provider could not verify this sender",
         source: .mailProvider)
 
-    Harness.test("an agent-only set keeps the wording TASK-52 settled on") {
+    @Test("an agent-only set keeps the wording TASK-52 settled on") func anAgentOnlySetKeepsTheWordingTASK52SettledOn() {
         eq(
             UnsubscribeExposureWarning.title(for: [agentObjection]),
             ProposalOverrideWarning.title(count: 1))
@@ -6667,7 +6011,7 @@ Harness.suite("UnsubscribeExposureWarning") {
 
     // "Your provider could not verify them" would be a lie about a shortened
     // link, so anything the app found gets wording that fits every finding.
-    Harness.test("anything the app found gets wording that fits every finding") {
+    @Test("anything the app found gets wording that fits every finding") func anythingTheAppFoundGetsWordingThatFitsEveryFinding() {
         let title = UnsubscribeExposureWarning.title(for: [providerObjection])
         expect(title.contains("a reason not to unsubscribe"))
         eq(
@@ -6675,7 +6019,7 @@ Harness.suite("UnsubscribeExposureWarning") {
             "There are reasons not to unsubscribe from 2 of these senders")
     }
 
-    Harness.test("every sender is named, with its reason verbatim and who gave it") {
+    @Test("every sender is named, with its reason verbatim and who gave it") func everySenderIsNamedWithItsReasonVerbatimAndWhoGaveIt() {
         let message = UnsubscribeExposureWarning.message(
             for: [agentObjection, providerObjection])
         expect(message.contains("Growth Partners"))
@@ -6687,7 +6031,7 @@ Harness.suite("UnsubscribeExposureWarning") {
         expect(message.contains("Nevermore, from the message headers"))
     }
 
-    Harness.test("the closing paragraph is shared with TASK-52's dialog, not copied") {
+    @Test("the closing paragraph is shared with TASK-52's dialog, not copied") func theClosingParagraphIsSharedWithTASK52SDialogNotCopied() {
         expect(
             UnsubscribeExposureWarning.message(for: [providerObjection])
                 .contains(ProposalOverrideWarning.closingParagraph))
@@ -6701,20 +6045,19 @@ Harness.suite("UnsubscribeExposureWarning") {
     }
 }
 
-// MARK: - Storing it, and the switch that is not on yet (TASK-30 AC #1)
-
-Harness.suite("Authentication-Results storage and fetch") {
+@Suite("Authentication-Results storage and fetch")
+struct AuthenticationResultsStorageAndFetchTests {
     // Stated as a test rather than a comment, because the honest claim about
     // this feature is "everything but the fetch". TASK-36 measures the cost and
     // flips this; until then a passing suite must not imply the app is asking
     // for the field.
-    Harness.test("the sync does not ask for Authentication-Results yet") {
+    @Test("the sync does not ask for Authentication-Results yet") func theSyncDoesNotAskForAuthenticationResultsYet() {
         expect(!SyncHeaderFields.fetchesAuthenticationResults)
         expect(SyncHeaderFields.optional.isEmpty)
         eq(SyncHeaderFields.authenticationResults, "Authentication-Results")
     }
 
-    Harness.test("the raw header survives a store round-trip and re-parses") {
+    @Test("the raw header survives a store round-trip and re-parses") func theRawHeaderSurvivesAStoreRoundTripAndReParses() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([trustMessage(1, auth: authFailHeader)])
@@ -6725,7 +6068,7 @@ Harness.suite("Authentication-Results storage and fetch") {
         } catch { expect(false, "threw: \(error)") }
     }
 
-    Harness.test("a message with no header stores and reads back as having none") {
+    @Test("a message with no header stores and reads back as having none") func aMessageWithNoHeaderStoresAndReadsBackAsHavingNone() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([trustMessage(1)])
@@ -6736,7 +6079,7 @@ Harness.suite("Authentication-Results storage and fetch") {
     // The sync supplies NULL for this column whenever the switch is off, and the
     // ordinary upsert rule — last write wins — would then erase a verdict
     // already on file the first time anyone re-synced.
-    Harness.test("a re-sync without the header keeps the verdict already stored") {
+    @Test("a re-sync without the header keeps the verdict already stored") func aReSyncWithoutTheHeaderKeepsTheVerdictAlreadyStored() {
         do {
             let store = try MessageStore.inMemory()
             try store.upsert([trustMessage(1, auth: authFailHeader)])
@@ -6745,5 +6088,3 @@ Harness.suite("Authentication-Results storage and fetch") {
         } catch { expect(false, "threw: \(error)") }
     }
 }
-
-exit(Harness.finish())

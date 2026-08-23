@@ -200,7 +200,7 @@ Every step is verifiable — do not proceed past a red one.
    — clean. (The bare `swift build` in the README fails without this on a
    machine whose `xcode-select` points at CommandLineTools; the SwiftUI macro
    plugins aren't in that toolchain.)
-3. `swift run nevermore-tests` — **all pass**. Currently 70/70.
+3. `swift test` — **all pass**. Currently 479 tests.
 4. Update `CHANGELOG.md`: move `Unreleased` items under the new version and
    date.
 5. Update `Packages/NevermoreKit/VERSION`.

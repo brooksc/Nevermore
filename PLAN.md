@@ -344,12 +344,14 @@ Shipped since this plan was written, and not described above:
 - **Release tooling** — `VERSION`, commit-count build numbers, a pre-migration
   database backup, and a version/tag guard in `notarize.sh`.
 
-**Testing note:** tests run as an executable (`swift run nevermore-tests`) with
-a small harness, not a `.testTarget`. SwiftPM builds test targets as `.xctest`
-bundles on macOS, which needs XCTest and `_TestingInterop` from a full Xcode
-install; neither is in Command Line Tools. Worth converting to swift-testing
-alongside the Xcode app target that the Mac App Store requires — see
-[MAS-RELEASE.md](MAS-RELEASE.md).
+**Testing note:** tests ran as an executable (`swift run nevermore-tests`) with
+a small harness for most of the project's life, because SwiftPM builds test
+targets as `.xctest` bundles on macOS, which needs XCTest and `_TestingInterop`
+from a full Xcode install rather than Command Line Tools. That reasoning had
+already lapsed by the time it was acted on: `NevermoreApp` needs the macOS SDK,
+so the package never built on Command Line Tools alone either way. TASK-19
+converted the suite to swift-testing in a real `.testTarget`; it runs with
+`swift test`.
 
 **Xcode is required** for the SwiftUI app; Command Line Tools alone cannot
 build it. `swift build` fails without `DEVELOPER_DIR` pointing at Xcode.

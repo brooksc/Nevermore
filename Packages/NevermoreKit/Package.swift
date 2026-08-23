@@ -7,7 +7,6 @@ let package = Package(
     products: [
         .library(name: "NevermoreKit", targets: ["NevermoreKit"]),
         .executable(name: "nevermore-probe", targets: ["Probe"]),
-        .executable(name: "nevermore-tests", targets: ["NevermoreTests"]),
         .executable(name: "NevermoreApp", targets: ["NevermoreApp"]),
         // The MCP bridge (TASK-44). A separate executable product, and deliberately
         // not a dependency of anything: the Mac App Store target in Project.swift
@@ -50,11 +49,13 @@ let package = Package(
             dependencies: ["NevermoreKit"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
-        // Tests are an executable, not a .testTarget: SwiftPM builds test targets
-        // as .xctest bundles on macOS, which needs XCTest/_TestingInterop from a
-        // full Xcode install. This runs anywhere `swift build` does.
-        // Convert to swift-testing when Xcode becomes a hard requirement (M5).
-        .executableTarget(
+        // A real .testTarget, run with `swift test`. It builds as an .xctest
+        // bundle needing XCTest/_TestingInterop from a full Xcode, which used to
+        // be the reason this was a plain executable with a hand-rolled harness.
+        // That reason expired: NevermoreApp already cannot build without Xcode,
+        // so the package as a whole never built on Command Line Tools alone.
+        // Being a test target is what buys `@testable import` (TASK-19).
+        .testTarget(
             name: "NevermoreTests",
             // SwiftMail is declared, not just inherited through NevermoreKit:
             // IMAPBackend.matched(_:) is stated in SwiftMail's types, so the

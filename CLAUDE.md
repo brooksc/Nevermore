@@ -16,7 +16,7 @@ Tuist manifest for the App Store target.
 ./run                             # build (debug, host arch) and launch the app
 cd Packages/NevermoreKit
 swift build                       # build everything
-swift run nevermore-tests         # the test suite — 117 tests as of 1.0.0
+swift test                        # the test suite — 479 tests
 swift run nevermore-probe         # CLI harness against a real mailbox, no UI
 ./make-app.sh release             # signed Nevermore.app
 ./make-dmg.sh --notarize          # notarized, stapled DMG
@@ -25,12 +25,32 @@ swift run nevermore-probe         # CLI harness against a real mailbox, no UI
 `./run` launches a GUI app on a machine shared with the user — ask before
 running it.
 
-**Tests are an executable, not a `.testTarget`.** `swift test` is useless here.
-SwiftPM builds test targets as `.xctest` bundles needing XCTest from a full
-Xcode; the harness in `Tests/NevermoreTests/main.swift` runs anywhere
-`swift build` does. Add cases with `Harness.suite("…") { Harness.test("…") { … } }`
-and the `expect` / `eq` helpers at the top of that file. Converting to
-swift-testing is TASK-19.
+**Tests use swift-testing in a real `.testTarget`** (TASK-19; they were an
+executable with a hand-rolled harness until then). `Tests/NevermoreTests/`
+holds `Suites.swift` — 76 `@Suite` structs — and `TestSupport.swift` for the
+shared fixtures. Add a case as `@Test("what it should do") func name() { … }`
+inside the relevant `@Suite`, `async` if the body awaits.
+
+Assertions go through the `expect` / `eq` helpers in `TestSupport.swift` rather
+than bare `#expect`. They record a non-fatal issue and carry on, and `eq`
+prints expected/got. Bare `#expect` is fine for new code where its expression
+capture helps.
+
+The target uses `@testable import NevermoreKit`, so tests reach internal
+symbols — nothing needs to be made `public` for a test's benefit.
+
+The suites that bind loopback ports 8775-8779 or stand up a real socket are
+nested under one `@Suite(.serialized) struct NetworkBound`, which is what stops
+them racing each other now that everything else runs in parallel. A suite that
+touches those ports belongs in there. They still fail if the app itself is
+running and holding a port.
+
+`.serialized` is doing more than avoiding port clashes: `runAsync` in
+`TestSupport.swift` blocks a cooperative-pool thread, so two concurrent calls
+deadlock the whole run — it hangs rather than failing. Every caller is inside
+`NetworkBound`, and that is what makes it safe. **Don't call `runAsync` from a
+suite outside `NetworkBound`**; write `@Test … async` and `await` directly.
+TASK-54 removes the hazard properly.
 
 **Xcode is required** for `NevermoreApp` — Command Line Tools alone cannot
 build it. `swift build` fails unless `DEVELOPER_DIR` points at Xcode.

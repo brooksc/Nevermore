@@ -224,15 +224,16 @@ public actor IMAPBackend: MailBackend {
     /// reading the way it always did — an absent answer must never be mistaken
     /// for an unfinished one.
     ///
-    /// Public and separate so a test can pin both directions, following
-    /// `NevermoreServer.listenerParameters()`. Nothing outside NevermoreKit has
-    /// a reason to call it, and it is the only public signature here that names
-    /// a SwiftMail type — but the alternative is a rule with no test, and the
-    /// two plausible "simplifications" of this line (`result.all!`, or treating
-    /// `nil` as an error) both fail the same way: discovery returns fewer
-    /// messages, sync reports success, and nobody finds out. That is worth one
-    /// symbol of API surface.
-    public static func matched(_ result: ExtendedSearchResult<UID>) -> UIDSet {
+    /// Separate so a test can pin both directions. The two plausible
+    /// "simplifications" of this line (`result.all!`, or treating `nil` as an
+    /// error) both fail the same way: discovery returns fewer messages, sync
+    /// reports success, and nobody finds out.
+    ///
+    /// It used to be `public` purely to be reachable from the test executable,
+    /// which made it the only public signature in the kit naming a SwiftMail
+    /// type. The suite is a real test target now, so `@testable import` reaches
+    /// it and the API surface goes back to nothing (TASK-19).
+    static func matched(_ result: ExtendedSearchResult<UID>) -> UIDSet {
         result.all ?? UIDSet()
     }
 
