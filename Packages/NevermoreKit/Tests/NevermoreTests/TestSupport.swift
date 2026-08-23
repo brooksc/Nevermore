@@ -150,41 +150,46 @@ func decisionSummary(
 
 // MARK: - Loopback HTTP server
 
-// Runs an async body from a synchronous test and blocks until it finishes.
-//
-// DANGER, and the reason TASK-54 exists: this blocks a cooperative-pool thread
-// while waiting on a Task that needs that same pool. Two of these running at
-// once can starve the pool and wedge the entire run — not a failure, a hang
-// with nothing reported.
-//
-// The old harness ran every test sequentially, so it could not happen. Under
-// swift-testing it can, and does: removing `.serialized` from `NetworkBound`
-// hung the suite, with two `Local server lifecycle` tests both parked in
-// `done.wait()` below.
-//
-// What keeps it safe today is that every caller is inside `NetworkBound`, whose
-// `.serialized` trait means only one can block at a time. **Do not call
-// `runAsync` from a suite outside `NetworkBound`.** Write `@Test ... async` and
-// `await` directly instead — which is what TASK-54 will convert these to,
-// deleting this function.
-final class ResultBox<T>: @unchecked Sendable {
+/// Waits for a callback-delivered event without parking the calling thread.
+///
+/// `DispatchSemaphore.wait()` was how the network fixtures used to wait for an
+/// `NWListener` to report `.ready`. That is the same hazard TASK-54 removed from
+/// `runAsync`: called from an `async` test it blocks a cooperative-pool thread,
+/// and once these suites ran in parallel enough of them blocked at once that the
+/// listeners could not reach `.ready` inside their own timeout — every network
+/// test failing with "could not start stub origin".
+///
+/// `signal()` may be called any number of times, from any thread, before or
+/// after `wait`; only the first one counts.
+final class AsyncGate: @unchecked Sendable {
     private let lock = NSLock()
-    private var stored: T?
-    var value: T? {
-        get { lock.withLock { stored } }
-        set { lock.withLock { stored = newValue } }
-    }
-}
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var fired = false
 
-func runAsync<T: Sendable>(_ body: @escaping @Sendable () async -> T) -> T {
-    let box = ResultBox<T>()
-    let done = DispatchSemaphore(value: 0)
-    Task {
-        box.value = await body()
-        done.signal()
+    func signal() {
+        let waiter: CheckedContinuation<Void, Never>? = lock.withLock {
+            guard !fired else { return nil }
+            fired = true
+            defer { continuation = nil }
+            return continuation
+        }
+        waiter?.resume()
     }
-    done.wait()
-    return box.value!
+
+    /// Returns when `signal()` arrives or `timeout` elapses, whichever is first.
+    func wait(timeout: TimeInterval) async {
+        await withCheckedContinuation { (waiter: CheckedContinuation<Void, Never>) in
+            let alreadyFired: Bool = lock.withLock {
+                if fired { return true }
+                continuation = waiter
+                return false
+            }
+            if alreadyFired { return waiter.resume() }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
+                self?.signal()
+            }
+        }
+    }
 }
 
 /// A real listener occupying a contract port, so the server has to deal with it the way it would in
@@ -196,27 +201,31 @@ final class HeldPort {
     /// Wait for `.cancelled` before returning. `NWListener.cancel()` returns before the OS has
     /// released the port, so a test that merely cancels leaves the next one binding a port that is
     /// still occupied — which shows up as an unrelated test failing intermittently.
-    func release() {
-        let done = DispatchSemaphore(value: 0)
+    ///
+    /// `async` for the same reason `StubHTTPServer.start` is: a semaphore here
+    /// parks a cooperative-pool thread. See `AsyncGate`.
+    func release() async {
+        let gate = AsyncGate()
         listener.stateUpdateHandler = { state in
-            if case .cancelled = state { done.signal() }
+            if case .cancelled = state { gate.signal() }
         }
         listener.cancel()
-        _ = done.wait(timeout: .now() + 3)
+        await gate.wait(timeout: 3)
     }
 }
 
-func holdPort(_ port: UInt16) -> HeldPort? {
+func holdPort(_ port: UInt16) async -> HeldPort? {
     guard let nwPort = NWEndpoint.Port(rawValue: port),
           let listener = try? NWListener(using: NevermoreServer.listenerParameters(), on: nwPort)
     else { return nil }
-    let ready = DispatchSemaphore(value: 0)
+    let gate = AsyncGate()
     listener.stateUpdateHandler = { state in
-        if case .ready = state { ready.signal() }
+        if case .ready = state { gate.signal() }
     }
     listener.newConnectionHandler = { $0.cancel() }
     listener.start(queue: .global())
-    guard ready.wait(timeout: .now() + 3) == .success else {
+    await gate.wait(timeout: 3)
+    guard case .ready = listener.state else {
         listener.cancel()
         return nil
     }
@@ -541,34 +550,44 @@ final class StubHTTPServer: @unchecked Sendable {
     /// costs nothing to run and this is the cheapest thing it can do to you.
     private let staysSilent: Bool
 
-    init?(staysSilent: Bool = false, respond: @escaping @Sendable (String) -> String = { _ in "" }) {
-        self.respond = respond
+    private init(
+        listener: NWListener, staysSilent: Bool, respond: @escaping @Sendable (String) -> String
+    ) {
+        self.listener = listener
         self.staysSilent = staysSilent
+        self.respond = respond
+    }
+
+    /// `async` rather than a failable init: reaching `.ready` means waiting on a
+    /// Network.framework callback, and doing that on a `DispatchSemaphore` parks a
+    /// cooperative-pool thread. See `AsyncGate`.
+    static func start(
+        staysSilent: Bool = false, respond: @escaping @Sendable (String) -> String = { _ in "" }
+    ) async -> StubHTTPServer? {
         let params = NWParameters.tcp
         params.requiredInterfaceType = .loopback
         guard let listener = try? NWListener(using: params, on: .any) else { return nil }
-        self.listener = listener
+        let server = StubHTTPServer(listener: listener, staysSilent: staysSilent, respond: respond)
         // Both handlers must be in place before start(), or the listener fails
         // instead of binding.
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.handle(connection)
+        listener.newConnectionHandler = { [weak server] connection in
+            server?.handle(connection)
         }
-        let ready = DispatchSemaphore(value: 0)
+        let gate = AsyncGate()
         listener.stateUpdateHandler = { state in
             switch state {
-            case .ready, .failed, .cancelled, .waiting: ready.signal()
+            case .ready, .failed, .cancelled, .waiting: gate.signal()
             default: break
             }
         }
         listener.start(queue: .global())
-        guard ready.wait(timeout: .now() + 3) == .success,
-              case .ready = listener.state,
-              let bound = listener.port?.rawValue
-        else {
+        await gate.wait(timeout: 3)
+        guard case .ready = listener.state, let bound = listener.port?.rawValue else {
             listener.cancel()
             return nil
         }
-        port = bound
+        server.port = bound
+        return server
     }
 
     private func handle(_ connection: NWConnection) {
@@ -654,11 +673,17 @@ func unreachablePin(_ host: String) -> DestinationGuard.PinnedAddress {
 func send(
     _ client: PinnedHTTPClient, _ method: String, _ urlString: String,
     body: Data? = nil, timeout: TimeInterval = 8
-) -> Result<PinnedHTTPClient.Response, PinnedHTTPClient.Failure> {
-    runAsync {
-        await client.send(
-            method: method, url: URL(string: urlString)!, body: body, timeout: timeout)
-    }
+) async -> Result<PinnedHTTPClient.Response, PinnedHTTPClient.Failure> {
+    await client.send(
+        method: method, url: URL(string: urlString)!, body: body, timeout: timeout)
+}
+
+/// Records the address `UnsubscribeEngine`'s injected `MailSender` was handed, so
+/// a test can assert the mailto fallback actually fired. An actor rather than a
+/// locked box because `MailSender` is already `async`.
+actor MailtoRecorder {
+    private(set) var recipient: String?
+    func record(_ to: String) { recipient = to }
 }
 
 func status(
