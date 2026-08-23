@@ -6760,3 +6760,102 @@ struct TheDemoMailboxHasSizesTests {
         expect(summary.hasPrefix("at least "), summary)
     }
 }
+
+@Suite("The Shortcuts surface admits only local, reversible verbs")
+struct TheShortcutsSurfaceAdmitsOnlyLocalReversibleVerbsTests {
+    // The rule TASK-35 turns on. An MCP client asks a person who is sitting at
+    // the keyboard; a Shortcut can be scheduled, so "ask the user" is not a
+    // safety mechanism there. Anything that reaches a mailbox or a third party
+    // has to stay off this surface, and this is the test that fails when
+    // somebody adds it.
+    @Test("every verb Shortcuts can drive is local and reversible") func everyVerbShortcutsCanDriveIsLocalAndReversible() {
+        for verb in ShortcutsSurface.verbs {
+            expect(verb.isLocalAndReversible, "\(verb.rawValue) is not local and reversible")
+        }
+    }
+
+    @Test("unsubscribe and trash are refused, with a stated reason") func unsubscribeAndTrashAreRefusedWithAStatedReason() {
+        let refused = Set(ShortcutsSurface.refused.map(\.verb))
+        expect(refused.contains("unsubscribe"), "unsubscribe is not listed as refused")
+        expect(refused.contains("trash_sender_messages"), "trash is not listed as refused")
+        for refusal in ShortcutsSurface.refused {
+            // A refusal with no reason is indistinguishable from an oversight,
+            // which is the thing the list exists to prevent.
+            expect(refusal.reason.count > 40, "\(refusal.verb) has no real reason: \(refusal.reason)")
+        }
+    }
+
+    @Test("no verb is both shipped and refused") func noVerbIsBothShippedAndRefused() {
+        let shipped = Set(ShortcutsSurface.verbs.map(\.rawValue))
+        for refusal in ShortcutsSurface.refused {
+            expect(!shipped.contains(refusal.verb), "\(refusal.verb) is on both lists")
+        }
+    }
+
+    @Test("every verb has a title, and no two share one") func everyVerbHasATitleAndNoTwoShareOne() {
+        let titles = ShortcutsSurface.verbs.map(\.title)
+        for title in titles { expect(!title.isEmpty, "a verb has no title") }
+        eq(Set(titles).count, titles.count)
+    }
+
+    @Test("the refusal summary names every refusal") func theRefusalSummaryNamesEveryRefusal() {
+        let summary = ShortcutsSurface.refusalSummary
+        for refusal in ShortcutsSurface.refused {
+            expect(summary.contains(refusal.verb), "\(refusal.verb) missing from the summary")
+            expect(summary.contains(refusal.reason), "\(refusal.verb)'s reason missing")
+        }
+    }
+}
+
+@Suite("Naming a sender in a shortcut")
+struct NamingASenderInAShortcutTests {
+    // The entity picker's rule. Narrower than search_senders on purpose: it
+    // decides which sender an automation acts on, so a subject-line match is
+    // exactly the kind of near-miss it must not make.
+    @Test("an exact name or address outranks a prefix") func anExactNameOrAddressOutranksAPrefix() {
+        eq(SenderMatch.rank("Patagonia", name: "Patagonia", address: "news@patagonia.com"), 0)
+        eq(SenderMatch.rank("news@patagonia.com", name: "Patagonia", address: "news@patagonia.com"), 0)
+        let prefix = SenderMatch.rank("Pata", name: "Patagonia", address: "news@patagonia.com")
+        eq(prefix, 1)
+        expect((prefix ?? 99) > 0, "a prefix ranked as well as an exact match")
+    }
+
+    @Test("a name prefix beats an address prefix, and both beat a substring") func aNamePrefixBeatsAnAddressPrefixAndBothBeatASubstring() {
+        let namePrefix = SenderMatch.rank("Pat", name: "Patagonia", address: "z@example.com")
+        let addressPrefix = SenderMatch.rank("news", name: "Patagonia", address: "news@patagonia.com")
+        let nameSubstring = SenderMatch.rank("agon", name: "Patagonia", address: "z@example.com")
+        let addressSubstring = SenderMatch.rank("tagon", name: "Zed", address: "news@patagonia.com")
+        expect(namePrefix ?? 99 < addressPrefix ?? 99, "name prefix did not win")
+        expect(addressPrefix ?? 99 < nameSubstring ?? 99, "address prefix did not beat a substring")
+        expect(nameSubstring ?? 99 < addressSubstring ?? 99, "name substring did not win")
+    }
+
+    @Test("matching ignores case and surrounding whitespace") func matchingIgnoresCaseAndSurroundingWhitespace() {
+        eq(SenderMatch.rank("  PATAGONIA  ", name: "Patagonia", address: "news@patagonia.com"), 0)
+        eq(SenderMatch.rank("pATa", name: "Patagonia", address: "z@example.com"), 1)
+    }
+
+    @Test("a sender the query does not name is not a match") func aSenderTheQueryDoesNotNameIsNotAMatch() {
+        expect(SenderMatch.rank("Arc'teryx", name: "Patagonia", address: "news@patagonia.com") == nil)
+    }
+
+    @Test("an empty query is the picker opening, not a search finding nothing") func anEmptyQueryIsThePickerOpeningNotASearchFindingNothing() {
+        eq(SenderMatch.rank("", name: "Patagonia", address: "news@patagonia.com"), 0)
+        eq(SenderMatch.rank("   ", name: "Anyone", address: "a@b.com"), 0)
+    }
+
+    @Test("ranking sorts the obvious answer first") func rankingSortsTheObviousAnswerFirst() {
+        let senders = [
+            ("Patagonia Provisions", "provisions@patagonia.com"),
+            ("Patagonia", "news@patagonia.com"),
+            ("REI", "patagonia-deals@rei.com"),
+        ]
+        let ordered = senders
+            .compactMap { s in SenderMatch.rank("Patagonia", name: s.0, address: s.1).map { (s.0, $0) } }
+            .sorted { $0.1 < $1.1 }
+            .map(\.0)
+        eq(ordered.count, 3)
+        eq(ordered.first, "Patagonia")
+        eq(ordered.last, "REI")
+    }
+}

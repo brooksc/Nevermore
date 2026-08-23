@@ -181,7 +181,17 @@ final class AppModel {
     init() {
         accounts = registry.accounts()
         currentAccount = accounts.first
+        Self.current = self
     }
+
+    /// The running app's model, for App Intents (TASK-35).
+    ///
+    /// App Intents are instantiated by the system, not by the view tree, so
+    /// there is no way to hand them the model the way a view is handed it. One
+    /// app, one mailbox, one model, so a single reference is the whole of it.
+    /// Weak: an intent that arrives after teardown gets nil and refuses, rather
+    /// than acting on a mailbox that is no longer open.
+    private(set) static weak var current: AppModel?
 
     // MARK: - Session lifecycle
 
@@ -1457,6 +1467,17 @@ final class AppModel {
     /// sender out of the collection it already sits in.
     private var proposedKeys: Set<String> {
         Set(proposal?.items.map(\.groupKey) ?? [])
+    }
+
+    /// The senders in a collection, whatever is on screen and whatever is typed
+    /// in the search box.
+    ///
+    /// `rows` answers "what is in the window"; this answers "what is in the
+    /// mailbox", which is the question an App Intent is asking (TASK-35). Same
+    /// membership rule either way — `SenderCollection.contains` — so the
+    /// Reappeared a shortcut reports and the Reappeared on screen cannot drift.
+    func groups(in collection: SenderCollection) -> [SenderGroup] {
+        groups.filter { matches($0, in: collection) }
     }
 
     /// True once this sender has any recorded unsubscribe attempt — meaning the
