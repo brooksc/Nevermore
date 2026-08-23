@@ -5925,4 +5925,64 @@ Harness.suite("Demo trash") {
     }
 }
 
+// MARK: - Automatic update checks (TASK-9)
+
+Harness.suite("Automatic update checks") {
+    let repo = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()  // NevermoreTests
+        .deletingLastPathComponent()  // Tests
+        .deletingLastPathComponent()  // NevermoreKit
+        .deletingLastPathComponent()  // Packages
+        .deletingLastPathComponent()  // repo root
+
+    func read(_ path: String) -> String? {
+        try? String(contentsOf: repo.appending(path: path), encoding: .utf8)
+    }
+
+    Harness.test("the Settings toggle lives behind canImport(Sparkle)") {
+        // The store build cannot show a switch for an updater it does not
+        // contain, and a build without Sparkle must still compile — so the
+        // section exists in both arms of the conditional, with the control
+        // itself only in the arm that has an updater to drive.
+        guard let source = read("Packages/NevermoreKit/Sources/NevermoreApp/Updater.swift") else {
+            expect(false, "could not read Updater.swift")
+            return
+        }
+        guard let split = source.range(of: "\n#else") else {
+            expect(false, "Updater.swift no longer has a #else arm")
+            return
+        }
+        let withSparkle = String(source[source.startIndex..<split.lowerBound])
+        let withoutSparkle = String(source[split.upperBound...])
+        expect(withSparkle.contains("#if canImport(Sparkle)"), "gated on the import, not a flag")
+        expect(
+            withSparkle.contains("Toggle(\"Check for updates automatically\""),
+            "the toggle is in the Sparkle arm")
+        expect(
+            withoutSparkle.contains("struct AutomaticUpdatesSection"),
+            "the store build still has a stub to call")
+        expect(
+            !withoutSparkle.contains("Toggle("),
+            "and the stub offers no control")
+    }
+
+    Harness.test("the privacy policy describes the toggle in both copies") {
+        // PRIVACY.md backs the App Store privacy label and docs/privacy.html is
+        // the published copy of it. A claim about update checks that is true in
+        // one and not the other is the failure worth catching.
+        for path in ["PRIVACY.md", "docs/privacy.html"] {
+            guard let text = read(path) else {
+                expect(false, "could not read \(path)")
+                continue
+            }
+            expect(
+                text.contains("Settings ▸ General ▸ Software updates"),
+                "\(path) points at the toggle")
+            expect(
+                !text.contains("The first time you run it, the app asks"),
+                "\(path) no longer claims the first-run prompt is the only answer")
+        }
+    }
+}
+
 exit(Harness.finish())
