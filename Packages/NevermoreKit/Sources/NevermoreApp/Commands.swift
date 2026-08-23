@@ -25,6 +25,25 @@ struct AppCommands: Commands {
                 .keyboardShortcut("r")
         }
 
+        // Edit → Smart Selection. It lives beside Select All rather than in
+        // Actions on purpose: every item here fills the selection and stops.
+        // Nothing in this menu sends, trashes, or hides anything — the user
+        // reviews the rows it picked and then reaches for a verb, which asks
+        // for confirmation exactly as it does for a hand-made selection.
+        CommandGroup(after: .pasteboard) {
+            Divider()
+            Menu("Smart Selection") {
+                ForEach(SmartSelection.allCases) { rule in
+                    Button(rule.title) { model.applySmartSelection(rule) }
+                        .help(rule.help)
+                }
+            }
+            .disabled(model.smartSelectionUnavailability != nil)
+            .help(
+                model.smartSelectionUnavailability
+                    ?? "Fill the selection from the senders on screen. Nothing acts until you say so.")
+        }
+
         // View — collection switching (⌘1…⌘5)
         CommandGroup(after: .toolbar) {
             ForEach(Array(SenderCollection.allCases.enumerated()), id: \.element) { index, item in
