@@ -154,10 +154,13 @@ public actor NevermoreServer {
 
     // MARK: - Listener parameters
 
-    /// The parameters every listener is built with. Public and separate so a test can assert the
-    /// loopback restriction directly — it is the security boundary (see SECURITY MODEL below), and
-    /// a silent change to it would otherwise only show up as LAN exposure in the field.
-    public static func listenerParameters() -> NWParameters {
+    /// The parameters every listener is built with. Separate so a test can assert the loopback
+    /// restriction directly — it is the security boundary (see SECURITY MODEL below), and a silent
+    /// change to it would otherwise only show up as LAN exposure in the field.
+    ///
+    /// Was `public` only so the test executable could reach it; internal again now that the suite
+    /// is a real test target using `@testable import` (TASK-19).
+    static func listenerParameters() -> NWParameters {
         let params = NWParameters.tcp
         // Bind the loopback interface only. Non-loopback peers are refused at the OS networking
         // layer and never reach route handling — this does not rely on client behaviour or on any
