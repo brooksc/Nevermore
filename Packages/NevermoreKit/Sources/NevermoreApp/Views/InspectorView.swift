@@ -73,6 +73,9 @@ struct InspectorView: View {
                 Divider()
                 statistics(group)
 
+                Divider()
+                forecastSection(group)
+
                 if let listID = group.mailingListID {
                     Divider()
                     mailingListNote(listID)
@@ -118,6 +121,51 @@ struct InspectorView: View {
             Text(value).font(.callout.weight(.semibold)).monospacedDigit()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// What this sender will cost going forward (TASK-31).
+    ///
+    /// Placed directly under the statistics, because it is the same four numbers
+    /// read forward instead of backward — and it sits above the buttons for the
+    /// same reason the trust section does: it is an argument about which one to
+    /// press. The backlog in "Messages" is already spent; this is not.
+    ///
+    /// The caveat rides along with the estimate rather than being tucked into a
+    /// tooltip. It is the sentence that keeps the number above it honest, and
+    /// this panel is the only place the number appears.
+    private func forecastSection(_ group: SenderGroup) -> some View {
+        let forecast = SenderForecast.make(for: group, now: .now)
+        return HStack(alignment: .top, spacing: 9) {
+            Image(systemName: forecastIcon(forecast.basis))
+                .font(.system(size: 16)).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(forecast.headline).font(.callout.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(forecast.detail)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let trendNote = forecast.trendNote {
+                    Text(trendNote)
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+                }
+                if forecast.basis == .estimated {
+                    Text(SenderForecast.caveat)
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+                }
+            }
+        }
+    }
+
+    private func forecastIcon(_ basis: SenderForecast.Basis) -> String {
+        switch basis {
+        case .estimated: "chart.line.uptrend.xyaxis"
+        case .lapsed: "moon.zzz"
+        case .notEnoughHistory: "questionmark.circle"
+        }
     }
 
     /// A List-ID means this is a mailing list or notification stream, not a

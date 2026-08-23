@@ -825,6 +825,14 @@ func reportSeries(every: Double, from: Double, until: Double) -> [EmailMessage] 
     return out
 }
 
+// MARK: - Sender forecast (TASK-31)
+
+/// Forecast from a series built with `reportSeries`, against the same fixed
+/// clock the report tests use.
+func makeForecast(_ messages: [EmailMessage]) -> SenderForecast {
+    SenderForecast.make(dates: messages.map(\.receivedAt), now: reportNow)
+}
+
 func makeReport(
     _ records: [MessageStore.UnsubscribeRecord],
     _ messages: [String: [EmailMessage]] = [:],

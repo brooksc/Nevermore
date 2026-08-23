@@ -6229,3 +6229,254 @@ struct UpsertOutcomeTests {
         } catch { expect(false, "threw: \(error)") }
     }
 }
+
+@Suite("SenderCadence")
+struct SenderCadenceTests {
+    @Test("the usual gap is the median, so a burst does not redefine it") func medianNotMean() {
+        // Five messages in an hour inside a monthly series. The mean gap moves;
+        // the middle gap does not, which is the whole reason it is the median.
+        let dates = reportSeries(every: 30, from: 360, until: 30).map(\.receivedAt)
+            + [1.0, 1.02, 1.04, 1.06].map { reportNow.addingTimeInterval(-$0 * 86400) }
+        guard let cadence = SenderCadence.of(dates) else { return expect(false, "no cadence") }
+        eq(Int(cadence.medianGap / 86400), 30)
+    }
+
+    @Test("one message has no rhythm, so silence falls back to the floor") func oneMessage() {
+        guard let cadence = SenderCadence.of([reportNow]) else { return expect(false, "no cadence") }
+        eq(cadence.messages, 1)
+        eq(cadence.silenceThreshold, SenderCadence.minimumSilence)
+    }
+
+    @Test("no dates is no cadence, not a cadence of zero") func noDates() {
+        expect(SenderCadence.of([]) == nil)
+    }
+
+    @Test("silence is bounded at both ends") func bounds() {
+        // A daily sender's doubled gap is two days, which means nothing; a
+        // quarterly sender's is six months, which never concludes.
+        let daily = SenderCadence.of(reportSeries(every: 1, from: 60, until: 0).map(\.receivedAt))
+        eq(daily?.silenceThreshold, SenderCadence.minimumSilence)
+        let rare = SenderCadence.of(reportSeries(every: 90, from: 900, until: 0).map(\.receivedAt))
+        eq(rare?.silenceThreshold, SenderCadence.maximumSilence)
+    }
+
+    @Test("the report's quiet span is this cadence, not a second one") func reportAgrees() {
+        // TASK-32's rule now delegates here. If these ever disagree, the
+        // sidebar and the inspector are describing different senders.
+        let messages = reportSeries(every: 10, from: 300, until: 0)
+        let viaReport = UnsubscribePeriodReport.quietSpan(forMailBefore: reportNow, in: messages)
+        let viaCadence = SenderCadence.of(messages.map(\.receivedAt))?.silenceThreshold
+        eq(viaReport, viaCadence)
+    }
+}
+
+@Suite("SenderForecast — what it will cost you")
+struct SenderForecastTests {
+    @Test("a weekly sender of two years reads as about once a week") func weekly() {
+        let forecast = makeForecast(reportSeries(every: 7, from: 700, until: 0))
+        eq(forecast.basis, .estimated)
+        eq(forecast.perYear, 50)
+        expect(forecast.headline.hasPrefix("About once a week"), forecast.headline)
+        expect(forecast.headline.contains("around 50 more a year"), forecast.headline)
+    }
+
+    @Test("a daily sender reads as roughly one a day") func daily() {
+        let forecast = makeForecast(reportSeries(every: 1, from: 400, until: 0))
+        eq(forecast.basis, .estimated)
+        expect(forecast.headline.hasPrefix("Roughly one a day"), forecast.headline)
+    }
+
+    @Test("a monthly sender reads as about once a month") func monthly() {
+        let forecast = makeForecast(reportSeries(every: 30, from: 720, until: 0))
+        eq(forecast.perYear, 10)
+        expect(forecast.headline.hasPrefix("About once a month"), forecast.headline)
+    }
+
+    // MARK: - The evidence bar
+
+    @Test("four messages in three weeks gets no yearly number") func tooFewMessages() {
+        // 4 messages, 21 days: annualising this says "about 69 a year", which
+        // is a claim about a sender nobody has watched for long enough.
+        let forecast = makeForecast(reportSeries(every: 7, from: 21, until: 0))
+        eq(forecast.basis, .notEnoughHistory)
+        expect(forecast.perYear == nil)
+        eq(forecast.messagesOnFile, 4)
+        eq(forecast.observedDays, 21)
+        expect(forecast.detail.contains("Only 4 messages"), forecast.detail)
+    }
+
+    @Test("plenty of messages over three weeks is still not enough history") func tooShortASpan() {
+        // 21 messages is well past the message bar, and the span is what makes
+        // it worthless: this is one burst, not a rate. Extrapolating it would
+        // claim ~380 a year from three weeks of watching.
+        let forecast = makeForecast(reportSeries(every: 1, from: 20, until: 0))
+        eq(forecast.messagesOnFile, 21)
+        eq(forecast.basis, .notEnoughHistory)
+        expect(forecast.perYear == nil)
+        expect(forecast.headline.contains("Not enough history"), forecast.headline)
+    }
+
+    @Test("a sender with nothing on file is not forecast from nothing") func noMailAtAll() {
+        let forecast = makeForecast([])
+        eq(forecast.basis, .notEnoughHistory)
+        eq(forecast.messagesOnFile, 0)
+        expect(forecast.detail.contains("nothing to estimate from"), forecast.detail)
+    }
+
+    @Test("mail stamped in the future is dropped rather than believed") func futureDates() {
+        let series = reportSeries(every: 7, from: 700, until: 0)
+        let withFuture = series + [reportMsg(9999, daysAgo: -400)]
+        eq(makeForecast(withFuture), makeForecast(series))
+    }
+
+    // MARK: - Senders that have stopped
+
+    @Test("a weekly sender silent for 200 days is not forecast at last year's rate") func lapsed() {
+        let forecast = makeForecast(reportSeries(every: 7, from: 900, until: 200))
+        eq(forecast.basis, .lapsed(days: 200))
+        expect(forecast.perYear == nil)
+        expect(forecast.headline.contains("seems to have stopped"), forecast.headline)
+    }
+
+    @Test("a monthly sender silent for 50 days is inside its own rhythm") func withinRhythm() {
+        // Fifty days from a monthly sender is a late newsletter, not a lapse —
+        // which is exactly the judgement TASK-32's cadence exists to make.
+        let forecast = makeForecast(reportSeries(every: 30, from: 740, until: 50))
+        eq(forecast.basis, .estimated)
+    }
+
+    @Test("the same sender silent for 100 days has lapsed") func pastRhythm() {
+        let forecast = makeForecast(reportSeries(every: 30, from: 790, until: 100))
+        eq(forecast.basis, .lapsed(days: 100))
+    }
+
+    @Test("a quarterly sender lapses at the cap rather than never") func lapsedAtTheCap() {
+        // Twice a quarterly gap is six months. Without the cap this sender
+        // would be "still on schedule" for half a year after it stopped.
+        let forecast = makeForecast(reportSeries(every: 90, from: 1000, until: 100))
+        eq(forecast.basis, .lapsed(days: 100))
+    }
+
+    @Test("too little history outranks looking lapsed") func evidenceBarFirst() {
+        // Three messages a year apart is not a sender that stopped; it is a
+        // sender nobody has a rhythm for. Saying "seems to have stopped" would
+        // be a claim about a rhythm that was never established.
+        let forecast = makeForecast(reportSeries(every: 365, from: 1095, until: 300))
+        eq(forecast.basis, .notEnoughHistory)
+    }
+
+    // MARK: - Bursts
+
+    @Test("a monthly sender with a November burst is labelled as bursty") func bursts() {
+        let dates = reportSeries(every: 30, from: 720, until: 60)
+            + reportSeries(every: 1, from: 30, until: 1)
+        let forecast = makeForecast(dates)
+        eq(forecast.basis, .estimated)
+        expect(forecast.arrivesInBursts)
+        expect(forecast.detail.contains("arrives in bursts"), forecast.detail)
+    }
+
+    @Test("an even sender is not labelled as bursty") func notBursty() {
+        expect(!makeForecast(reportSeries(every: 7, from: 700, until: 0)).arrivesInBursts)
+    }
+
+    @Test("the rate counts the burst, even though the rhythm ignores it") func burstsCount() {
+        // The two questions want opposite estimators. "Has it stopped?" must not
+        // let a burst shrink the usual gap; "how much is coming?" must count the
+        // burst, because a retailer's Black Friday week is mail you will get.
+        let quiet = makeForecast(reportSeries(every: 30, from: 720, until: 60))
+        let withBurst = makeForecast(
+            reportSeries(every: 30, from: 720, until: 60) + reportSeries(every: 1, from: 30, until: 1))
+        expect((withBurst.perYear ?? 0) > (quiet.perYear ?? 0),
+            "\(String(describing: withBurst.perYear)) vs \(String(describing: quiet.perYear))")
+    }
+
+    // MARK: - Cadence changes
+
+    @Test("monthly that became weekly is surfaced as mailing more often") func trendUp() {
+        let dates = reportSeries(every: 30, from: 730, until: 370)
+            + reportSeries(every: 7, from: 360, until: 2)
+        let forecast = makeForecast(dates)
+        guard case .changed(let from, let to) = forecast.trend else {
+            return expect(false, "expected a change, got \(forecast.trend)")
+        }
+        expect(to > from, "\(from) → \(to)")
+        expect(forecast.trendNote?.contains("more often") == true, forecast.trendNote ?? "nil")
+    }
+
+    @Test("weekly that became monthly is surfaced as mailing less often") func trendDown() {
+        let dates = reportSeries(every: 7, from: 730, until: 370)
+            + reportSeries(every: 30, from: 360, until: 2)
+        let forecast = makeForecast(dates)
+        guard case .changed(let from, let to) = forecast.trend else {
+            return expect(false, "expected a change, got \(forecast.trend)")
+        }
+        expect(to < from, "\(from) → \(to)")
+        expect(forecast.trendNote?.contains("less often") == true, forecast.trendNote ?? "nil")
+    }
+
+    @Test("a sender that slowed down has not stopped") func slowedNotStopped() {
+        // Weekly for a year, then monthly for a year, last issue 30 days ago.
+        // Judged against its whole history the median gap is a week, so a
+        // punctual monthly issue reads as a fortnight of ominous silence. The
+        // lapse check looks at the rhythm it is keeping now, not on average.
+        let forecast = makeForecast(
+            reportSeries(every: 7, from: 730, until: 370)
+                + reportSeries(every: 30, from: 360, until: 2))
+        eq(forecast.basis, .estimated)
+    }
+
+    @Test("a steady sender says nothing about a trend") func trendSteady() {
+        // A line that appears on every sender to say "steady" is a line nobody
+        // reads, and then the one that says something is not read either.
+        let forecast = makeForecast(reportSeries(every: 7, from: 700, until: 0))
+        eq(forecast.trend, .steady)
+        expect(forecast.trendNote == nil)
+    }
+
+    @Test("six messages is too few to call a trend either way") func trendUnclear() {
+        let forecast = makeForecast(reportSeries(every: 40, from: 200, until: 0))
+        eq(forecast.basis, .estimated)
+        eq(forecast.trend, .unclear)
+        expect(forecast.trendNote == nil)
+    }
+
+    // MARK: - Wording
+
+    @Test("the yearly figure is rounded coarser the larger it gets") func coarse() {
+        // "156 a year" claims a precision four years of arithmetic on a partial
+        // mailbox cannot carry.
+        eq(SenderForecast.coarse(3.2), 3)
+        eq(SenderForecast.coarse(47), 45)
+        eq(SenderForecast.coarse(156), 160)
+        eq(SenderForecast.coarse(364), 375)
+        eq(SenderForecast.coarse(0.1), 1)
+    }
+
+    @Test("every phrase hedges and none of them promises") func hedged() {
+        let forecasts = [
+            makeForecast(reportSeries(every: 7, from: 700, until: 0)),
+            makeForecast(reportSeries(every: 7, from: 900, until: 200)),
+            makeForecast(reportSeries(every: 7, from: 21, until: 0)),
+            makeForecast(reportSeries(every: 30, from: 730, until: 370)
+                + reportSeries(every: 7, from: 360, until: 2)),
+        ]
+        for forecast in forecasts {
+            expect(forecast.staysWithinTheEvidence, forecast.headline + " / " + forecast.detail)
+        }
+    }
+
+    @Test("the caveat says the mailbox is not the record") func caveat() {
+        // TASK-7 accounts for what discovery drops, and trashed mail is simply
+        // gone. A sender the user has been clearing out reads as quieter than
+        // it is, and only this sentence says so.
+        expect(SenderForecast.caveat.contains("already trashed"), SenderForecast.caveat)
+        expect(SenderForecast.caveat.contains("not a promise"), SenderForecast.caveat)
+    }
+
+    @Test("a group forecasts the same as its message dates") func fromGroup() {
+        let messages = reportSeries(every: 7, from: 700, until: 0)
+        let group = SenderGroup(id: GroupID(kind: .domain, key: "acme.com"), messages: messages)
+        eq(SenderForecast.make(for: group, now: reportNow), makeForecast(messages))
+    }
+}
