@@ -57,12 +57,15 @@ them racing each other now that everything else runs in parallel. A suite that
 touches those ports belongs in there. They still fail if the app itself is
 running and holding a port.
 
-`.serialized` is doing more than avoiding port clashes: `runAsync` in
-`TestSupport.swift` blocks a cooperative-pool thread, so two concurrent calls
-deadlock the whole run — it hangs rather than failing. Every caller is inside
-`NetworkBound`, and that is what makes it safe. **Don't call `runAsync` from a
-suite outside `NetworkBound`**; write `@Test … async` and `await` directly.
-TASK-54 removes the hazard properly.
+`.serialized` now buys only that (TASK-54). It used to be load-bearing for a
+second reason: `runAsync` and the network fixtures waited on
+`DispatchSemaphore`s, which park a cooperative-pool thread, so concurrent
+callers could starve the pool and hang the run with nothing reported. Those
+waits are gone — tests that need async are `@Test … async`, and
+`StubHTTPServer.start` / `holdPort` / `HeldPort.release` are `async`, waiting
+through `AsyncGate` instead of a semaphore. **Never wait on a
+`DispatchSemaphore` from a test body or a fixture a test body calls**; use
+`AsyncGate` in `TestSupport.swift`.
 
 **Xcode is required** for `NevermoreApp` — Command Line Tools alone cannot
 build it. `swift build` fails unless `DEVELOPER_DIR` points at Xcode.

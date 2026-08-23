@@ -11,6 +11,20 @@ import Testing
 // under one `.serialized` parent is what keeps that true: the trait applies
 // to every descendant, so the whole group runs one test at a time while the
 // rest of the suite still runs in parallel around it.
+//
+// TASK-54: the trait now buys *only* that, which is what it always claimed to
+// buy. It used to be load-bearing for a second, invisible reason — `runAsync`
+// and the network fixtures waited on `DispatchSemaphore`s, so two concurrent
+// tests could starve the cooperative pool and wedge the run with nothing
+// reported. Every one of those waits is gone; the suite was run unserialized
+// three times to prove it, completing in ~4.3s with no hang.
+//
+// The port contention is real and unfixed, so the trait stays. `fails closed
+// when every contract port is taken` and `a bind failure is reported with the
+// port range` each occupy all five contract ports for their duration, while
+// `starting binds a contract port`, `stopping releases the port` and `the local
+// server hands the context on` each need to bind one of those same five. Run in
+// parallel they take each other's ports and fail.
 @Suite(.serialized)
 struct NetworkBound {
     @Suite("Server port contract")
@@ -32,93 +46,73 @@ struct NetworkBound {
 
     @Suite("Server port binding")
     struct ServerPortBindingTests {
-        @Test("falls back to the next contract port when the first is taken") func fallsBackToTheNextContractPortWhenTheFirstIsTaken() {
-            guard let held = holdPort(ServerPortContract.firstPort) else {
+        @Test("falls back to the next contract port when the first is taken") func fallsBackToTheNextContractPortWhenTheFirstIsTaken() async {
+            guard let held = await holdPort(ServerPortContract.firstPort) else {
                 expect(false, "could not occupy \(ServerPortContract.firstPort) to set up the test")
                 return
             }
-            defer { held.release() }
 
-            let bound: UInt16 = runAsync {
-                let server = NevermoreServer()
-                try? await server.start()
-                let p = await server.port
-                await server.stop()
-                return p
-            }
+            let server = NevermoreServer()
+            try? await server.start()
+            let bound = await server.port
+            await server.stop()
+            await held.release()
             eq(bound, ServerPortContract.firstPort + 1, "skipped the occupied port")
         }
 
-        @Test("fails closed when every contract port is taken") func failsClosedWhenEveryContractPortIsTaken() {
+        @Test("fails closed when every contract port is taken") func failsClosedWhenEveryContractPortIsTaken() async {
             var held: [HeldPort] = []
             for p in ServerPortContract.discoveryPorts {
-                guard let l = holdPort(p) else { break }
+                guard let l = await holdPort(p) else { break }
                 held.append(l)
             }
             guard held.count == ServerPortContract.discoveryPorts.count else {
-                held.forEach { $0.release() }
+                for h in held { await h.release() }
                 expect(false, "could not occupy all \(ServerPortContract.discoveryPorts.count) ports")
                 return
             }
-            defer { held.forEach { $0.release() } }
 
-            struct Outcome: Sendable {
-                let error: ServerError?
-                let port: UInt16
-                let listening: Bool
-            }
-            let outcome: Outcome = runAsync {
-                let server = NevermoreServer()
-                var caught: ServerError?
-                do { try await server.start() } catch let e as ServerError { caught = e } catch {}
-                let boundPort = await server.port
-                let listening = await server.isListening
-                await server.stop()
-                return Outcome(error: caught, port: boundPort, listening: listening)
-            }
+            let server = NevermoreServer()
+            var caught: ServerError?
+            do { try await server.start() } catch let e as ServerError { caught = e } catch {}
+            let boundPort = await server.port
+            let listening = await server.isListening
+            await server.stop()
+            for h in held { await h.release() }
             // No ephemeral fallback: a port the bridge can't guess is worse than no server at all,
             // because "running" and "unreachable" look identical from the client side.
-            eq(outcome.error, ServerError.noPortAvailable)
-            eq(outcome.port, 0, "did not bind anything")
-            expect(!outcome.listening, "no listener left behind")
-            expect(outcome.error?.localizedDescription.contains("8775") == true, "failure names the range")
+            eq(caught, ServerError.noPortAvailable)
+            eq(boundPort, 0, "did not bind anything")
+            expect(!listening, "no listener left behind")
+            expect(caught?.localizedDescription.contains("8775") == true, "failure names the range")
         }
     }
 
     @Suite("Server over a real socket")
     struct ServerOverARealSocketTests {
-        @Test("a loopback client gets the health route off the wire") func aLoopbackClientGetsTheHealthRouteOffTheWire() {
+        @Test("a loopback client gets the health route off the wire") func aLoopbackClientGetsTheHealthRouteOffTheWire() async {
             // The routing tests call routeRequest directly; this is the only one that proves the
             // listener accepts, the parser frames, and the response serialises as real HTTP.
-            struct Result: Sendable {
-                let status: Int
-                let body: String
-                let port: UInt16
-            }
-            let result: Result? = runAsync {
-                let server = NevermoreServer(appVersion: "9.9.9")
-                // An ephemeral port: this test is about the wire, not about port discovery, and the
-                // contract ports may legitimately be busy on a developer's Mac.
-                try? await server.startOnAnyPort()
-                let port = await server.port
-                defer { Task { await server.stop() } }
-                guard port != 0,
-                      let url = URL(string: "http://127.0.0.1:\(port)/health") else { return nil }
-                var request = URLRequest(url: url)
-                request.timeoutInterval = 5
-                guard let (data, response) = try? await URLSession.shared.data(for: request),
-                      let http = response as? HTTPURLResponse else { return nil }
-                return Result(
-                    status: http.statusCode,
-                    body: String(data: data, encoding: .utf8) ?? "",
-                    port: port)
-            }
-            guard let result else {
+            let server = NevermoreServer(appVersion: "9.9.9")
+            // An ephemeral port: this test is about the wire, not about port discovery, and the
+            // contract ports may legitimately be busy on a developer's Mac.
+            try? await server.startOnAnyPort()
+            let port = await server.port
+            defer { Task { await server.stop() } }
+            guard port != 0,
+                  let url = URL(string: "http://127.0.0.1:\(port)/health") else {
                 expect(false, "no response from the loopback server")
                 return
             }
-            eq(result.status, 200)
-            eq(result.body, "{\"ok\":true}")
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 5
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                  let http = response as? HTTPURLResponse else {
+                expect(false, "no response from the loopback server")
+                return
+            }
+            eq(http.statusCode, 200)
+            eq(String(data: data, encoding: .utf8) ?? "", "{\"ok\":true}")
         }
     }
 
@@ -127,57 +121,55 @@ struct NetworkBound {
         func get(_ path: String, headers: [String: String] = [:]) -> HTTPRequest {
             HTTPRequest(method: "GET", path: path, headers: headers)
         }
-        func route(_ request: HTTPRequest, token: String = "") -> HTTPResponse {
-            runAsync {
-                await NevermoreServer(appVersion: "9.9.9", mcpToken: token).routeRequest(request)
-            }
+        func route(_ request: HTTPRequest, token: String = "") async -> HTTPResponse {
+            await NevermoreServer(appVersion: "9.9.9", mcpToken: token).routeRequest(request)
         }
         func bodyText(_ response: HTTPResponse) -> String {
             String(data: response.body, encoding: .utf8) ?? ""
         }
 
-        @Test("health and ping answer, so a client can find the port") func healthAndPingAnswerSoAClientCanFindThePort() {
-            eq(route(get("/health")).statusCode, 200)
-            expect(bodyText(route(get("/health"))).contains("\"ok\":true"), "reports ok")
+        @Test("health and ping answer, so a client can find the port") func healthAndPingAnswerSoAClientCanFindThePort() async {
+            eq(await route(get("/health")).statusCode, 200)
+            expect(bodyText(await route(get("/health"))).contains("\"ok\":true"), "reports ok")
 
-            let ping = route(get("/api/ping"))
+            let ping = await route(get("/api/ping"))
             eq(ping.statusCode, 200)
             expect(bodyText(ping).contains("\"app\":\"nevermore\""), "identifies the app")
             expect(bodyText(ping).contains("9.9.9"), "reports its version")
         }
 
-        @Test("an unknown path is 404") func anUnknownPathIs404() {
-            eq(route(get("/nope")).statusCode, 404)
+        @Test("an unknown path is 404") func anUnknownPathIs404() async {
+            eq(await route(get("/nope")).statusCode, 404)
         }
 
-        @Test("Transfer-Encoding is refused rather than parsed as an empty body") func transferEncodingIsRefusedRatherThanParsedAsAnEmptyBody() {
-            eq(route(get("/health", headers: ["transfer-encoding": "chunked"])).statusCode, 400)
+        @Test("Transfer-Encoding is refused rather than parsed as an empty body") func transferEncodingIsRefusedRatherThanParsedAsAnEmptyBody() async {
+            eq(await route(get("/health", headers: ["transfer-encoding": "chunked"])).statusCode, 400)
         }
 
-        @Test("MCP routes are 503 until a token is configured") func mcpRoutesAre503UntilATokenIsConfigured() {
+        @Test("MCP routes are 503 until a token is configured") func mcpRoutesAre503UntilATokenIsConfigured() async {
             // Fail closed: no token must never mean "no token required".
-            let r = route(HTTPRequest(method: "POST", path: "/mcp/senders/list"), token: "")
+            let r = await route(HTTPRequest(method: "POST", path: "/mcp/senders/list"), token: "")
             eq(r.statusCode, 503)
         }
 
-        @Test("MCP routes reject a missing or wrong token with 401") func mcpRoutesRejectAMissingOrWrongTokenWith401() {
+        @Test("MCP routes reject a missing or wrong token with 401") func mcpRoutesRejectAMissingOrWrongTokenWith401() async {
             let secret = "s3cret-token"
-            let mcp = { (headers: [String: String]) in
-                route(HTTPRequest(method: "POST", path: "/mcp/senders/list", headers: headers), token: secret)
+            let mcp = { (headers: [String: String]) async -> HTTPResponse in
+                await route(HTTPRequest(method: "POST", path: "/mcp/senders/list", headers: headers), token: secret)
             }
-            eq(mcp([:]).statusCode, 401, "no Authorization header")
-            eq(mcp(["authorization": "Bearer wrong"]).statusCode, 401, "wrong token")
-            eq(mcp(["authorization": "Bearer "]).statusCode, 401, "empty token")
-            eq(mcp(["authorization": secret]).statusCode, 401, "token without the Bearer scheme")
-            eq(mcp(["authorization": "Basic \(secret)"]).statusCode, 401, "wrong scheme")
+            eq(await mcp([:]).statusCode, 401, "no Authorization header")
+            eq(await mcp(["authorization": "Bearer wrong"]).statusCode, 401, "wrong token")
+            eq(await mcp(["authorization": "Bearer "]).statusCode, 401, "empty token")
+            eq(await mcp(["authorization": secret]).statusCode, 401, "token without the Bearer scheme")
+            eq(await mcp(["authorization": "Basic \(secret)"]).statusCode, 401, "wrong scheme")
             // Near-misses must not pass: the compare is constant-time, not a prefix match.
-            eq(mcp(["authorization": "Bearer s3cret"]).statusCode, 401, "prefix of the token")
-            eq(mcp(["authorization": "Bearer s3cret-tokenX"]).statusCode, 401, "token plus a suffix")
+            eq(await mcp(["authorization": "Bearer s3cret"]).statusCode, 401, "prefix of the token")
+            eq(await mcp(["authorization": "Bearer s3cret-tokenX"]).statusCode, 401, "token plus a suffix")
         }
 
-        @Test("the right token gets past auth, and the scheme is case-insensitive") func theRightTokenGetsPastAuthAndTheSchemeIsCaseInsensitive() {
+        @Test("the right token gets past auth, and the scheme is case-insensitive") func theRightTokenGetsPastAuthAndTheSchemeIsCaseInsensitive() async {
             let secret = "s3cret-token"
-            let authed = route(
+            let authed = await route(
                 HTTPRequest(method: "POST", path: "/mcp/not-a-tool",
                             headers: ["authorization": "bearer \(secret)"]),
                 token: secret)
@@ -187,12 +179,12 @@ struct NetworkBound {
             expect(bodyText(authed).contains("MCP route not found"), "404 is about the route")
         }
 
-        @Test("a non-POST MCP request is 405, but only after it authenticates") func aNonPOSTMCPRequestIs405ButOnlyAfterItAuthenticates() {
+        @Test("a non-POST MCP request is 405, but only after it authenticates") func aNonPOSTMCPRequestIs405ButOnlyAfterItAuthenticates() async {
             let secret = "s3cret-token"
-            eq(route(get("/mcp/senders/list", headers: ["authorization": "Bearer \(secret)"]),
-                     token: secret).statusCode, 405)
+            eq(await route(get("/mcp/senders/list", headers: ["authorization": "Bearer \(secret)"]),
+                           token: secret).statusCode, 405)
             // Unauthenticated, the method never gets a say — 401 comes first.
-            eq(route(get("/mcp/senders/list"), token: secret).statusCode, 401)
+            eq(await route(get("/mcp/senders/list"), token: secret).statusCode, 401)
         }
 
         @Test("MCP bodies get a larger budget than the discovery routes") func mcpBodiesGetALargerBudgetThanTheDiscoveryRoutes() {
@@ -268,11 +260,11 @@ struct NetworkBound {
     struct MCPTokenFileTests {
         /// A scratch directory so the lifecycle is exercised without touching the real
         /// ~/.nevermore-mcp-token, which a running app may own.
-        func withScratchToken(_ body: (URL) -> Void) {
+        func withScratchToken(_ body: (URL) async -> Void) async {
             let dir = URL.temporaryDirectory.appending(path: "nevermore-token-\(UUID().uuidString)")
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: dir) }
-            body(dir.appending(path: ".nevermore-mcp-token"))
+            await body(dir.appending(path: ".nevermore-mcp-token"))
         }
 
         @Test("the real token path is ~/.nevermore-mcp-token") func theRealTokenPathIsNevermoreMcpToken() {
@@ -281,8 +273,8 @@ struct NetworkBound {
                URL.homeDirectory.path)
         }
 
-        @Test("a written token is 0600 and reads back") func aWrittenTokenIs0600AndReadsBack() {
-            withScratchToken { url in
+        @Test("a written token is 0600 and reads back") func aWrittenTokenIs0600AndReadsBack() async {
+            await withScratchToken { url in
                 guard let written = try? MCPTokenManager.generateAndWrite(at: url) else {
                     expect(false, "write failed")
                     return
@@ -294,19 +286,19 @@ struct NetworkBound {
             }
         }
 
-        @Test("each launch gets a different token") func eachLaunchGetsADifferentToken() {
-            withScratchToken { url in
+        @Test("each launch gets a different token") func eachLaunchGetsADifferentToken() async {
+            await withScratchToken { url in
                 let first = try? MCPTokenManager.generateAndWrite(at: url)
                 let second = try? MCPTokenManager.generateAndWrite(at: url)
                 expect(first != second, "transient credential, not a stored one")
             }
         }
 
-        @Test("a token with broader permissions is refused on read") func aTokenWithBroaderPermissionsIsRefusedOnRead() {
+        @Test("a token with broader permissions is refused on read") func aTokenWithBroaderPermissionsIsRefusedOnRead() async {
             // Group- or world-readable means another account could already have taken a copy, so the
             // secret is spent — refuse it rather than authenticate against it.
             for mode in [0o644, 0o640, 0o604, 0o666] {
-                withScratchToken { url in
+                await withScratchToken { url in
                     _ = try? MCPTokenManager.generateAndWrite(at: url)
                     try? FileManager.default.setAttributes(
                         [.posixPermissions: mode], ofItemAtPath: url.path)
@@ -314,15 +306,15 @@ struct NetworkBound {
                 }
             }
             // 0400 is narrower than 0600, so it is still acceptable.
-            withScratchToken { url in
+            await withScratchToken { url in
                 _ = try? MCPTokenManager.generateAndWrite(at: url)
                 try? FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: url.path)
                 expect(MCPTokenManager.read(at: url) != nil, "0400 is not broader than 0600")
             }
         }
 
-        @Test("a missing token reads as nil, and delete is what makes it missing") func aMissingTokenReadsAsNilAndDeleteIsWhatMakesItMissing() {
-            withScratchToken { url in
+        @Test("a missing token reads as nil, and delete is what makes it missing") func aMissingTokenReadsAsNilAndDeleteIsWhatMakesItMissing() async {
+            await withScratchToken { url in
                 expect(MCPTokenManager.read(at: url) == nil, "nothing written yet")
                 _ = try? MCPTokenManager.generateAndWrite(at: url)
                 expect(MCPTokenManager.read(at: url) != nil, "present after write")
@@ -332,11 +324,11 @@ struct NetworkBound {
             }
         }
 
-        @Test("a client whose token file went over-permissive is refused, not admitted") func aClientWhoseTokenFileWentOverPermissiveIsRefusedNotAdmitted() {
+        @Test("a client whose token file went over-permissive is refused, not admitted") func aClientWhoseTokenFileWentOverPermissiveIsRefusedNotAdmitted() async {
             // The two halves of the policy composed: the bridge reads the file to get its credential,
             // a widened file reads as nil, so it has nothing to present — and the server answers 401
             // rather than treating an absent credential as "no credential required".
-            withScratchToken { url in
+            await withScratchToken { url in
                 let secret = (try? MCPTokenManager.generateAndWrite(at: url)) ?? ""
                 expect(!secret.isEmpty, "a token was written")
                 try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
@@ -344,11 +336,9 @@ struct NetworkBound {
                 let presented = MCPTokenManager.read(at: url) ?? ""
                 expect(presented.isEmpty, "an over-permissive file yields no credential")
 
-                let response = runAsync {
-                    await NevermoreServer(mcpToken: secret).routeRequest(
-                        HTTPRequest(method: "POST", path: "/mcp/senders/list",
-                                    headers: ["authorization": "Bearer \(presented)"]))
-                }
+                let response = await NevermoreServer(mcpToken: secret).routeRequest(
+                    HTTPRequest(method: "POST", path: "/mcp/senders/list",
+                                headers: ["authorization": "Bearer \(presented)"]))
                 eq(response.statusCode, 401)
             }
         }
@@ -370,11 +360,11 @@ struct NetworkBound {
     struct LocalServerLifecycleTests {
         /// A scratch token path, so starting and stopping a server here never disturbs the real
         /// ~/.nevermore-mcp-token that a running Nevermore may own.
-        func withScratchTokenPath(_ body: (URL) -> Void) {
+        func withScratchTokenPath(_ body: (URL) async -> Void) async {
             let dir = URL.temporaryDirectory.appending(path: "nevermore-lifecycle-\(UUID().uuidString)")
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: dir) }
-            body(dir.appending(path: ".nevermore-mcp-token"))
+            await body(dir.appending(path: ".nevermore-mcp-token"))
         }
 
         /// The status code for a POST to an /mcp/ route with whatever credential the token file holds.
@@ -391,14 +381,14 @@ struct NetworkBound {
             return (response as? HTTPURLResponse)?.statusCode
         }
 
-        @Test("starting binds a contract port and writes the token the server will accept") func startingBindsAContractPortAndWritesTheTokenTheServerWillAccept() {
-            withScratchTokenPath { tokenURL in
+        @Test("starting binds a contract port and writes the token the server will accept") func startingBindsAContractPortAndWritesTheTokenTheServerWillAccept() async {
+            await withScratchTokenPath { tokenURL in
                 let controller = LocalServerController(tokenURL: tokenURL, appVersion: "9.9.9")
-                let status = runAsync { await controller.start(isDemo: false) }
-                defer { runAsync { await controller.stop() } }
+                let status = await controller.start(isDemo: false)
 
                 guard case let .running(port) = status else {
                     expect(false, "expected a running server, got \(status)")
+                    await controller.stop()
                     return
                 }
                 expect(ServerPortContract.discoveryPorts.contains(port), "bound a discoverable port")
@@ -407,58 +397,59 @@ struct NetworkBound {
                 // on disk authenticates against the server that is actually listening.
                 let token = MCPTokenManager.read(at: tokenURL)
                 expect(token != nil, "a 0600 token exists while the server runs")
-                eq(runAsync { await mcpStatus(port: port, token: token) }, 503,
+                eq(await mcpStatus(port: port, token: token), 503,
                    "the written token is accepted (503 is the absent mailbox, not the credential)")
-                eq(runAsync { await mcpStatus(port: port, token: nil) }, 401,
+                eq(await mcpStatus(port: port, token: nil), 401,
                    "and the gate is still closed without it")
+                await controller.stop()
             }
         }
 
-        @Test("stopping releases the port and removes the token file") func stoppingReleasesThePortAndRemovesTheTokenFile() {
-            withScratchTokenPath { tokenURL in
+        @Test("stopping releases the port and removes the token file") func stoppingReleasesThePortAndRemovesTheTokenFile() async {
+            await withScratchTokenPath { tokenURL in
                 let controller = LocalServerController(tokenURL: tokenURL)
-                let started = runAsync { await controller.start(isDemo: false) }
+                let started = await controller.start(isDemo: false)
                 guard case let .running(port) = started else {
                     expect(false, "expected a running server, got \(started)")
                     return
                 }
-                eq(runAsync { await controller.stop() }, LocalServerStatus.off)
+                eq(await controller.stop(), LocalServerStatus.off)
                 expect(!FileManager.default.fileExists(atPath: tokenURL.path),
                        "the credential does not outlive the server")
                 // Re-binding the port is the only honest proof the OS actually got it back.
-                guard let held = holdPort(port) else {
+                guard let held = await holdPort(port) else {
                     expect(false, "port \(port) was not released")
                     return
                 }
-                held.release()
+                await held.release()
             }
         }
 
-        @Test("stopping a server that never started is not an error") func stoppingAServerThatNeverStartedIsNotAnError() {
-            withScratchTokenPath { tokenURL in
+        @Test("stopping a server that never started is not an error") func stoppingAServerThatNeverStartedIsNotAnError() async {
+            await withScratchTokenPath { tokenURL in
                 let controller = LocalServerController(tokenURL: tokenURL)
-                eq(runAsync { await controller.stop() }, LocalServerStatus.off)
+                eq(await controller.stop(), LocalServerStatus.off)
             }
         }
 
-        @Test("a bind failure is reported with the port range, and Retry works once it frees up") func aBindFailureIsReportedWithThePortRangeAndRetryWorksOnceItFreesUp() {
-            withScratchTokenPath { tokenURL in
+        @Test("a bind failure is reported with the port range, and Retry works once it frees up") func aBindFailureIsReportedWithThePortRangeAndRetryWorksOnceItFreesUp() async {
+            await withScratchTokenPath { tokenURL in
                 var held: [HeldPort] = []
                 for p in ServerPortContract.discoveryPorts {
-                    guard let l = holdPort(p) else { break }
+                    guard let l = await holdPort(p) else { break }
                     held.append(l)
                 }
                 guard held.count == ServerPortContract.discoveryPorts.count else {
-                    held.forEach { $0.release() }
+                    for h in held { await h.release() }
                     expect(false, "could not occupy all \(ServerPortContract.discoveryPorts.count) ports")
                     return
                 }
 
                 let controller = LocalServerController(tokenURL: tokenURL)
-                let failed = runAsync { await controller.start(isDemo: false) }
+                let failed = await controller.start(isDemo: false)
                 guard case let .failed(message) = failed else {
-                    held.forEach { $0.release() }
-                    runAsync { await controller.stop() }
+                    for h in held { await h.release() }
+                    await controller.stop()
                     expect(false, "expected a reported failure, got \(failed)")
                     return
                 }
@@ -469,15 +460,15 @@ struct NetworkBound {
                        "a failed start leaves no token behind")
 
                 // Whatever held the ports quits — which is exactly the case Retry exists for.
-                held.forEach { $0.release() }
-                let retried = runAsync { await controller.start(isDemo: false) }
-                defer { runAsync { await controller.stop() } }
+                for h in held { await h.release() }
+                let retried = await controller.start(isDemo: false)
                 expect(retried.isRunning, "retry succeeded after the ports freed up, got \(retried)")
+                await controller.stop()
             }
         }
 
-        @Test("the token path is shown before the server has ever run") func theTokenPathIsShownBeforeTheServerHasEverRun() {
-            withScratchTokenPath { tokenURL in
+        @Test("the token path is shown before the server has ever run") func theTokenPathIsShownBeforeTheServerHasEverRun() async {
+            await withScratchTokenPath { tokenURL in
                 let controller = LocalServerController(tokenURL: tokenURL)
                 eq(controller.tokenPath, tokenURL.path)
             }
@@ -491,23 +482,21 @@ struct NetworkBound {
         func serve(
             path: String, token: String = "s3cret", presented: String = "s3cret", isDemo: Bool = false,
             context: MCPContext?
-        ) -> HTTPResponse {
-            runAsync {
-                let server = NevermoreServer(appVersion: "9.9.9", isDemo: isDemo, mcpToken: token)
-                await server.setMCPContext(context)
-                return await server.routeRequest(
-                    HTTPRequest(
-                        method: "POST", path: path,
-                        headers: ["authorization": "Bearer \(presented)"],
-                        body: Data("{}".utf8)))
-            }
+        ) async -> HTTPResponse {
+            let server = NevermoreServer(appVersion: "9.9.9", isDemo: isDemo, mcpToken: token)
+            await server.setMCPContext(context)
+            return await server.routeRequest(
+                HTTPRequest(
+                    method: "POST", path: path,
+                    headers: ["authorization": "Bearer \(presented)"],
+                    body: Data("{}".utf8)))
         }
 
-        @Test("a real route serves the open account") func aRealRouteServesTheOpenAccount() {
+        @Test("a real route serves the open account") func aRealRouteServesTheOpenAccount() async {
             do {
                 let store = try MessageStore.inMemory()
                 try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
-                let response = serve(
+                let response = await serve(
                     path: "/mcp/senders/list",
                     context: MCPContext(account: "me@example.com", store: store))
                 eq(response.statusCode, 200)
@@ -515,23 +504,23 @@ struct NetworkBound {
             } catch { expect(false, "threw: \(error)") }
         }
 
-        @Test("with no mailbox open the answer is 503, never an empty mailbox") func withNoMailboxOpenTheAnswerIs503NeverAnEmptyMailbox() {
+        @Test("with no mailbox open the answer is 503, never an empty mailbox") func withNoMailboxOpenTheAnswerIs503NeverAnEmptyMailbox() async {
             // "This person has no senders" and "no account is open" are answers an
             // agent would act on very differently.
-            let response = serve(path: "/mcp/senders/list", context: nil)
+            let response = await serve(path: "/mcp/senders/list", context: nil)
             eq(response.statusCode, 503)
             expect(
                 (mcpJSON(response)["error"] as? String ?? "").contains("No mailbox is open"),
                 "says which it is")
         }
 
-        @Test("demo mode refuses every tool") func demoModeRefusesEveryTool() {
+        @Test("demo mode refuses every tool") func demoModeRefusesEveryTool() async {
             do {
                 let store = try MessageStore.inMemory()
                 try store.upsert([mcpMessage(1, from: "A <a@x.com>")])
                 let context = MCPContext(account: "me@example.com", store: store)
                 for path in MCPRoutes.paths.sorted() {
-                    let response = serve(path: path, isDemo: true, context: context)
+                    let response = await serve(path: path, isDemo: true, context: context)
                     eq(response.statusCode, 403, path)
                     expect(
                         (mcpJSON(response)["error"] as? String ?? "").contains("demo mode"), path)
@@ -539,25 +528,25 @@ struct NetworkBound {
             } catch { expect(false, "threw: \(error)") }
         }
 
-        @Test("the four refusals stay distinguishable, demo mode included") func theFourRefusalsStayDistinguishableDemoModeIncluded() {
+        @Test("the four refusals stay distinguishable, demo mode included") func theFourRefusalsStayDistinguishableDemoModeIncluded() async {
             // A bridge reads its situation off these codes: 401 fix your token, 404
             // that tool doesn't exist, 403 leave demo mode, 503 open an account.
             do {
                 let store = try MessageStore.inMemory()
                 let context = MCPContext(account: "me@example.com", store: store)
                 eq(
-                    serve(path: "/mcp/senders/list", presented: "wrong", isDemo: true, context: context)
+                    await serve(path: "/mcp/senders/list", presented: "wrong", isDemo: true, context: context)
                         .statusCode, 401, "credential first, even in demo mode")
                 eq(
-                    serve(path: "/mcp/not-a-tool", isDemo: true, context: context).statusCode, 404,
+                    await serve(path: "/mcp/not-a-tool", isDemo: true, context: context).statusCode, 404,
                     "an unknown route is still about the route in demo mode")
                 eq(
-                    serve(path: "/mcp/senders/list", isDemo: true, context: nil).statusCode, 403,
+                    await serve(path: "/mcp/senders/list", isDemo: true, context: nil).statusCode, 403,
                     "demo mode is reported before the absent mailbox")
             } catch { expect(false, "threw: \(error)") }
         }
 
-        @Test("the local server hands the context on to a server it starts later") func theLocalServerHandsTheContextOnToAServerItStartsLater() {
+        @Test("the local server hands the context on to a server it starts later") func theLocalServerHandsTheContextOnToAServerItStartsLater() async {
             // The account and the server come up in either order, so whichever is
             // second has to find the other already recorded.
             do {
@@ -569,18 +558,16 @@ struct NetworkBound {
                 let tokenURL = dir.appending(path: ".nevermore-mcp-token")
 
                 let controller = LocalServerController(tokenURL: tokenURL, appVersion: "9.9.9")
-                runAsync {
-                    await controller.setMCPContext(
-                        MCPContext(account: "me@example.com", store: store))
-                }
-                let status = runAsync { await controller.start(isDemo: false) }
-                defer { runAsync { await controller.stop() } }
+                await controller.setMCPContext(
+                    MCPContext(account: "me@example.com", store: store))
+                let status = await controller.start(isDemo: false)
                 guard case let .running(port) = status, let token = MCPTokenManager.read(at: tokenURL)
                 else {
                     expect(false, "expected a running server with a token, got \(status)")
+                    await controller.stop()
                     return
                 }
-                let result: (status: Int, body: String)? = runAsync {
+                let result: (status: Int, body: String)? = await {
                     guard let url = URL(string: "http://127.0.0.1:\(port)/mcp/mailbox/summary")
                     else { return nil }
                     var request = URLRequest(url: url)
@@ -591,9 +578,10 @@ struct NetworkBound {
                         let http = response as? HTTPURLResponse
                     else { return nil }
                     return (http.statusCode, String(data: data, encoding: .utf8) ?? "")
-                }
+                }()
                 eq(result?.status, 200, "the tool answers over the socket, not just in-process")
                 expect(result?.body.contains("me@example.com") ?? false, "and names the account")
+                await controller.stop()
             } catch { expect(false, "threw: \(error)") }
         }
     }
@@ -659,15 +647,15 @@ struct NetworkBound {
         // the host was looked up exactly once proves there was no second lookup for
         // a hostile resolver to answer differently — the window is gone, not merely
         // narrowed.
-        @Test("a resolver that changes its answer cannot move the connection") func aResolverThatChangesItsAnswerCannotMoveTheConnection() {
-            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("first-answer") })
+        @Test("a resolver that changes its answer cannot move the connection") func aResolverThatChangesItsAnswerCannotMoveTheConnection() async {
+            guard let origin = await StubHTTPServer.start(respond: { _ in StubHTTPServer.ok("first-answer") })
             else { return expect(false, "could not start stub origin") }
             defer { origin.stop() }
 
             let resolver = RecordingResolver { host, nth in
                 nth == 1 ? [loopbackPin(host)] : [unreachablePin(host)]
             }
-            let result = send(
+            let result = await send(
                 PinnedHTTPClient(resolve: resolver.resolver), "GET",
                 "http://rebind.invalid:\(origin.port)/unsub")
 
@@ -680,8 +668,8 @@ struct NetworkBound {
         // anywhere (RFC 6761 guarantees it), so a request that succeeds is one
         // nothing but our own resolver could have routed. That is the pre-fix defect
         // stated as an assertion — a second resolver existing at all.
-        @Test("nothing but the injected resolver ever looks the host up") func nothingButTheInjectedResolverEverLooksTheHostUp() {
-            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("pinned") })
+        @Test("nothing but the injected resolver ever looks the host up") func nothingButTheInjectedResolverEverLooksTheHostUp() async {
+            guard let origin = await StubHTTPServer.start(respond: { _ in StubHTTPServer.ok("pinned") })
             else { return expect(false, "could not start stub origin") }
             defer { origin.stop() }
 
@@ -690,7 +678,7 @@ struct NetworkBound {
             expect(DestinationGuard.pin(for: "unresolvable.invalid") == nil, "name does not resolve")
 
             let resolver = RecordingResolver { host, _ in [loopbackPin(host)] }
-            let result = send(
+            let result = await send(
                 PinnedHTTPClient(resolve: resolver.resolver), "GET",
                 "http://unresolvable.invalid:\(origin.port)/x")
             eq(status(result), 200, "delivered despite no DNS record anywhere")
@@ -698,13 +686,13 @@ struct NetworkBound {
 
         // AC #2 on the wire rather than in a unit test: the origin has to see the
         // name it serves, or every virtual host breaks.
-        @Test("the origin sees the real hostname in Host") func theOriginSeesTheRealHostnameInHost() {
-            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("ok") })
+        @Test("the origin sees the real hostname in Host") func theOriginSeesTheRealHostnameInHost() async {
+            guard let origin = await StubHTTPServer.start(respond: { _ in StubHTTPServer.ok("ok") })
             else { return expect(false, "could not start stub origin") }
             defer { origin.stop() }
 
             let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
-            _ = send(client, "GET", "http://vhost.invalid:\(origin.port)/path?a=1")
+            _ = await send(client, "GET", "http://vhost.invalid:\(origin.port)/path?a=1")
 
             guard let seen = origin.requests.first else {
                 return expect(false, "origin received nothing")
@@ -715,15 +703,15 @@ struct NetworkBound {
             expect(seen.hasPrefix("GET /path?a=1 HTTP/1.1"), "request line; saw:\n\(seen)")
         }
 
-        @Test("a refused host is never dialled") func aRefusedHostIsNeverDialled() {
-            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
+        @Test("a refused host is never dialled") func aRefusedHostIsNeverDialled() async {
+            guard let origin = await StubHTTPServer.start(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
             else { return expect(false, "could not start stub origin") }
             defer { origin.stop() }
 
             // Nil is what the real resolver returns for a private, local, or
             // unresolvable answer.
             let client = PinnedHTTPClient(resolve: { _ in [] })
-            let result = send(client, "GET", "http://blocked.invalid:\(origin.port)/")
+            let result = await send(client, "GET", "http://blocked.invalid:\(origin.port)/")
             eq(failure(result), .blocked(host: "blocked.invalid"))
             expect(origin.requests.isEmpty, "the origin was never contacted")
         }
@@ -731,8 +719,8 @@ struct NetworkBound {
         // Pinning one address would otherwise throw away the failover a resolver's
         // several answers exist to give. A CDN endpoint with a PoP out of rotation
         // must not read to the user as an unsubscribe link that doesn't work.
-        @Test("a dead first address fails over to the next validated one") func aDeadFirstAddressFailsOverToTheNextValidatedOne() {
-            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("second-address") })
+        @Test("a dead first address fails over to the next validated one") func aDeadFirstAddressFailsOverToTheNextValidatedOne() async {
+            guard let origin = await StubHTTPServer.start(respond: { _ in StubHTTPServer.ok("second-address") })
             else { return expect(false, "could not start stub origin") }
             defer { origin.stop() }
 
@@ -742,7 +730,7 @@ struct NetworkBound {
             })
             // 8s across two addresses is a 4s slice each, so the dead one is given
             // up on quickly rather than stranding the request.
-            let result = send(
+            let result = await send(
                 client, "GET", "http://multi.invalid:\(origin.port)/unsub", timeout: 8)
             eq(status(result), 200, "reached the live address (\(String(describing: failure(result))))")
         }
@@ -752,13 +740,13 @@ struct NetworkBound {
         // Network.framework ignores Swift task cancellation and the sibling task sat
         // in a continuation until the OS gave up. A budget nobody honours is worse
         // than none, so this asserts the elapsed time, not the error message.
-        @Test("a timeout ends the request, not just the waiting for it") func aTimeoutEndsTheRequestNotJustTheWaitingForIt() {
+        @Test("a timeout ends the request, not just the waiting for it") func aTimeoutEndsTheRequestNotJustTheWaitingForIt() async {
             let client = PinnedHTTPClient(resolve: { host in
                 // TEST-NET-2: a connection here can never complete.
                 [DestinationGuard.PinnedAddress(host: host, literal: "198.51.100.1", isIPv6: false)]
             })
             let began = Date()
-            let result = send(client, "GET", "http://blackhole.invalid/x", timeout: 4)
+            let result = await send(client, "GET", "http://blackhole.invalid/x", timeout: 4)
             let elapsed = Date().timeIntervalSince(began)
             expect(failure(result) != nil, "the attempt failed")
             expect(elapsed < 12, "returned in \(String(format: "%.1f", elapsed))s, budget was 4s")
@@ -768,54 +756,54 @@ struct NetworkBound {
         // cheapest thing a hostile endpoint can do, and the deadline has to cover
         // the response read — not just the connect — or an unsubscribe hangs on
         // whatever a stranger put in a header.
-        @Test("a silent endpoint does not hang the request forever") func aSilentEndpointDoesNotHangTheRequestForever() {
-            guard let origin = StubHTTPServer(staysSilent: true)
+        @Test("a silent endpoint does not hang the request forever") func aSilentEndpointDoesNotHangTheRequestForever() async {
+            guard let origin = await StubHTTPServer.start(staysSilent: true)
             else { return expect(false, "could not start stub origin") }
             defer { origin.stop() }
 
             let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
             let began = Date()
-            let result = send(client, "GET", "http://silent.invalid:\(origin.port)/unsub", timeout: 4)
+            let result = await send(client, "GET", "http://silent.invalid:\(origin.port)/unsub", timeout: 4)
             let elapsed = Date().timeIntervalSince(began)
             expect(failure(result) != nil, "did not invent a response")
             expect(elapsed < 12, "gave up in \(String(format: "%.1f", elapsed))s, budget was 4s")
             expect(!origin.requests.isEmpty, "the request was actually sent and read")
         }
 
-        @Test("failover only ever tries addresses that passed the check") func failoverOnlyEverTriesAddressesThatPassedTheCheck() {
-            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
+        @Test("failover only ever tries addresses that passed the check") func failoverOnlyEverTriesAddressesThatPassedTheCheck() async {
+            guard let origin = await StubHTTPServer.start(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
             else { return expect(false, "could not start stub origin") }
             defer { origin.stop() }
 
             // An empty answer is the guard's refusal, and there is nothing to fall
             // back to — a refused host must not become a reachable one.
             let client = PinnedHTTPClient(resolve: { _ in [] })
-            let result = send(client, "GET", "http://refused.invalid:\(origin.port)/")
+            let result = await send(client, "GET", "http://refused.invalid:\(origin.port)/")
             eq(failure(result), .blocked(host: "refused.invalid"))
             expect(origin.requests.isEmpty, "nothing was dialled")
         }
 
-        @Test("a non-http scheme is refused before any lookup") func aNonHttpSchemeIsRefusedBeforeAnyLookup() {
+        @Test("a non-http scheme is refused before any lookup") func aNonHttpSchemeIsRefusedBeforeAnyLookup() async {
             let resolver = RecordingResolver { host, _ in [loopbackPin(host)] }
             let client = PinnedHTTPClient(resolve: resolver.resolver)
-            let result = send(client, "GET", "ftp://acme.invalid/x")
+            let result = await send(client, "GET", "ftp://acme.invalid/x")
             expect(failure(result) != nil, "refused")
             eq(resolver.callCount, 0, "never even resolved")
         }
 
         // AC #3. Each hop is resolved, checked and pinned on its own account.
-        @Test("a redirect to another host is pinned again, not inherited") func aRedirectToAnotherHostIsPinnedAgainNotInherited() {
-            guard let second = StubHTTPServer(respond: { _ in StubHTTPServer.ok("second-hop") })
+        @Test("a redirect to another host is pinned again, not inherited") func aRedirectToAnotherHostIsPinnedAgainNotInherited() async {
+            guard let second = await StubHTTPServer.start(respond: { _ in StubHTTPServer.ok("second-hop") })
             else { return expect(false, "could not start second origin") }
             defer { second.stop() }
             let secondPort = second.port
-            guard let first = StubHTTPServer(respond: { _ in
+            guard let first = await StubHTTPServer.start(respond: { _ in
                 StubHTTPServer.redirect(to: "http://hop-two.invalid:\(secondPort)/done")
             }) else { return expect(false, "could not start first origin") }
             defer { first.stop() }
 
             let resolver = RecordingResolver { host, _ in [loopbackPin(host)] }
-            let result = send(
+            let result = await send(
                 PinnedHTTPClient(resolve: resolver.resolver), "GET",
                 "http://hop-one.invalid:\(first.port)/start")
 
@@ -827,12 +815,12 @@ struct NetworkBound {
 
         // The hop-two guard has to survive, and has to stay distinguishable from a
         // sender who simply answered 302 — the engine reports them differently.
-        @Test("a redirect into a refused host surfaces the 3xx unfollowed") func aRedirectIntoARefusedHostSurfacesThe3xxUnfollowed() {
-            guard let second = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
+        @Test("a redirect into a refused host surfaces the 3xx unfollowed") func aRedirectIntoARefusedHostSurfacesThe3xxUnfollowed() async {
+            guard let second = await StubHTTPServer.start(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
             else { return expect(false, "could not start second origin") }
             defer { second.stop() }
             let secondPort = second.port
-            guard let first = StubHTTPServer(respond: { _ in
+            guard let first = await StubHTTPServer.start(respond: { _ in
                 StubHTTPServer.redirect(to: "http://internal.invalid:\(secondPort)/admin")
             }) else { return expect(false, "could not start first origin") }
             defer { first.stop() }
@@ -840,34 +828,32 @@ struct NetworkBound {
             let client = PinnedHTTPClient(resolve: { host in
                 host == "hop-one.invalid" ? [loopbackPin(host)] : []
             })
-            let result = send(client, "GET", "http://hop-one.invalid:\(first.port)/start")
+            let result = await send(client, "GET", "http://hop-one.invalid:\(first.port)/start")
 
             eq(status(result), 302, "the 3xx comes back unfollowed, for the engine to report")
             expect(second.requests.isEmpty, "the internal host was never contacted")
         }
 
-        @Test("a relative Location is resolved against the hop it came from") func aRelativeLocationIsResolvedAgainstTheHopItCameFrom() {
-            let box = ResultBox<UInt16>()
-            guard let origin = StubHTTPServer(respond: { head in
+        @Test("a relative Location is resolved against the hop it came from") func aRelativeLocationIsResolvedAgainstTheHopItCameFrom() async {
+            guard let origin = await StubHTTPServer.start(respond: { head in
                 head.hasPrefix("GET /start")
                     ? StubHTTPServer.redirect(to: "/moved") : StubHTTPServer.ok("relative")
             }) else { return expect(false, "could not start stub origin") }
             defer { origin.stop() }
-            box.value = origin.port
 
             let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
-            let result = send(client, "GET", "http://relative.invalid:\(origin.port)/start")
+            let result = await send(client, "GET", "http://relative.invalid:\(origin.port)/start")
             eq(status(result), 200)
             eq(origin.requestLines.last, "GET /moved HTTP/1.1")
         }
 
-        @Test("a redirect loop ends rather than running forever") func aRedirectLoopEndsRatherThanRunningForever() {
-            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.redirect(to: "/again") })
+        @Test("a redirect loop ends rather than running forever") func aRedirectLoopEndsRatherThanRunningForever() async {
+            guard let origin = await StubHTTPServer.start(respond: { _ in StubHTTPServer.redirect(to: "/again") })
             else { return expect(false, "could not start stub origin") }
             defer { origin.stop() }
 
             let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
-            let result = send(client, "GET", "http://loop.invalid:\(origin.port)/start")
+            let result = await send(client, "GET", "http://loop.invalid:\(origin.port)/start")
             eq(failure(result), .tooManyRedirects)
             expect(
                 origin.requests.count <= PinnedHTTPClient.maxRedirects + 1,
@@ -876,16 +862,16 @@ struct NetworkBound {
 
         // RFC 9110: 301/302/303 turn into GET, 307/308 keep the method. One-click is
         // a POST, so getting this wrong either drops the body or replays it.
-        @Test("a 302 turns a one-click POST into a GET, and 307 does not") func a302TurnsAOneClickPOSTIntoAGETAnd307DoesNot() {
+        @Test("a 302 turns a one-click POST into a GET, and 307 does not") func a302TurnsAOneClickPOSTIntoAGETAnd307DoesNot() async {
             for (code, expected) in [(302, "GET /next HTTP/1.1"), (307, "POST /next HTTP/1.1")] {
-                guard let origin = StubHTTPServer(respond: { head in
+                guard let origin = await StubHTTPServer.start(respond: { head in
                     head.hasPrefix("POST /start")
                         ? StubHTTPServer.redirect(to: "/next", status: code) : StubHTTPServer.ok("done")
                 }) else { return expect(false, "could not start stub origin") }
                 defer { origin.stop() }
 
                 let client = PinnedHTTPClient(resolve: { host in [loopbackPin(host)] })
-                let result = send(
+                let result = await send(
                     client, "POST", "http://method.invalid:\(origin.port)/start",
                     body: Data("List-Unsubscribe=One-Click".utf8))
                 eq(status(result), 200, "HTTP \(code) chain completed")
@@ -902,32 +888,31 @@ struct NetworkBound {
                 client: PinnedHTTPClient(resolve: resolve))
         }
 
-        @Test("a refused destination reads as blocked, not as a dead link") func aRefusedDestinationReadsAsBlockedNotAsADeadLink() {
+        @Test("a refused destination reads as blocked, not as a dead link") func aRefusedDestinationReadsAsBlockedNotAsADeadLink() async {
             guard let target = ListUnsubscribe(header: "<http://blocked.invalid/unsub>") else {
                 return expect(false, "could not parse header")
             }
-            let outcome = runAsync { await engine({ _ in [] }).run(target) }
+            let outcome = await engine({ _ in [] }).run(target)
             guard case .failed(let detail) = outcome else {
                 return expect(false, "expected failure, got \(outcome)")
             }
             expect(detail.contains("private or local address"), "says why; got: \(detail)")
         }
 
-        @Test("a redirect into a private address is reported as blocked") func aRedirectIntoAPrivateAddressIsReportedAsBlocked() {
-            guard let second = StubHTTPServer(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
+        @Test("a redirect into a private address is reported as blocked") func aRedirectIntoAPrivateAddressIsReportedAsBlocked() async {
+            guard let second = await StubHTTPServer.start(respond: { _ in StubHTTPServer.ok("must-not-arrive") })
             else { return expect(false, "could not start second origin") }
             defer { second.stop() }
             let secondPort = second.port
-            guard let first = StubHTTPServer(respond: { _ in
+            guard let first = await StubHTTPServer.start(respond: { _ in
                 StubHTTPServer.redirect(to: "http://internal.invalid:\(secondPort)/admin")
             }) else { return expect(false, "could not start first origin") }
             defer { first.stop() }
 
             guard let target = ListUnsubscribe(header: "<http://sender.invalid:\(first.port)/unsub>")
             else { return expect(false, "could not parse header") }
-            let outcome = runAsync {
-                await engine({ host in host == "sender.invalid" ? [loopbackPin(host)] : [] }).run(target)
-            }
+            let outcome = await engine({ host in host == "sender.invalid" ? [loopbackPin(host)] : [] })
+                .run(target)
             guard case .failed(let detail) = outcome else {
                 return expect(false, "expected failure, got \(outcome)")
             }
@@ -941,23 +926,21 @@ struct NetworkBound {
         // it had worked. Nothing in the suite guarded it before this: `main` has no
         // redirect test of any kind. `isSuccess` is the exact property that
         // regressed, so it is what gets asserted, across every redirect status.
-        @Test("a blocked redirect is never recorded as a success") func aBlockedRedirectIsNeverRecordedAsASuccess() {
+        @Test("a blocked redirect is never recorded as a success") func aBlockedRedirectIsNeverRecordedAsASuccess() async {
             for code in [301, 302, 303, 307, 308] {
-                guard let internalHost = StubHTTPServer(respond: { _ in StubHTTPServer.ok("owned") })
+                guard let internalHost = await StubHTTPServer.start(respond: { _ in StubHTTPServer.ok("owned") })
                 else { return expect(false, "could not start internal origin") }
                 defer { internalHost.stop() }
                 let internalPort = internalHost.port
-                guard let sender = StubHTTPServer(respond: { _ in
+                guard let sender = await StubHTTPServer.start(respond: { _ in
                     StubHTTPServer.redirect(to: "http://internal.invalid:\(internalPort)/admin", status: code)
                 }) else { return expect(false, "could not start sender origin") }
                 defer { sender.stop() }
 
                 guard let target = ListUnsubscribe(header: "<http://sender.invalid:\(sender.port)/unsub>")
                 else { return expect(false, "could not parse header") }
-                let outcome = runAsync {
-                    await engine({ host in host == "sender.invalid" ? [loopbackPin(host)] : [] })
-                        .run(target)
-                }
+                let outcome = await engine({ host in host == "sender.invalid" ? [loopbackPin(host)] : [] })
+                    .run(target)
                 expect(!outcome.isSuccess, "HTTP \(code) into a private host read as success: \(outcome)")
                 expect(internalHost.requests.isEmpty, "HTTP \(code): the internal host was contacted")
             }
@@ -965,8 +948,8 @@ struct NetworkBound {
 
         // An HTTP status can never prove an unsubscribe took effect, so a 200 is
         // still only `requested`. This is load-bearing for the whole UI.
-        @Test("a 200 is still only requested, never confirmed") func a200IsStillOnlyRequestedNeverConfirmed() {
-            guard let origin = StubHTTPServer(respond: { _ in StubHTTPServer.ok("bye") })
+        @Test("a 200 is still only requested, never confirmed") func a200IsStillOnlyRequestedNeverConfirmed() async {
+            guard let origin = await StubHTTPServer.start(respond: { _ in StubHTTPServer.ok("bye") })
             else { return expect(false, "could not start stub origin") }
             defer { origin.stop() }
 
@@ -976,7 +959,7 @@ struct NetworkBound {
             else { return expect(false, "could not parse header") }
             expect(target.supportsOneClick, "this is the one-click path")
 
-            let outcome = runAsync { await engine({ host in [loopbackPin(host)] }).run(target) }
+            let outcome = await engine({ host in [loopbackPin(host)] }).run(target)
             guard case .requested(let detail) = outcome else {
                 return expect(false, "expected requested, got \(outcome)")
             }
@@ -987,8 +970,8 @@ struct NetworkBound {
                 "carried the one-click body")
         }
 
-        @Test("a sender that answers 500 falls back to its mailto target") func aSenderThatAnswers500FallsBackToItsMailtoTarget() {
-            guard let origin = StubHTTPServer(respond: { _ in
+        @Test("a sender that answers 500 falls back to its mailto target") func aSenderThatAnswers500FallsBackToItsMailtoTarget() async {
+            guard let origin = await StubHTTPServer.start(respond: { _ in
                 "HTTP/1.1 500 Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             }) else { return expect(false, "could not start stub origin") }
             defer { origin.stop() }
@@ -997,13 +980,13 @@ struct NetworkBound {
                 header: "<http://sender.invalid:\(origin.port)/unsub>, <mailto:off@sender.invalid>")
             else { return expect(false, "could not parse header") }
 
-            let mailed = ResultBox<String>()
+            let mailed = MailtoRecorder()
             let engine = UnsubscribeEngine(
-                sendMail: { to, _, _, _ in mailed.value = to },
+                sendMail: { to, _, _, _ in await mailed.record(to) },
                 client: PinnedHTTPClient(resolve: { host in [loopbackPin(host)] }))
-            let outcome = runAsync { await engine.run(target) }
+            let outcome = await engine.run(target)
             expect(outcome.isSuccess, "the mailto fallback carried it; got \(outcome)")
-            eq(mailed.value, "off@sender.invalid", "the fallback actually sent")
+            eq(await mailed.recipient, "off@sender.invalid", "the fallback actually sent")
         }
     }
 
