@@ -13,6 +13,11 @@ struct SenderRow: Identifiable, Hashable {
     let method: UnsubscribeMethod
     /// Outcome of a prior unsubscribe, if any.
     let priorOutcome: MessageStore.Outcome?
+    /// What this sender's stored messages occupy on the server.
+    let storage: SenderStorage
+
+    /// Sort key for the Size column. See `SenderStorage.sortKey`.
+    var storageBytes: Int { storage.sortKey }
 
     init(group: SenderGroup, priorOutcome: MessageStore.Outcome?) {
         self.id = group.id
@@ -24,6 +29,7 @@ struct SenderRow: Identifiable, Hashable {
         self.lastReceived = group.newest
         self.method = Self.method(for: group)
         self.priorOutcome = priorOutcome
+        self.storage = group.storage
     }
 
     static func method(for group: SenderGroup) -> UnsubscribeMethod {

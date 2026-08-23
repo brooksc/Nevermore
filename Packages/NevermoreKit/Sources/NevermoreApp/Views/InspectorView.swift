@@ -109,6 +109,22 @@ struct InspectorView: View {
                 stat("First seen", dateString(group.messages.map(\.receivedAt).min()))
                 stat("Last received", dateString(group.newest))
             }
+            GridRow {
+                stat("Storage", group.storage.summary())
+            }
+            // Spelled out here, where there is room for a sentence, rather than
+            // left to a tooltip: a total that leaves messages out, or counts
+            // only what is still in the mailbox, has to say so somewhere a
+            // reader will actually see it before acting on the number.
+            if let caveat = group.storage.caveat {
+                GridRow {
+                    Text(caveat)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .gridCellColumns(2)
+                }
+            }
         }
     }
 

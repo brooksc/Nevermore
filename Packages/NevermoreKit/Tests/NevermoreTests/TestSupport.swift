@@ -94,7 +94,8 @@ func msg(
 
 func makeMessage(
     _ uid: UInt32, from: String, unsub: String? = "<https://ex.com/u>",
-    messageId: String = "", deliveredTo: String = "", listID: String? = nil
+    messageId: String = "", deliveredTo: String = "", listID: String? = nil,
+    byteSize: Int? = nil
 ) -> EmailMessage {
     EmailMessage(
         uid: MessageUID(uid),
@@ -105,8 +106,23 @@ func makeMessage(
         unsubscribe: ListUnsubscribe(header: unsub),
         deliveredTo: deliveredTo,
         messageId: messageId,
-        listID: listID)
+        listID: listID,
+        byteSize: byteSize)
 }
+
+/// One sender's group, built from message sizes — `nil` for a message whose
+/// size is not on file. The fixture behind every `SenderStorage` test.
+func sizedGroup(_ key: String, _ sizes: [Int?]) -> SenderGroup {
+    SenderGroup(
+        id: GroupID(kind: .domain, key: key),
+        messages: sizes.enumerated().map { index, size in
+            makeMessage(UInt32(index + 1), from: "n@\(key)", byteSize: size)
+        })
+}
+
+/// A locale pinned so byte formatting is asserted against a fixed language.
+/// The app formats in the user's locale; the tests must not depend on which.
+let enUS = Locale(identifier: "en_US")
 
 
 // MARK: - Provider detection

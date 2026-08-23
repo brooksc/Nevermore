@@ -373,7 +373,7 @@ public actor IMAPBackend: MailBackend {
             let chunk = UIDSet(Array(all[offset..<end]))
 
             let infos = try await server.fetchMessageInfosBulk(
-                using: chunk, options: .slim, headerFields: headerFields
+                using: chunk, options: SyncHeaderFields.attributes, headerFields: headerFields
             )
             for info in infos {
                 switch Self.convert(info) {
@@ -450,7 +450,13 @@ public actor IMAPBackend: MailBackend {
             messageId: info.messageId?.description ?? header("Message-ID") ?? "",
             listID: MailingList.id(fromHeader: header("List-ID")),
             authentication: AuthenticationResults(
-                header: header(SyncHeaderFields.authenticationResults))
+                header: header(SyncHeaderFields.authenticationResults)),
+            // RFC822.SIZE, which the fetch has always requested as part of
+            // `.slim` and which this line stops discarding (TASK-29). Nil where
+            // the server did not report one, and nil must stay nil all the way
+            // to the screen: a sender of unknown size is not a sender of no
+            // size.
+            byteSize: info.size
         ))
     }
 

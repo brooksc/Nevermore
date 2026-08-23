@@ -36,12 +36,29 @@ public enum DemoData {
         let deliveredTo: String
         /// RFC 2919 List-ID, for senders that are actually mailing lists.
         let listID: String?
+        /// Typical `RFC822.SIZE` for one of this sender's messages, in bytes.
+        ///
+        /// Deliberately spread over two orders of magnitude: an image-heavy
+        /// retail blast is megabytes and a plain-text newsletter is tens of
+        /// kilobytes, and a demo where every sender cost the same would make
+        /// the storage column look like decoration.
+        let bytesPerMessage: Int
+        /// How many of this sender's oldest messages have no size on file.
+        ///
+        /// Not padding. This is what a real mailbox looks like the day after
+        /// the feature ships — messages synced earlier were stored before sizes
+        /// were kept — and the demo should show the "at least" total rather than
+        /// pretend every sender is fully measured.
+        let unsizedOldest: Int
 
         init(
             from: String, subjects: [String], unsubscribe: String?, oneClick: Bool = false,
             latestAgeHours: Double, cadenceHours: Double = 72, unreadFraction: Double = 0.5,
-            deliveredTo: String = DemoData.address, listID: String? = nil
+            deliveredTo: String = DemoData.address, listID: String? = nil,
+            bytesPerMessage: Int = 48_000, unsizedOldest: Int = 0
         ) {
+            self.bytesPerMessage = bytesPerMessage
+            self.unsizedOldest = unsizedOldest
             self.from = from
             self.subjects = subjects
             self.unsubscribe = unsubscribe
@@ -87,7 +104,15 @@ public enum DemoData {
                         unsubscribe: unsub,
                         deliveredTo: sender.deliveredTo,
                         messageId: "<demo-\(uid)@example.invalid>",
-                        listID: sender.listID
+                        listID: sender.listID,
+                        // Deterministic spread around the sender's typical size,
+                        // for the same reason the unread pattern is
+                        // deterministic: a screenshot must not change run to
+                        // run. `subjects` is newest-first, so the last
+                        // `unsizedOldest` of them are the ones left unmeasured.
+                        byteSize: index >= sender.subjects.count - sender.unsizedOldest
+                            ? nil
+                            : sender.bytesPerMessage + (index % 5) * (sender.bytesPerMessage / 8)
                     ))
             }
         }
@@ -107,7 +132,8 @@ public enum DemoData {
                 "The case for finishing bad books",
             ],
             unsubscribe: "<https://vellumreads.com/u/9f2a>, <mailto:unsub@vellumreads.com?subject=unsubscribe>",
-            oneClick: true, latestAgeHours: 0.7, cadenceHours: 168, unreadFraction: 0.6),
+            oneClick: true, latestAgeHours: 0.7, cadenceHours: 168, unreadFraction: 0.6,
+            bytesPerMessage: 90_000),
 
         Sender(
             from: "Northbound Outfitters <deals@mail.northboundgear.com>",
@@ -121,7 +147,7 @@ public enum DemoData {
             ],
             unsubscribe: "<https://northboundgear.com/email/unsubscribe?t=8812>",
             oneClick: true, latestAgeHours: 2.5, cadenceHours: 40, unreadFraction: 0.83,
-            deliveredTo: "shopping@example.com"),
+            deliveredTo: "shopping@example.com", bytesPerMessage: 2_400_000),
 
         Sender(
             from: "Tidewater Coffee Club <roasts@order.tidewatercoffee.com>",
@@ -132,7 +158,7 @@ public enum DemoData {
             ],
             unsubscribe: "<https://tidewatercoffee.com/prefs/2201>",
             oneClick: true, latestAgeHours: 5, cadenceHours: 336, unreadFraction: 0.34,
-            deliveredTo: "shopping@example.com"),
+            deliveredTo: "shopping@example.com", bytesPerMessage: 480_000),
 
         Sender(
             from: "The Lattice <editors@thelattice.news>",
@@ -143,7 +169,7 @@ public enum DemoData {
                 "Our most-read stories this month",
             ],
             unsubscribe: "<https://thelattice.news/unsubscribe/abc123>",
-            latestAgeHours: 9, cadenceHours: 96, unreadFraction: 0.25),
+            latestAgeHours: 9, cadenceHours: 96, unreadFraction: 0.25, bytesPerMessage: 60_000),
 
         Sender(
             from: "Harbourview Fitness <noreply@harbourviewfit.com>",
@@ -155,7 +181,7 @@ public enum DemoData {
                 "We miss you at the 6am class",
             ],
             unsubscribe: "<mailto:unsubscribe@harbourviewfit.com?subject=Unsubscribe%20me>",
-            latestAgeHours: 14, cadenceHours: 120, unreadFraction: 1.0),
+            latestAgeHours: 14, cadenceHours: 120, unreadFraction: 1.0, bytesPerMessage: 310_000),
 
         Sender(
             from: "Pixel & Press <studio@pixelandpress.co>",
@@ -169,7 +195,8 @@ public enum DemoData {
                 "Issue 78: the anatomy of a receipt",
             ],
             unsubscribe: "<https://pixelandpress.co/u/aa71>, <mailto:leave@pixelandpress.co>",
-            oneClick: true, latestAgeHours: 20, cadenceHours: 168, unreadFraction: 0.15),
+            oneClick: true, latestAgeHours: 20, cadenceHours: 168, unreadFraction: 0.15,
+            bytesPerMessage: 55_000, unsizedOldest: 2),
 
         Sender(
             from: "Meadowlark Garden Supply <hello@meadowlarkgarden.com>",
@@ -179,7 +206,7 @@ public enum DemoData {
                 "Your soil test results explained",
             ],
             unsubscribe: "<https://meadowlarkgarden.com/mail/off>",
-            latestAgeHours: 26, cadenceHours: 200, unreadFraction: 0.67),
+            latestAgeHours: 26, cadenceHours: 200, unreadFraction: 0.67, bytesPerMessage: 700_000),
 
         Sender(
             from: "Cadence Running Co. <team@e.cadencerunning.com>",
@@ -194,7 +221,8 @@ public enum DemoData {
                 "The gear our team actually uses",
             ],
             unsubscribe: "<https://cadencerunning.com/unsub?u=5510>",
-            oneClick: true, latestAgeHours: 33, cadenceHours: 36, unreadFraction: 0.88),
+            oneClick: true, latestAgeHours: 33, cadenceHours: 36, unreadFraction: 0.88,
+            bytesPerMessage: 1_900_000, unsizedOldest: 3),
 
         Sender(
             from: "Ferndale Public Library <notices@ferndalelibrary.org>",
@@ -205,7 +233,7 @@ public enum DemoData {
             ],
             unsubscribe: "<mailto:lists@ferndalelibrary.org?subject=unsubscribe>",
             latestAgeHours: 40, cadenceHours: 150, unreadFraction: 0.0,
-            listID: "notices.ferndalelibrary.org"),
+            listID: "notices.ferndalelibrary.org", bytesPerMessage: 18_000),
 
         Sender(
             from: "Sable & Finch <hello@sableandfinch.com>",
@@ -217,7 +245,7 @@ public enum DemoData {
             ],
             unsubscribe: nil,  // publishes nothing — demonstrates "manual only"
             latestAgeHours: 47, cadenceHours: 90, unreadFraction: 0.75,
-            deliveredTo: "shopping@example.com"),
+            deliveredTo: "shopping@example.com", bytesPerMessage: 1_600_000),
 
         Sender(
             from: "Orchard Software Updates <updates@mail.orchardsoftware.io>",
@@ -229,7 +257,7 @@ public enum DemoData {
                 "New: shared workspaces",
             ],
             unsubscribe: "<https://orchardsoftware.io/notifications>",
-            latestAgeHours: 55, cadenceHours: 220, unreadFraction: 0.2),
+            latestAgeHours: 55, cadenceHours: 220, unreadFraction: 0.2, bytesPerMessage: 22_000),
 
         Sender(
             from: "Copperline Kitchen <recipes@copperlinekitchen.com>",
@@ -242,7 +270,8 @@ public enum DemoData {
                 "What to cook when you can't be bothered",
             ],
             unsubscribe: "<https://copperlinekitchen.com/u/77c1>",
-            oneClick: true, latestAgeHours: 62, cadenceHours: 84, unreadFraction: 0.5),
+            oneClick: true, latestAgeHours: 62, cadenceHours: 84, unreadFraction: 0.5,
+            bytesPerMessage: 620_000),
 
         Sender(
             from: "Junction Theatre <boxoffice@junctiontheatre.org>",
@@ -252,7 +281,7 @@ public enum DemoData {
                 "A note from our artistic director",
             ],
             unsubscribe: "<https://junctiontheatre.org/email-preferences>",
-            latestAgeHours: 71, cadenceHours: 260, unreadFraction: 0.34),
+            latestAgeHours: 71, cadenceHours: 260, unreadFraction: 0.34, bytesPerMessage: 300_000),
 
         Sender(
             from: "Brightpath Careers <alerts@brightpathcareers.com>",
@@ -266,7 +295,8 @@ public enum DemoData {
                 "Three companies are hiring near you",
             ],
             unsubscribe: "<https://brightpathcareers.com/settings/email>, <mailto:stop@brightpathcareers.com>",
-            oneClick: true, latestAgeHours: 80, cadenceHours: 48, unreadFraction: 0.72),
+            oneClick: true, latestAgeHours: 80, cadenceHours: 48, unreadFraction: 0.72,
+            bytesPerMessage: 140_000),
 
         Sender(
             from: "Wexford Hotels <stay@email.wexfordhotels.com>",
@@ -277,7 +307,7 @@ public enum DemoData {
                 "A weekend somewhere new",
             ],
             unsubscribe: "<https://wexfordhotels.com/unsubscribe/df20>",
-            latestAgeHours: 96, cadenceHours: 190, unreadFraction: 0.5),
+            latestAgeHours: 96, cadenceHours: 190, unreadFraction: 0.5, bytesPerMessage: 900_000),
 
         Sender(
             from: "The Slow Signal <post@slowsignal.substack.example>",
@@ -288,7 +318,8 @@ public enum DemoData {
                 "What I got wrong last year",
             ],
             unsubscribe: "<https://slowsignal.substack.example/action/disable_email>",
-            oneClick: true, latestAgeHours: 110, cadenceHours: 168, unreadFraction: 0.25),
+            oneClick: true, latestAgeHours: 110, cadenceHours: 168, unreadFraction: 0.25,
+            bytesPerMessage: 40_000),
 
         Sender(
             from: "Ridgeway Motors Service <service@ridgewaymotors.com>",
@@ -297,7 +328,7 @@ public enum DemoData {
                 "Winter tyre check — book now",
             ],
             unsubscribe: "<mailto:unsubscribe@ridgewaymotors.com>",
-            latestAgeHours: 130, cadenceHours: 400, unreadFraction: 1.0),
+            latestAgeHours: 130, cadenceHours: 400, unreadFraction: 1.0, bytesPerMessage: 30_000),
 
         Sender(
             from: "Lumen Photography <hello@lumenphoto.studio>",
@@ -307,7 +338,8 @@ public enum DemoData {
                 "A print sale, and why we're doing it",
             ],
             unsubscribe: nil,  // second manual-only sender
-            latestAgeHours: 150, cadenceHours: 300, unreadFraction: 0.34),
+            latestAgeHours: 150, cadenceHours: 300, unreadFraction: 0.34,
+            bytesPerMessage: 3_100_000),
 
         Sender(
             from: "Grangefield Charity <supporters@grangefield.org>",
@@ -318,7 +350,7 @@ public enum DemoData {
                 "Could you give £5 this month?",
             ],
             unsubscribe: "<https://grangefield.org/email/manage>",
-            latestAgeHours: 170, cadenceHours: 240, unreadFraction: 0.75),
+            latestAgeHours: 170, cadenceHours: 240, unreadFraction: 0.75, bytesPerMessage: 210_000),
 
         Sender(
             from: "Halcyon Travel Deals <deals@halcyontravel.example>",
@@ -334,7 +366,8 @@ public enum DemoData {
                 "Last call: the sale ends at midnight",
             ],
             unsubscribe: "<https://halcyontravel.example/u/2f8b>",
-            oneClick: true, latestAgeHours: 195, cadenceHours: 30, unreadFraction: 0.89),
+            oneClick: true, latestAgeHours: 195, cadenceHours: 30, unreadFraction: 0.89,
+            bytesPerMessage: 1_150_000, unsizedOldest: 4),
     ]
 
     // MARK: - Unsubscribes the demo has already made

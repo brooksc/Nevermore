@@ -42,6 +42,19 @@ struct SenderTableView: View {
             }
             .width(80)
 
+            // Sorted on measured bytes, shown as a rounded size — and shown as
+            // "Unknown" rather than "0 bytes" where nothing is measured, since
+            // zero would read as "this sender costs you nothing" (TASK-29).
+            TableColumn("Size", value: \.storageBytes) { row in
+                Text(row.storage.summary())
+                    .monospacedDigit()
+                    .foregroundStyle(row.storage.isUnknown ? .tertiary : .secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .help(row.storage.caveat ?? "")
+            }
+            .width(110)
+
             TableColumn("Unread", value: \.unreadPercent) { row in
                 UnreadBar(percent: row.unreadPercent)
             }

@@ -163,7 +163,7 @@ column is non-native and steals horizontal space. Bulk actions operate on the
 current selection.
 
 The selection count drives the toolbar and status bar: *"3 senders selected ·
-214 messages"*.
+214 messages · at least 890 MB"*.
 
 **One selection model, not one per collection.** Reappeared, Unsubscribed,
 Ignored and Proposed are lists rather than tables, but they select, navigate and
@@ -187,9 +187,25 @@ the mail, and Proposed lists what an agent put forward.
 | **Sender** | 240 | Display name, bold if any unread. Second line: email address in secondary, `.caption`. | ✓ name |
 | **Latest Subject** | flexible | Most recent subject, truncated with tail ellipsis. Secondary color. | ✗ |
 | **Messages** | 90 | Count, right-aligned, monospaced digits. | ✓ (default, descending) |
+| **Size** | 110 | What the sender's stored messages occupy. Rounded, right-aligned, monospaced digits. | ✓ by measured bytes |
 | **Unread** | 80 | Percentage with a thin horizontal bar. Never color alone — show the number too. | ✓ |
 | **Last Received** | 120 | Relative ("2h ago", "3d ago", "Mar 4"). Full date in tooltip. | ✓ |
 | **Unsubscribe** | 44 | Icon only, see below. | ✓ by method |
+
+**The Size column has three states, and the difference between them matters**
+(TASK-29). A sender every one of whose messages has a size on file shows the
+size (*"3.1 GB"*). A sender with some measured and some not shows *"at least
+3.1 GB"* — the total is a floor. A sender with nothing measured shows
+*"Unknown"* in tertiary, **never "0 bytes"**: zero reads as "this sender costs
+you nothing", which is the opposite of what an unmeasured sender may turn out to
+be. Sorting is on measured bytes only, so an unknown sender sits at the bottom
+of a largest-first sort — the one place where the app is making no claim about
+it. The tooltip, and the inspector's Storage line, carry the caveat in full:
+what is left out, and that the total covers only messages Nevermore still has on
+file, so mail already deleted is not in it. The status bar carries the same
+number for the whole collection or for the selection — *"12 selected · 340
+messages · at least 3.1 GB"* — and omits the clause entirely rather than
+printing "Unknown" there.
 
 **Unsubscribe method icons** (with VoiceOver labels and tooltips):
 

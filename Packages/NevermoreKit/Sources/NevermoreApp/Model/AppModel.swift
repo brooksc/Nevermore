@@ -1551,6 +1551,20 @@ final class AppModel {
 
     var totalMessages: Int { rows.reduce(0) { $0 + $1.count } }
 
+    /// What every sender in the current collection occupies, summed.
+    ///
+    /// The number the whole feature exists for: "these senders are using 3.1 GB"
+    /// is a reason to act, where "you have 40 newsletters" is not. Counted over
+    /// the same rows as `totalMessages` so the two halves of the status line
+    /// always describe the same set.
+    var visibleStorage: SenderStorage {
+        SenderStorage.combining(rows.map(\.storage))
+    }
+
+    var selectedStorage: SenderStorage {
+        SenderStorage.combining(selectedGroups.map(\.storage))
+    }
+
     // MARK: - Selection helpers
 
     var selectedGroups: [SenderGroup] {

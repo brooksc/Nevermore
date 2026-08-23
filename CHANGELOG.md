@@ -8,6 +8,22 @@ All notable changes to Nevermore are recorded here. Format follows
 
 ### Added
 
+- **A Size column: what each sender is costing you in storage.** Tidiness is a
+  weak argument for clearing out a mailbox; a full one is a strong argument. The
+  sender table now totals what each sender's messages occupy and sorts by it, so
+  the handful eating gigabytes of a fifteen-gigabyte free tier are one click
+  from the top of the list. The size comes from IMAP `RFC822.SIZE` — metadata
+  like every other field Nevermore reads, describing how big a message is and
+  never what is in it, and part of the fetch the app was already making rather
+  than a new request to your provider. Three things it will not do: it rounds
+  rather than reporting to the byte, because the server's own figure is an
+  approximation; a sender whose messages have no size on file reads *Unknown*
+  rather than a zero that would look like "this one is free"; and a total that
+  leaves messages out says *at least*, because it counts only the mail
+  Nevermore still holds — anything already deleted is not in it. Messages synced
+  before this release have no size until they are read again, so existing
+  mailboxes fill in gradually rather than all at once.
+
 - **The sync now accounts for every message it finds and does not keep.** A sync
   has always located more messages on the server than it stored, and the app
   could not say why — it showed both numbers and explained neither. Click *Last
