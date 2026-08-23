@@ -8,6 +8,13 @@ All notable changes to Nevermore are recorded here. Format follows
 
 ### Added
 
+- **A report on how the last 30 days of unsubscribes went**, at the top of
+  Unsubscribed: how many senders you unsubscribed from, how many have mailed
+  you since, and how many have sent nothing since. It reports what arrived, not
+  whether anyone complied — silence shorter than twice a sender's own usual gap
+  between messages is called too recent to say rather than a success, senders
+  whose mail is no longer stored are counted as nothing to judge by, and a
+  request that failed is reported as unfinished rather than as quiet.
 - **Smart selections, under Edit → Smart Selection.** Four rules over figures
   the sync already stored — never opened, rarely opened, nothing in a year,
   one-click capable — that fill the selection from the rows on screen and then

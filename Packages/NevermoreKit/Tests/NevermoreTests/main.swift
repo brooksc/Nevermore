@@ -5985,4 +5985,241 @@ Harness.suite("Automatic update checks") {
     }
 }
 
+// MARK: - Unsubscribe report (TASK-32)
+
+/// A fixed clock, so nothing here depends on when the suite runs.
+let reportNow = Date(timeIntervalSince1970: 1_700_000_000)
+
+func reportMsg(_ uid: UInt32, daysAgo: Double) -> EmailMessage {
+    EmailMessage(
+        uid: MessageUID(uid),
+        sender: EmailSender(header: "Acme <news@acme.com>"),
+        subject: "s",
+        receivedAt: reportNow.addingTimeInterval(-daysAgo * 86400),
+        isUnread: false,
+        unsubscribe: ListUnsubscribe(header: "<https://ex.com/u>"))
+}
+
+func reportRecord(
+    _ key: String = "domain:acme.com",
+    daysAgo: Double,
+    outcome: MessageStore.Outcome = .requested
+) -> MessageStore.UnsubscribeRecord {
+    MessageStore.UnsubscribeRecord(
+        groupKey: key,
+        senderName: "Acme",
+        senderEmail: "news@acme.com",
+        senderDomain: "acme.com",
+        url: nil,
+        attemptedAt: reportNow.addingTimeInterval(-daysAgo * 86400),
+        outcome: outcome)
+}
+
+/// Mail every `every` days, from `from` days ago up to `until` days ago.
+func reportSeries(every: Double, from: Double, until: Double) -> [EmailMessage] {
+    var out: [EmailMessage] = []
+    var d = from
+    var uid: UInt32 = 1
+    while d >= until {
+        out.append(reportMsg(uid, daysAgo: d))
+        uid += 1
+        d -= every
+    }
+    return out
+}
+
+func makeReport(
+    _ records: [MessageStore.UnsubscribeRecord],
+    _ messages: [String: [EmailMessage]] = [:],
+    windowDays: Double = 30
+) -> UnsubscribePeriodReport {
+    UnsubscribePeriodReport.make(
+        records: records,
+        messagesByGroupKey: messages,
+        since: reportNow.addingTimeInterval(-windowDays * 86400),
+        now: reportNow)
+}
+
+Harness.suite("Reappearance rule") {
+    // The one definition of "mailed again", shared by the Reappeared collection,
+    // the Unsubscribed log and the report — so they cannot disagree.
+    Harness.test("counts only mail strictly after the attempt") {
+        let messages = [reportMsg(1, daysAgo: 20), reportMsg(2, daysAgo: 5), reportMsg(3, daysAgo: 1)]
+        let attempted = reportNow.addingTimeInterval(-10 * 86400)
+        expect(Reappearance.hasMailed(since: attempted, in: messages))
+        eq(Reappearance.messageCount(since: attempted, in: messages), 2)
+    }
+    Harness.test("a message arriving exactly at the attempt is not a reappearance") {
+        // The unsubscribe and the message are simultaneous; the mail cannot have
+        // been a response to the request, and calling it one would put a sender
+        // in Reappeared for the message that was on screen when you acted.
+        let attempted = reportNow.addingTimeInterval(-10 * 86400)
+        expect(!Reappearance.hasMailed(since: attempted, in: [reportMsg(1, daysAgo: 10)]))
+    }
+    Harness.test("no mail is not a reappearance") {
+        expect(!Reappearance.hasMailed(since: reportNow, in: []))
+    }
+}
+
+Harness.suite("UnsubscribePeriodReport") {
+    Harness.test("reports a sender that kept mailing, with the count") {
+        let report = makeReport(
+            [reportRecord(daysAgo: 10)],
+            ["domain:acme.com": reportSeries(every: 3, from: 30, until: 1)])
+        eq(report.total, 1)
+        eq(report.mailedAgainCount, 1)
+        eq(report.entries.first?.observation, .mailedAgain(messages: 3))
+    }
+
+    Harness.test("mail since the attempt outranks a failed request") {
+        // A failed request followed by more mail is still a sender who kept
+        // mailing — that is the fact, whatever the request did.
+        let report = makeReport(
+            [reportRecord(daysAgo: 10, outcome: .failed)],
+            ["domain:acme.com": [reportMsg(1, daysAgo: 20), reportMsg(2, daysAgo: 2)]])
+        eq(report.mailedAgainCount, 1)
+        eq(report.requestFailedCount, 0)
+    }
+
+    Harness.test("a failed request that was followed by silence is not counted as quiet") {
+        // Nothing was ever asked, so the silence is not a result. Reporting it
+        // as one would credit the app for an unsubscribe that never happened.
+        let report = makeReport(
+            [reportRecord(daysAgo: 25, outcome: .failed)],
+            ["domain:acme.com": reportSeries(every: 2, from: 60, until: 26)])
+        eq(report.requestFailedCount, 1)
+        eq(report.quietCount, 0)
+        expect(report.findings.contains { $0.contains("didn't go through") })
+    }
+
+    Harness.test("a sender whose mail is no longer on file is not counted as quiet") {
+        // Absence of a mailbox is not absence of mail: their messages may have
+        // been trashed. The Reappeared collection treats this as "not
+        // reappeared", which must not become "honoured it" in a count.
+        let report = makeReport([reportRecord(daysAgo: 25)])
+        eq(report.noMailOnFileCount, 1)
+        eq(report.quietCount, 0)
+    }
+
+    Harness.test("a monthly sender silent for three weeks is too early to say") {
+        let report = makeReport(
+            [reportRecord(daysAgo: 21)],
+            ["domain:acme.com": reportSeries(every: 30, from: 180, until: 22)])
+        eq(report.tooEarlyCount, 1)
+        eq(report.quietCount, 0)
+    }
+
+    Harness.test("a monthly sender silent for ten weeks is reported as quiet") {
+        let report = makeReport(
+            [reportRecord(daysAgo: 70)],
+            ["domain:acme.com": reportSeries(every: 30, from: 300, until: 71)],
+            windowDays: 90)
+        eq(report.quietCount, 1)
+        eq(report.entries.first?.observation, .quiet(days: 70))
+    }
+
+    Harness.test("a daily sender silent for three days is still too early") {
+        // Twice a one-day gap is two days, but two days of silence from anyone
+        // is noise. The floor stops the report concluding on a weekend.
+        let report = makeReport(
+            [reportRecord(daysAgo: 3)],
+            ["domain:acme.com": reportSeries(every: 1, from: 60, until: 4)])
+        eq(report.tooEarlyCount, 1)
+    }
+
+    Harness.test("a daily sender silent for a fortnight is quiet") {
+        let report = makeReport(
+            [reportRecord(daysAgo: 15)],
+            ["domain:acme.com": reportSeries(every: 1, from: 60, until: 16)])
+        eq(report.quietCount, 1)
+    }
+
+    Harness.test("a rare sender still concludes once the cap is passed") {
+        // Twice a quarterly gap would be six months, and the report would never
+        // say anything about this sender at all.
+        let report = makeReport(
+            [reportRecord(daysAgo: 95)],
+            ["domain:acme.com": reportSeries(every: 90, from: 700, until: 96)],
+            windowDays: 120)
+        eq(report.quietCount, 1)
+    }
+
+    Harness.test("a sender with a single earlier message falls back to the floor") {
+        let messages = ["domain:acme.com": [reportMsg(1, daysAgo: 40)]]
+        eq(makeReport([reportRecord(daysAgo: 5)], messages).tooEarlyCount, 1)
+        eq(makeReport([reportRecord(daysAgo: 20)], messages).quietCount, 1)
+    }
+
+    Harness.test("mail sent after the attempt does not set the sender's usual gap") {
+        // The rhythm is measured from what the sender did before being asked to
+        // stop; counting the reappearance mail would let a burst of it shrink
+        // the threshold and turn later silence into a conclusion.
+        let messages = reportSeries(every: 30, from: 180, until: 22) + [reportMsg(99, daysAgo: 21)]
+        eq(
+            UnsubscribePeriodReport.quietSpan(
+                forMailBefore: reportNow.addingTimeInterval(-22 * 86400), in: messages),
+            60 * 86400)
+    }
+
+    Harness.test("only unsubscribes inside the window are reported") {
+        let report = makeReport([
+            reportRecord("domain:a.com", daysAgo: 5),
+            reportRecord("domain:b.com", daysAgo: 200),
+        ])
+        eq(report.total, 1)
+        eq(report.entries.first?.groupKey, "domain:a.com")
+    }
+
+    Harness.test("entries come back newest first") {
+        let report = makeReport([
+            reportRecord("domain:a.com", daysAgo: 20),
+            reportRecord("domain:b.com", daysAgo: 2),
+        ])
+        eq(report.entries.map(\.groupKey), ["domain:b.com", "domain:a.com"])
+    }
+
+    Harness.test("headline names the window and the count") {
+        eq(
+            makeReport([reportRecord("domain:a.com", daysAgo: 2), reportRecord("domain:b.com", daysAgo: 3)]).headline,
+            "You unsubscribed from 2 senders in the last 30 days.")
+        eq(
+            makeReport([reportRecord(daysAgo: 2)]).headline,
+            "You unsubscribed from 1 sender in the last 30 days.")
+    }
+
+    Harness.test("an empty window says so and has nothing to report") {
+        let report = makeReport([])
+        expect(report.isEmpty)
+        eq(report.headline, "No unsubscribes in the last 30 days.")
+        expect(report.findings.isEmpty)
+    }
+
+    Harness.test("every finding is stated as an observation about mail") {
+        // The whole point of the report. If it ever claims a sender honoured or
+        // respected anything, it is claiming knowledge the app does not have.
+        let report = makeReport(
+            [
+                reportRecord("domain:a.com", daysAgo: 10),
+                reportRecord("domain:b.com", daysAgo: 20),
+                reportRecord("domain:c.com", daysAgo: 2),
+                reportRecord("domain:d.com", daysAgo: 5, outcome: .failed),
+                reportRecord("domain:e.com", daysAgo: 8),
+            ],
+            [
+                "domain:a.com": [reportMsg(1, daysAgo: 30), reportMsg(2, daysAgo: 1)],
+                "domain:b.com": reportSeries(every: 1, from: 60, until: 21),
+                "domain:c.com": reportSeries(every: 30, from: 180, until: 3),
+                "domain:d.com": reportSeries(every: 1, from: 60, until: 6),
+            ])
+        eq(report.mailedAgainCount, 1)
+        eq(report.quietCount, 1)
+        eq(report.tooEarlyCount, 1)
+        eq(report.requestFailedCount, 1)
+        eq(report.noMailOnFileCount, 1)
+        eq(report.findings.count, 5)
+        expect(report.staysWithinTheEvidence)
+        expect(UnsubscribePeriodReport.caveat.contains("may simply have had nothing to send"))
+    }
+}
+
 exit(Harness.finish())

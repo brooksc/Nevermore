@@ -51,6 +51,15 @@ ones that "confirmed" your request.
 
 ![The Reappeared collection listing two senders who kept mailing after an unsubscribe](docs/media/reappeared.gif)
 
+### And it tells you how the last month went
+
+Unsubscribed opens with a summary of the last 30 days: how many senders you
+unsubscribed from, how many have mailed you since, and how many have sent
+nothing since — kept separate from the ones it is too early to judge, because
+three weeks of silence from a monthly newsletter proves nothing. It reports what
+arrived. It never claims a sender honoured anything, because that is not
+something your mailbox can tell you.
+
 ## Why another one of these
 
 Most unsubscribe tools are web services that ask for OAuth access to your
@@ -147,7 +156,7 @@ drag Nevermore to Applications. Signed and notarized by Apple.
 ```bash
 cd Packages/NevermoreKit
 swift build                       # build everything
-swift run nevermore-tests         # run the test suite (415 tests)
+swift run nevermore-tests         # run the test suite (434 tests)
 ./make-app.sh release             # produce a signed Nevermore.app
 ./make-dmg.sh --notarize          # produce a notarized, stapled DMG
 ```
