@@ -5820,4 +5820,109 @@ Harness.suite("SmartSelection") {
     }
 }
 
+// MARK: - Undo of a trash restores where the message came from (TASK-8)
+
+// A message identified well enough for undo: undo finds messages again by
+// Message-ID, because a UID is only meaningful inside one mailbox.
+func trashedMessage(_ uid: UInt32, messageId: String) -> EmailMessage {
+    EmailMessage(
+        uid: MessageUID(uid),
+        sender: EmailSender(header: "News <news@ex.com>"),
+        subject: "s",
+        receivedAt: Date(timeIntervalSince1970: 1_700_000_000),
+        isUnread: false,
+        unsubscribe: ListUnsubscribe(header: "<https://ex.com/u>"),
+        messageId: messageId)
+}
+
+Harness.suite("Trash origin") {
+    // Gmail says "in the inbox" with a label, not a folder. Everything else in
+    // the label list is decoration as far as this decision goes.
+    Harness.test("a message carrying \\Inbox is not archived") {
+        expect(!IMAPBackend.isArchived(labels: ["\\Inbox"]), "\\Inbox means the inbox")
+        expect(
+            !IMAPBackend.isArchived(labels: ["\\Important", "\\Inbox", "Receipts"]),
+            "\\Inbox counts however many other labels sit beside it")
+    }
+
+    Harness.test("a message without \\Inbox is archived") {
+        expect(IMAPBackend.isArchived(labels: []), "no labels at all is archived")
+        expect(
+            IMAPBackend.isArchived(labels: ["\\Important", "\\Starred"]),
+            "other system labels are not the inbox")
+        // The case the bug was really about: filed under a user label and
+        // archived. Undo must not call that an inbox message.
+        expect(
+            IMAPBackend.isArchived(labels: ["Receipts"]),
+            "a user label is not the inbox")
+        // ...and a user label that merely reads like the inbox is still a user
+        // label. Gmail's system labels are the backslash-prefixed ones.
+        expect(
+            IMAPBackend.isArchived(labels: ["Inbox"]),
+            "an unprefixed 'Inbox' is a user label, not \\Inbox")
+    }
+
+    Harness.test("label matching ignores case, as IMAP atoms do") {
+        expect(!IMAPBackend.isArchived(labels: ["\\INBOX"]))
+        expect(!IMAPBackend.isArchived(labels: ["\\inbox"]))
+    }
+
+    // The probe is Gmail-only: X-GM-LABELS is a vendor extension, and every
+    // other provider answers a tagged BAD.
+    Harness.test("only Gmail hosts are asked for labels") {
+        expect(IMAPBackend.isGmailHost("imap.gmail.com"))
+        expect(IMAPBackend.isGmailHost("IMAP.GMAIL.COM"), "hostnames are case-insensitive")
+        expect(IMAPBackend.isGmailHost("imap.googlemail.com"))
+        expect(!IMAPBackend.isGmailHost("imap.mail.me.com"))
+        expect(!IMAPBackend.isGmailHost("imap.fastmail.com"))
+        expect(!IMAPBackend.isGmailHost("outlook.office365.com"))
+    }
+}
+
+Harness.suite("Restore plan") {
+    let inboxMessage = trashedMessage(1, messageId: "<a@ex.com>")
+    let archivedMessage = trashedMessage(2, messageId: "<b@ex.com>")
+
+    Harness.test("archived messages are restored apart from inbox ones") {
+        let plan = TrashOutcome.restorePlan(
+            for: [inboxMessage, archivedMessage], archived: [MessageUID(2)])
+        eq(plan.inbox, ["<a@ex.com>"])
+        eq(plan.archive, ["<b@ex.com>"])
+    }
+
+    // The default, and every non-Gmail account: nothing is known to be
+    // archived, so everything goes back to the inbox — which is where it was.
+    Harness.test("an empty archived set sends everything to the inbox") {
+        let plan = TrashOutcome.restorePlan(for: [inboxMessage, archivedMessage], archived: [])
+        eq(plan.inbox.count, 2)
+        expect(plan.archive.isEmpty, "nothing to restore to the archive")
+    }
+
+    Harness.test("a message with no Message-ID is not restorable and is dropped") {
+        // Undo can only find a message in Trash by Message-ID. One without a
+        // Message-ID must not be counted into either bucket, or the restore
+        // would search for the empty string.
+        let plan = TrashOutcome.restorePlan(
+            for: [inboxMessage, trashedMessage(3, messageId: "")], archived: [])
+        eq(plan.inbox, ["<a@ex.com>"])
+        expect(plan.archive.isEmpty)
+    }
+
+    Harness.test("an outcome defaults to nothing archived") {
+        eq(TrashOutcome(moved: [MessageUID(1)]).archived.count, 0)
+    }
+}
+
+Harness.suite("Demo trash") {
+    // The demo mailbox is entirely inbox, so its undo has nowhere else to put
+    // anything — and App Review must not see a restore silently archive mail.
+    asyncTest("the demo backend reports every trashed message as an inbox one") {
+        let backend = DemoBackend()
+        let outcome = try? await backend.trash(
+            [MessageUID(1), MessageUID(2)], recordOrigin: true)
+        eq(outcome?.moved.count, 2)
+        eq(outcome?.archived.count, 0)
+    }
+}
+
 exit(Harness.finish())

@@ -83,6 +83,15 @@ All notable changes to Nevermore are recorded here. Format follows
   hop as well. Certificate checking is untouched: HTTPS connections are still
   verified against the real hostname, and a wrong, expired or self-signed
   certificate is still refused.
+- **Undo of a trash puts archived mail back in the archive.** On Gmail,
+  Nevermore finds newsletters wherever they are, including ones you had already
+  archived — but undo moved everything to the inbox, so an action labelled Undo
+  dumped read-and-filed mail back into the inbox. Nevermore now records whether
+  each message was in the inbox at the moment it was trashed, and restores it
+  where it was. Gmail *labels* are not restored: the move to Trash removes them
+  and IMAP offers no way to put them back, so a labelled, archived message comes
+  back archived and unlabelled. Other providers are unaffected — Nevermore only
+  ever sees their inbox, so the inbox was always the right answer there.
 
 
 ## [1.0.0] — 2026-08-01

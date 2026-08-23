@@ -1646,8 +1646,14 @@ final class AppModel {
     /// the provider's own Trash retention.
     private static let maxUndoableTrash = 100
 
-    func trash(_ ids: Set<GroupID>, silently: Bool = false) async {
-        guard let backend, let store else { return }
+    /// Trash the messages of the given senders.
+    ///
+    /// Returns the UIDs that were archived rather than in the inbox, so a caller
+    /// building its own undo (`trashAndIgnore`) can restore each message where
+    /// it came from. Empty on every provider but Gmail, and on failure.
+    @discardableResult
+    func trash(_ ids: Set<GroupID>, silently: Bool = false) async -> Set<MessageUID> {
+        guard let backend, let store else { return [] }
         let targets = groups.filter { ids.contains($0.id) }
         let messages = targets.flatMap(\.messages)
         let uids = messages.map(\.uid)
@@ -1655,7 +1661,13 @@ final class AppModel {
             // Only forget locally what the server confirms it moved, so a
             // partial trash leaves the app agreeing with the mailbox instead of
             // hiding messages that are still sitting in the inbox.
-            let movedUIDs = try await backend.trash(uids)
+            //
+            // Ask where each message came from only when undo will be offered:
+            // above that size there is no undo to feed, and the extra round
+            // trips would be spent on an answer nothing reads.
+            let outcome = try await backend.trash(
+                uids, recordOrigin: uids.count <= Self.maxUndoableTrash)
+            let movedUIDs = outcome.moved
             let moved = Set(movedUIDs)
             try store.delete(uids: movedUIDs)
             await reloadFromStore()
@@ -1670,35 +1682,51 @@ final class AppModel {
                 showToast(
                     "Trashed \(n.formatted()) of \(uids.count.formatted()) — the rest timed out. Try again to finish.",
                     undoLabel: nil, undo: nil)
-                return
+                return outcome.archived
             }
-            guard !silently else { return }
+            guard !silently else { return outcome.archived }
 
             let restorable = messages.filter { !$0.messageId.isEmpty && moved.contains($0.uid) }
             if n <= Self.maxUndoableTrash, !restorable.isEmpty {
+                let archived = outcome.archived
                 showToast("Trashed \(n) message\(n == 1 ? "" : "s")", undoLabel: "Undo") {
-                    [weak self] in await self?.untrash(restorable)
+                    [weak self] in await self?.untrash(restorable, archived: archived)
                 }
             } else {
                 showToast(
                     "Trashed \(n) message\(n == 1 ? "" : "s") — recoverable from your Trash folder",
                     undoLabel: nil, undo: nil)
             }
+            return outcome.archived
         } catch {
             Log.app.problem("trash failed: \(friendly(error))")
             showToast("Trash failed: \(friendly(error))", undoLabel: nil, undo: nil)
+            return []
         }
     }
 
     /// Restore trashed messages: move them out of the provider's Trash and
     /// re-insert them locally so they reappear immediately.
-    private func untrash(_ messages: [EmailMessage]) async {
+    ///
+    /// Each message goes back where it came from. `archived` names the ones that
+    /// were not in the inbox when they were trashed — sending those to the inbox
+    /// is what made Undo unarchive mail for anyone who archives as they read.
+    private func untrash(_ messages: [EmailMessage], archived: Set<MessageUID>) async {
         guard let backend, let store else { return }
+        let plan = TrashOutcome.restorePlan(for: messages, archived: archived)
         do {
-            let restored = try await backend.untrash(messageIDs: messages.map(\.messageId))
+            var restored = 0
+            if !plan.inbox.isEmpty {
+                restored += try await backend.untrash(messageIDs: plan.inbox, to: .inbox)
+            }
+            if !plan.archive.isEmpty {
+                restored += try await backend.untrash(messageIDs: plan.archive, to: .archive)
+            }
             try store.upsert(messages)
             await reloadFromStore()
-            Log.app.event("undo trash: restored \(restored)/\(messages.count)")
+            Log.app.event(
+                "undo trash: restored \(restored)/\(messages.count), "
+                    + "\(plan.archive.count) of them to the archive")
         } catch {
             Log.app.problem("undo trash failed: \(friendly(error))")
             showToast("Couldn't restore: \(friendly(error))", undoLabel: nil, undo: nil)
@@ -2249,7 +2277,7 @@ final class AppModel {
     func trashAndIgnore(_ id: GroupID) async {
         let targets = groups.filter { $0.id == id }
         let messages = targets.flatMap(\.messages)
-        await trash([id], silently: true)
+        let archived = await trash([id], silently: true)
         ignore([id], silently: true)
         let restorable = messages.filter { !$0.messageId.isEmpty }
         showToast(
@@ -2259,7 +2287,7 @@ final class AppModel {
             guard let self, let store = self.store else { return }
             try? targets.forEach { try store.unignore($0.id) }
             self.ignoredKeys = (try? store.ignoredGroupKeys()) ?? self.ignoredKeys
-            await self.untrash(restorable)
+            await self.untrash(restorable, archived: archived)
         }
     }
 }
