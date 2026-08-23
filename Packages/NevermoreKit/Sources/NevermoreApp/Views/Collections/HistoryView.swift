@@ -15,34 +15,70 @@ struct HistoryView: View {
 
     var body: some View {
         let rows = model.unsubscribedRows
-        if rows.isEmpty {
-            EmptyStateView(
-                systemImage: "checkmark.circle",
-                title: "No unsubscribes yet",
-                message: "Senders you unsubscribe from are logged here — even after you delete their messages.")
-        } else {
-            VStack(spacing: 0) {
-                Text("A record of every sender you've unsubscribed from. Kept even after their messages are deleted. Use the link to reach a sender's preferences if you unsubscribed by accident.")
-                    .font(.callout).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(.quaternary.opacity(0.4))
-                // Selection is keyed by the record's GroupID, not the record, so
-                // an Unsubscribed row selects like a sender row anywhere else —
-                // even after the sender's messages are gone and only the record
-                // is left.
-                List(selection: $model.selection) {
-                    ForEach(rows) { entry in
-                        row(entry.record)
-                    }
-                }
-                .focused($isFocused)
-                .selectionKeyboard(
-                    model: model,
-                    onUnsubscribe: onUnsubscribe,
-                    onUnsubscribeAndDelete: onUnsubscribeAndDelete)
+        // The report sits above the log rather than behind a notification: this
+        // is the view the user opens to ask "did any of that work", so it is
+        // where the answer belongs (TASK-32).
+        //
+        // Above the rows, not inside them: the log hides senders who have started
+        // mailing again, and it is filtered by the search field. Both are right
+        // for a to-do list and wrong for a summary — a report that disappeared
+        // when you typed in the search box, or that went missing precisely when
+        // every sender had ignored you, would be reporting on the wrong thing.
+        let report = model.unsubscribePeriodReport()
+        VStack(spacing: 0) {
+            if !report.isEmpty {
+                reportCard(report)
+            }
+            if rows.isEmpty {
+                EmptyStateView(
+                    systemImage: "checkmark.circle",
+                    title: "No unsubscribes yet",
+                    message: "Senders you unsubscribe from are logged here — even after you delete their messages.")
+            } else {
+                logList(rows)
             }
         }
+    }
+
+    private func logList(_ rows: [AppModel.HistoryRow]) -> some View {
+        VStack(spacing: 0) {
+            Text("A record of every sender you've unsubscribed from. Kept even after their messages are deleted. Use the link to reach a sender's preferences if you unsubscribed by accident.")
+                .font(.callout).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(.quaternary.opacity(0.4))
+            // Selection is keyed by the record's GroupID, not the record, so
+            // an Unsubscribed row selects like a sender row anywhere else —
+            // even after the sender's messages are gone and only the record
+            // is left.
+            List(selection: $model.selection) {
+                ForEach(rows) { entry in
+                    row(entry.record)
+                }
+            }
+            .focused($isFocused)
+            .selectionKeyboard(
+                model: model,
+                onUnsubscribe: onUnsubscribe,
+                onUnsubscribeAndDelete: onUnsubscribeAndDelete)
+        }
+    }
+
+    /// The periodic summary. The caveat is not fine print to be trimmed later:
+    /// it is the sentence that keeps the counts above it honest.
+    private func reportCard(_ report: UnsubscribePeriodReport) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(report.headline).font(.headline)
+            ForEach(report.findings, id: \.self) { line in
+                Text(line).font(.callout)
+            }
+            Text(UnsubscribePeriodReport.caveat)
+                .font(.caption).foregroundStyle(.secondary)
+                .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.quaternary.opacity(0.25))
     }
 
     private func row(_ record: MessageStore.UnsubscribeRecord) -> some View {

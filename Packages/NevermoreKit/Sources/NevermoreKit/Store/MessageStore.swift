@@ -306,6 +306,26 @@ public final class MessageStore: Sendable {
         public let outcome: Outcome
 
         public var id: String { groupKey }
+
+        // Public so a record can be built outside the store — the report over
+        // these records (TASK-32) has to be testable without a database.
+        public init(
+            groupKey: String,
+            senderName: String,
+            senderEmail: String,
+            senderDomain: String,
+            url: String?,
+            attemptedAt: Date,
+            outcome: Outcome
+        ) {
+            self.groupKey = groupKey
+            self.senderName = senderName
+            self.senderEmail = senderEmail
+            self.senderDomain = senderDomain
+            self.url = url
+            self.attemptedAt = attemptedAt
+            self.outcome = outcome
+        }
     }
 
     public func recordUnsubscribe(

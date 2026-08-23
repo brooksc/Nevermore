@@ -1095,7 +1095,24 @@ final class AppModel {
 
     private func isReappearedRecord(_ r: MessageStore.UnsubscribeRecord) -> Bool {
         guard let g = groups.first(where: { $0.id.storageKey == r.groupKey }) else { return false }
-        return g.messages.contains { $0.receivedAt > r.attemptedAt }
+        return Reappearance.hasMailed(since: r.attemptedAt, in: g.messages)
+    }
+
+    /// What came of the unsubscribes in the last 30 days (TASK-32).
+    ///
+    /// Built from the whole history table, not from `unsubscribedRecords`: that
+    /// collection hides senders who have started mailing again, which are
+    /// precisely the ones the report has hard evidence about.
+    ///
+    /// `now` is passed in so the report itself stays a pure function of stored
+    /// records; only this property knows the clock.
+    func unsubscribePeriodReport(now: Date = Date()) -> UnsubscribePeriodReport {
+        UnsubscribePeriodReport.make(
+            records: Array(history.values),
+            messagesByGroupKey: Dictionary(
+                groups.map { ($0.id.storageKey, $0.messages) }, uniquingKeysWith: { a, _ in a }),
+            since: now.addingTimeInterval(-30 * 86_400),
+            now: now)
     }
 
     /// Give the demo mailbox an unsubscribe history, so Reappeared has
@@ -1430,13 +1447,13 @@ final class AppModel {
     /// the Reappeared list is actually claiming.
     func messagesSinceUnsubscribe(_ id: GroupID) -> Int {
         guard let record = history[id.storageKey], let group = group(for: id) else { return 0 }
-        return group.messages.filter { $0.receivedAt > record.attemptedAt }.count
+        return Reappearance.messageCount(since: record.attemptedAt, in: group.messages)
     }
 
     /// A sender that mailed again after a recorded unsubscribe attempt.
     private func isReappeared(_ g: SenderGroup) -> Bool {
         guard let record = history[g.id.storageKey] else { return false }
-        return g.messages.contains { $0.receivedAt > record.attemptedAt }
+        return Reappearance.hasMailed(since: record.attemptedAt, in: g.messages)
     }
 
     private func matchesSearch(_ g: SenderGroup) -> Bool {

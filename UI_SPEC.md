@@ -489,6 +489,29 @@ The collection view leads with an explanatory banner: *"These senders kept
 emailing after you unsubscribed. They may have ignored the request."* Row
 actions: `Unsubscribe Again`, `Trash and Ignore`, `Forget Record`.
 
+### 9.8.1 The unsubscribe report
+
+Unsubscribed opens with a summary of the last 30 days, above the log: how many
+senders were unsubscribed from, how many have mailed since, how many have sent
+nothing since, how many are too recent to say, and how many requests never went
+through. It is the app's claim stated as a result rather than as a list that
+never concludes, and it is reachable on demand — no notification required.
+
+It sits above the log rather than inside it because the log hides senders who
+have started mailing again and is filtered by the search field; a summary that
+vanished when you typed, or that went missing exactly when every sender had
+ignored you, would be summarising the wrong thing.
+
+**Nothing here reports compliance.** The app observes mail arriving, not senders
+obeying, so a sender who has sent nothing is reported as having sent nothing —
+never as having honoured anything. Silence is qualified three ways: silence
+shorter than twice the sender's own usual gap between messages (floor 14 days,
+cap 90) is *too recent to say* rather than a result; a sender whose mail is no
+longer on file is *nothing to judge by*, since absence of a mailbox is not
+absence of mail; and a failed request is reported as unfinished work, because
+nothing was ever asked. The card carries a standing caveat saying that a silent
+sender may simply have had nothing to send.
+
 ### 9.9 Errors
 
 Inline where recoverable — a banner above the table with a `Retry` button, not
