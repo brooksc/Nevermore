@@ -82,14 +82,11 @@ public struct UnsubscribePeriodReport: Sendable, Equatable {
 
     // MARK: - Building
 
-    /// Silence shorter than this is never reported as quiet, however chatty the
-    /// sender was. A sender who mailed daily and has been silent for two days
-    /// has most likely just not got round to it.
-    static let minimumQuietSpan: TimeInterval = 14 * 86_400
-    /// …and silence longer than this is reported as quiet however rare the
-    /// sender was, or a quarterly mailer would sit at "too early to say"
-    /// forever and the report would never conclude anything.
-    static let maximumQuietSpan: TimeInterval = 90 * 86_400
+    /// The bounds on how long silence has to last to mean anything. Defined by
+    /// `SenderCadence`, which is where the app's one notion of a sender's rhythm
+    /// lives now that TASK-31 needs it too.
+    static let minimumQuietSpan: TimeInterval = SenderCadence.minimumSilence
+    static let maximumQuietSpan: TimeInterval = SenderCadence.maximumSilence
 
     /// - Parameters:
     ///   - records: every stored unsubscribe; those outside the window are dropped.
@@ -137,24 +134,16 @@ public struct UnsubscribePeriodReport: Sendable, Equatable {
     }
 
     /// How long this sender has to stay silent before the silence is worth
-    /// reporting: twice their usual gap between messages, bounded at both ends.
+    /// reporting: `SenderCadence.silenceThreshold`, read from the mail that
+    /// arrived before the attempt.
     ///
-    /// Twice, not once, because a newsletter that slips a week is common and a
-    /// report that flips between "quiet" and "mailed again" week to week is
-    /// worth nothing. The gap is the median of their past gaps, so one burst of
-    /// five messages in an hour does not redefine "usual".
+    /// Only mail from before the attempt counts. Anything after it is what the
+    /// report is trying to judge, so letting it set the rhythm would be letting
+    /// the answer choose the question.
     public static func quietSpan(forMailBefore attemptedAt: Date, in messages: [EmailMessage]) -> TimeInterval {
-        let dates = messages.map(\.receivedAt).filter { $0 <= attemptedAt }.sorted()
-        guard dates.count >= 2 else {
-            // One message tells us nothing about a rhythm. Fall back to the
-            // floor rather than to a guess.
-            return minimumQuietSpan
-        }
-        let gaps = zip(dates.dropFirst(), dates).map { $0.timeIntervalSince($1) }.sorted()
-        let median = gaps.count % 2 == 1
-            ? gaps[gaps.count / 2]
-            : (gaps[gaps.count / 2 - 1] + gaps[gaps.count / 2]) / 2
-        return min(max(median * 2, minimumQuietSpan), maximumQuietSpan)
+        let dates = messages.map(\.receivedAt).filter { $0 <= attemptedAt }
+        guard let cadence = SenderCadence.of(dates) else { return minimumQuietSpan }
+        return cadence.silenceThreshold
     }
 
     // MARK: - Counts
