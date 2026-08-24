@@ -8,20 +8,14 @@ All notable changes to Nevermore are recorded here. Format follows
 
 ### Added
 
-- **Shortcuts support, for the three verbs that can be automated safely.** *Sync
-  Mailbox*, *Ignore Senders* / *Unignore Senders*, and *Get Reappeared Senders*
-  are now App Intents, so a shortcut can sync overnight and hand you a list of
-  the senders who ignored an unsubscribe. The senders come back as real values,
-  not text, so the next step in your shortcut can count them or name them. The
-  first and last also show up in Spotlight and Siri with nothing to set up.
-  There is deliberately **no unsubscribe shortcut**. A shortcut can be
-  scheduled, so an unsubscribe intent would either fire at three in the morning
-  with nobody looking or raise a confirmation with nobody there to read it — and
-  a dialog that appears on a schedule gets answered by reflex. Unsubscribing
-  reaches a third party and cannot be recalled, so it stays where it has always
-  been: a set of senders you reviewed in the app and confirmed. Trashing is out
-  for the same reason. Every intent that ships changes nothing outside this Mac
-  and can be undone on it.
+- **A few actions are available to Shortcuts** in the Mac App Store build:
+  *Sync Mailbox*, *Ignore* / *Unignore Senders*, and *Get Reappeared Senders*.
+  There is deliberately **no unsubscribe shortcut**, and there will not be one
+  — a shortcut can be scheduled, so it would either fire with nobody looking or
+  raise a confirmation with nobody there to read it, and a dialog that appears on
+  a schedule gets answered by reflex. Unsubscribing reaches a third party and
+  cannot be recalled, so it stays where it has always been: a set of senders you
+  reviewed and confirmed. Trashing is out for the same reason.
 
 - **A Size column: what each sender is costing you in storage.** Tidiness is a
   weak argument for clearing out a mailbox; a full one is a strong argument. The

@@ -1,9 +1,10 @@
 ---
 id: TASK-55
 title: The DMG build ships App Intents that Shortcuts cannot see
-status: To Do
+status: Won't Do
 assignee: []
 created_date: '2026-08-23 21:00'
+updated_date: '2026-08-24 03:16'
 labels:
   - product
 dependencies:
@@ -34,3 +35,21 @@ Worth checking as part of this whether an intent that arrives while the app is c
 - [ ] #3 make-app.sh fails loudly if the metadata step does not produce a bundle, rather than shipping an app without one
 - [ ] #4 A test or script check asserts the built bundle carries the metadata, so this cannot regress silently
 <!-- AC:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: claude
+created: 2026-08-24 03:16
+---
+Won't Do. The bug is real — the DMG build genuinely ships intents Shortcuts cannot see — but it is not worth fixing, because the feature it would complete has no established value.
+
+The maintainer's view, and I agree: "I struggle to find any value in intents, I don't see anyone using Siri to trigger Nevermore. If you hadn't implemented it I'd say don't."
+
+The deeper problem is that the three verbs safe enough to automate are the three with the least automation value. Sync duplicates the scheduled background sync already in Settings. Ignoring by name requires knowing the sender in advance, which means you are already in the app looking at it. Get Reappeared is a query, and Reappeared already notifies. The one verb worth automating — unsubscribe — is the one that must never be automated, which is not a gap to fill but a sign the app is a poor fit for Shortcuts.
+
+What has been done instead is to stop overpromising: the README section is removed and the CHANGELOG entry now says Mac App Store build. The intents stay because they are isolated, cost nothing at runtime, and give the store listing something Apple favours — which is a marketing benefit, named as one.
+
+Re-open this if someone actually asks for a shortcut, or if the intents start constraining a refactor of AppModel. In the second case deleting TASK-35 outright is the better answer than finishing it.
+---
+<!-- COMMENTS:END -->

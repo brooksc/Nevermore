@@ -363,43 +363,6 @@ nothing until you answer. `get_policy` tells the agent all of this up front.
   reasoning about a fabricated mailbox.
 - **It cannot read your mail.** The bodies are not there to read.
 
-## Shortcuts
-
-Nevermore ships three App Intents, so a shortcut can drive it:
-
-- **Sync Mailbox** — fetch new headers.
-- **Ignore Senders** / **Unignore Senders** — hide senders on this Mac, and put
-  them back. Pick the senders from a list of the ones you actually have.
-- **Get Reappeared Senders** — the senders who have mailed again since
-  Nevermore recorded an unsubscribe, worst first, with how many messages each
-  has sent since. Returns senders, so the next step in your shortcut can count
-  them, notify you, or list them by name.
-
-*Sync Mailbox* and *Get Reappeared Senders* also appear in Spotlight and Siri
-without your building anything.
-
-They all need Nevermore to be running with a mailbox open; a shortcut that runs
-while it is closed says so rather than launching it and taking your screen. They
-refuse in demo mode, for the same reason the agent tools do.
-
-### There is no unsubscribe shortcut, and there will not be one
-
-This is the one place where the answer to "why not" is more useful than the
-feature would be. Unsubscribing reaches a third party, tells them your address
-is live, and cannot be taken back. Nevermore only ever does it to a set of
-senders you have reviewed in the app and confirmed.
-
-A shortcut is different from you pressing `u`, and different from an agent
-asking: it can be **scheduled**. An unsubscribe intent would either act at three
-in the morning with nobody looking, or raise a confirmation with nobody there to
-read it — and a dialog that fires on a schedule gets answered by reflex, which
-is worse than no dialog at all. Trashing is out for the same reason: it moves
-real mail on the server.
-
-So the surface is the verbs that are local to this Mac, reversible here, and
-invisible to the sender. Sync, ignore, and ask who came back — then open the app
-to decide what to do about them.
-
 ## Your mail
 
 Nevermore **never permanently deletes anything**. "Trash" moves messages to your
