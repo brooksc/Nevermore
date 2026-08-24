@@ -56,7 +56,7 @@
   <a class="back" href="./">← Nevermore</a>
   <h1>Privacy policy</h1>
   <p class="lede">Nevermore for macOS.</p>
-  <p class="updated">Last updated: 1 August 2026</p>
+  <p class="updated">Last updated: 24 August 2026</p>
 </header>
 
 <h2>The short version</h2>
@@ -68,6 +68,12 @@
 </p>
 <p>
   There is no account to create, because there is nothing to create it with.
+</p>
+<p>
+  The one exception is deliberate, off by default, and yours to switch on:
+  connecting an <strong>AI assistant over MCP</strong> sends sender names and
+  subject lines to whichever model that assistant runs. See
+  <a href="#connecting-an-ai-agent-mcp">Connecting an AI agent</a> below.
 </p>
 
 <h2>What the app accesses</h2>
@@ -147,6 +153,55 @@
 <p>
   Nevermore never contacts the developer. There is no licence check and no
   "phone home".
+</p>
+
+<h2 id="connecting-an-ai-agent-mcp">Connecting an AI agent (MCP)</h2>
+<p>
+  Nevermore can expose a view of your senders to an AI assistant through a local
+  MCP server, and let it propose senders for you to review. It is off unless you
+  turn it on in Settings, and turning it on changes the app's privacy posture in
+  a way nothing else here does — so this section states it plainly rather than
+  burying it behind a prompt.
+</p>
+<p>
+  <strong>What the assistant can see.</strong> Sender display names, email
+  addresses, domains, <strong>subject lines</strong>, dates, read and unread
+  counts, your unsubscribe history, and any classifications a previous session
+  recorded. Message bodies are not available, because Nevermore never downloads
+  them.
+</p>
+<p>
+  <strong>Where that data goes.</strong> To whichever AI model the connected
+  client is running. That model is very often <strong>cloud-hosted and operated
+  by a third party</strong>, and what it does with the text it is sent is
+  governed by that provider's terms, not by this policy and not by the
+  developer. If you would not paste your subject lines into that service, do not
+  connect it here.
+</p>
+<p>
+  <strong>What the assistant cannot do.</strong> It cannot unsubscribe from a set
+  of senders. There is no bulk unsubscribe over MCP, no setting that turns one
+  on, and nothing an assistant can present to skip the review: a set of senders
+  is unsubscribed only after you have reviewed <em>that exact set</em> in the app
+  and confirmed it. A single unsubscribe, and trashing a sender's messages, raise
+  the same dialog your own keystroke would and do nothing until you answer. What
+  it can do on its own is local to your Mac and reversible — propose senders for
+  you to look at, hide or unhide one, record a note about it, regroup it, or
+  start a sync. It cannot switch accounts, it serves only the account currently
+  open, and it refuses entirely while the app is in demo mode.
+</p>
+<p>
+  <strong>How it is reached.</strong> The server listens on the loopback
+  interface only — 127.0.0.1, on a port in 8775–8779 — so nothing outside your
+  Mac can reach it. Requests carry a token written to
+  <code>~/.nevermore-mcp-token</code> with owner-only permissions, generated
+  fresh each time the server starts and deleted when it stops. That token keeps
+  other accounts on the Mac out; it is not a defence against software already
+  running as you, which could read your mail cache directly in any case.
+</p>
+<p>
+  Turn the server off and every one of these paths closes: the port stops
+  listening, the token file is removed, and nothing is sent anywhere.
 </p>
 
 <h2>Software updates</h2>

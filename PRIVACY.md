@@ -1,7 +1,7 @@
 # Privacy Policy
 
 **Nevermore for macOS**
-_Last updated: 22 August 2026_
+_Last updated: 24 August 2026_
 
 ## The short version
 

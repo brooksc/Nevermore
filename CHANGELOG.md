@@ -6,6 +6,8 @@ All notable changes to Nevermore are recorded here. Format follows
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-24
+
 ### Added
 
 - **A few actions are available to Shortcuts** in the Mac App Store build:
@@ -127,7 +129,7 @@ All notable changes to Nevermore are recorded here. Format follows
 - The Mac App Store build does not include any of this. The sandbox there
   permits outgoing connections only, so the local server cannot run.
 
-### Fixed
+### Security
 
 - **An unsubscribe link can no longer be aimed at your own network.** Nevermore
   already refused to send to a private or local address, but it checked the
@@ -138,6 +140,9 @@ All notable changes to Nevermore are recorded here. Format follows
   hop as well. Certificate checking is untouched: HTTPS connections are still
   verified against the real hostname, and a wrong, expired or self-signed
   certificate is still refused.
+
+### Fixed
+
 - **Undo of a trash puts archived mail back in the archive.** On Gmail,
   Nevermore finds newsletters wherever they are, including ones you had already
   archived — but undo moved everything to the inbox, so an action labelled Undo
@@ -147,7 +152,6 @@ All notable changes to Nevermore are recorded here. Format follows
   and IMAP offers no way to put them back, so a labelled, archived message comes
   back archived and unlabelled. Other providers are unaffected — Nevermore only
   ever sees their inbox, so the inbox was always the right answer there.
-
 
 ## [1.0.0] — 2026-08-01
 

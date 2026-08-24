@@ -12,13 +12,13 @@ The name is the point: senders that keep mailing after you unsubscribe get
 flagged and shut down for good.
 
 **[nevermore website](https://brooksc.github.io/Nevermore/)** ·
-[download 1.0.0](https://github.com/brooksc/Nevermore/releases/latest) ·
+[download 1.1.0](https://github.com/brooksc/Nevermore/releases/latest) ·
 [FAQ](https://brooksc.github.io/Nevermore/faq.html) ·
 [privacy](PRIVACY.md)
 
-> **Status:** 1.0.0 released for direct download; Mac App Store submission in review.
+> **Status:** 1.1.0, on the Mac App Store and as a direct download.
 > Built and used daily against a real ~132,000-message mailbox.
-> _Docs last reviewed: 9 August 2026._
+> _Docs last reviewed: 24 August 2026._
 
 ![Nevermore's main window: a list of senders grouped by domain, with an inspector showing one sender's unsubscribe method](docs/screenshots/main-window.png)
 
@@ -112,6 +112,13 @@ Nevermore is the opposite shape:
   answered yes. Senders whose unsubscribe is simply handled by a bulk-mail
   provider get a note explaining that and nothing more, because that is how most
   legitimate mail works and a warning that fires on everything is worthless.
+- **What a sender will cost you next year.** A backlog is sunk; a forecast is
+  not. Nevermore reads a sender's own rhythm and says *about once a week*,
+  with the annual figure as support rather than as the claim. It says nothing
+  at all where the history is too short to support a rate, declines to
+  forecast a sender that has already gone quiet, and labels a bursty sender as
+  bursty rather than averaging it into a number that describes no month of the
+  year.
 - **What each sender costs you in storage.** A *Size* column totals the messages
   Nevermore holds for each sender, and the table sorts by it — so the twelve
   senders eating three gigabytes of a fifteen-gigabyte free tier are one click
