@@ -3,6 +3,47 @@
     <channel>
         <title>Nevermore</title>
         <item>
+            <title>1.1.0</title>
+            <description><![CDATA[
+                <p><strong>Security.</strong> An unsubscribe link can no longer
+                be aimed at your own network. Nevermore already refused private
+                and local addresses, but it checked the address and then let the
+                system look the name up a second time to open the connection — so
+                a sender running their own DNS could answer with a public address
+                for the check and your router for the connection. The address
+                that passes the check is now the address the connection goes to,
+                on every redirect hop. Certificate checking is untouched.</p>
+                <ul>
+                  <li><strong>An AI assistant can help you triage.</strong> Off
+                  by default. It reads your senders and proposes a set worth
+                  dropping, each with a reason, in a new Proposed collection.
+                  It cannot unsubscribe in bulk, ever — a set of senders is
+                  unsubscribed only after you have reviewed that exact set and
+                  confirmed it.</li>
+                  <li><strong>What each sender costs you.</strong> A Size column
+                  totalling what their mail occupies, and a forecast of how much
+                  more to expect over the next year.</li>
+                  <li><strong>A report on how the last month went</strong> —
+                  which unsubscribes were honoured and which were ignored,
+                  without claiming more than the app can observe.</li>
+                  <li><strong>Smart selections</strong> for the obvious cases:
+                  never opened, nothing in a year, one-click capable.</li>
+                  <li><strong>Guided app-password setup</strong> for your
+                  provider, and a Help menu that points at real help.</li>
+                  <li>Undo of a trash now puts archived mail back in the archive
+                  rather than the inbox, and the unsubscribe results sheet leads
+                  with the senders that still need you.</li>
+                </ul>
+                <p>Your header cache migrates automatically, forward-only, with
+                a backup taken first. Nothing asks you to re-authenticate.</p>
+            ]]></description>
+            <pubDate>Sun, 23 Aug 2026 21:44:06 -0700</pubDate>
+            <sparkle:version>152</sparkle:version>
+            <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/brooksc/Nevermore/releases/download/v1.1.0/Nevermore-1.1.0.dmg" length="21416934" type="application/octet-stream" sparkle:edSignature="24RedsrH5/WkWUepZPVTCRPK+gFLTv5QKTs9FGccuiroLimXWH+fUr+szwyq6AZtqqRE57xPsbq4oFrs9bXOBg=="/>
+        </item>
+        <item>
             <title>1.0.0</title>
             <description><![CDATA[
                 <p>The version number catching up to what the app is: no known
