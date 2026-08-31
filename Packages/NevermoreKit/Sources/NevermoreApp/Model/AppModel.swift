@@ -2286,9 +2286,19 @@ final class AppModel {
     /// collected up front rather than discovered one failure at a time.
     @discardableResult
     func queueForBrowser(_ id: GroupID) -> Bool {
-        guard let group = self.group(for: id), let reason = browserReason(for: id) else {
-            return false
-        }
+        guard let reason = browserReason(for: id) else { return false }
+        return queueForBrowser(id, reason: reason)
+    }
+
+    /// Queue a sender for a reason the caller has already decided.
+    ///
+    /// Split out for the results sheet, whose senders include ones no stored
+    /// fact calls a browser job: an automated request that went out and came
+    /// back refused is only knowable from the run itself
+    /// (`BrowserQueue.reason(afterRunOutcome:storedReason:)`).
+    @discardableResult
+    func queueForBrowser(_ id: GroupID, reason: BrowserReason) -> Bool {
+        guard let group = self.group(for: id) else { return false }
         var queue = browserQueue
         let queued = queue.queue(
             BrowserQueue.Entry(
@@ -2300,6 +2310,42 @@ final class AppModel {
         setBrowserQueue(queue)
         Log.app.event("queued \(id.key) for the browser: \(reason.rawValue)")
         return true
+    }
+
+    /// Why a sender a finished run has just been through still needs a person,
+    /// or nil. The predicate the results sheet both offers the browser on and
+    /// queues by, so the button and the queue can never disagree.
+    func browserReason(after target: UnsubTarget) -> BrowserReason? {
+        BrowserQueue.reason(
+            afterRunOutcome: target.outcome, storedReason: browserReason(for: target.id))
+    }
+
+    /// Hand every sender a finished run left needing a person to the browser
+    /// queue, and return the one to open on.
+    ///
+    /// The results sheet is transient — it is dismissed the moment the browser
+    /// opens — so anything it holds and does not hand over is lost. That was
+    /// TASK-58: a run of eleven with two failures escalated exactly the failure
+    /// the user clicked, and the other one existed nowhere afterwards. The queue
+    /// is the durable place for "still to be done by a person", so the whole run
+    /// goes in, not just the row that was pressed.
+    ///
+    /// `first` leads the queue because it is the sender the user pointed at.
+    /// Senders already waiting from an earlier sitting keep their places; the
+    /// run is appended behind them, and `first` is still what opens.
+    @discardableResult
+    func queueRunForBrowser(_ results: [UnsubTarget], startingWith first: GroupID)
+        -> ManualUnsubscribe?
+    {
+        let ordered = results.filter { $0.id == first } + results.filter { $0.id != first }
+        for target in ordered {
+            guard let reason = browserReason(after: target) else { continue }
+            queueForBrowser(target.id, reason: reason)
+        }
+        // Open on the pressed sender when it made it into the queue, and fall
+        // back to whatever is next otherwise — a sender with no page to open is
+        // still no reason to strand the rest of the run.
+        return manualTarget(for: first) ?? nextBrowserTarget()
     }
 
     /// The next sender to put in front of the user, or nil when the sitting is

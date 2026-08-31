@@ -33,7 +33,7 @@ struct MainWindowView: View {
                 model: model, targets: targets.value,
                 immediateDelete: targets.immediateDelete,
                 origin: targets.origin,
-                onManualFallback: beginManual)
+                onManualFallback: beginBrowserRun)
         }
         .sheet(item: $manualTarget, onDismiss: refocusList) { target in
             WebUnsubscribeSheet(model: model, target: target)
@@ -366,6 +366,16 @@ struct MainWindowView: View {
     /// Open the in-app browser for a manual unsubscribe of a single sender.
     private func beginManual(_ id: GroupID) {
         manualTarget = model.manualTarget(for: id)
+    }
+
+    /// Escalate a finished unsubscribe run to the browser (TASK-58).
+    ///
+    /// The results sheet is dismissed by the same press, so the run is put on
+    /// the browser queue before the browser opens: the sender pressed is what
+    /// opens, and the rest are still there afterwards whether the user works
+    /// through them now or comes back to them tomorrow.
+    private func beginBrowserRun(_ results: [AppModel.UnsubTarget], startingWith id: GroupID) {
+        manualTarget = model.queueRunForBrowser(results, startingWith: id)
     }
 
     /// Wrap the target array so `.sheet(item:)` can present it.

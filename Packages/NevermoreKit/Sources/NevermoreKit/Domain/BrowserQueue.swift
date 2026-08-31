@@ -23,10 +23,18 @@ public enum BrowserReason: String, Codable, Sendable, Hashable, CaseIterable {
     /// would go out from the wrong identity and be quietly ignored — the app
     /// already refuses to do that (`AppModel.performUnsubscribe`).
     case wrongDeliveryAddress = "wrong_delivery_address"
+    /// The automated request went out in this run and the sender's server
+    /// refused it. Unlike the other three this one is not decidable in advance —
+    /// it is what a finished run knows and nothing else does, which is why the
+    /// results sheet is the only thing that queues it.
+    case automatedAttemptFailed = "automated_attempt_failed"
 
     /// One line, in the words the user and the agent both read.
     public var explanation: String {
         switch self {
+        case .automatedAttemptFailed:
+            "The automated unsubscribe was sent and the sender refused it, so it has to be "
+                + "finished on their page."
         case .noPublishedTarget:
             "This sender published no unsubscribe link Nevermore can use, so there is nothing to "
                 + "send. Their preferences page has to be found by hand."
@@ -228,5 +236,35 @@ public struct BrowserQueue: Codable, Sendable, Hashable {
         }
         if hasReappeared { return .ignoredAnUnsubscribe }
         return nil
+    }
+
+    /// Why a sender a finished unsubscribe run has just been through still needs
+    /// a person, or nil when the run left nothing for one to do.
+    ///
+    /// The results sheet's counterpart to `reason(for:hasReappeared:)`: that one
+    /// decides from stored state, before anything is attempted, and this one
+    /// from what the attempt returned. Both exist because the sheet has senders
+    /// of both kinds in front of it at once — `needsManual` means nothing was
+    /// sent and the stored reason is exactly why, while `failed` means the
+    /// request went out and came back refused, which no stored fact can say.
+    ///
+    /// `storedReason` is what `reason(for:hasReappeared:)` says about the same
+    /// sender, and is only consulted for `needsManual`. Its fallback is
+    /// `noPublishedTarget` because that is what the engine's own `needsManual`
+    /// reasons describe, and a sender needing a person with no reason recorded
+    /// would queue with a blank explanation.
+    public static func reason(
+        afterRunOutcome outcome: UnsubscribeEngine.Outcome?,
+        storedReason: BrowserReason?
+    ) -> BrowserReason? {
+        switch outcome {
+        // Sent and accepted, or never attempted at all. Neither is a browser
+        // job: the first is done, and the second was not part of the run.
+        case .confirmed, .requested, nil: nil
+        case .needsManual: storedReason ?? .noPublishedTarget
+        // The freshest fact about this sender is that the request just failed,
+        // so say that rather than whatever was true of them beforehand.
+        case .failed: .automatedAttemptFailed
+        }
     }
 }

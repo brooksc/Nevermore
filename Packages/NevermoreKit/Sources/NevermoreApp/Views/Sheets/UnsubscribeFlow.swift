@@ -16,8 +16,12 @@ struct UnsubscribeFlow: View {
     /// confirm step, whatever the user's standing preference says about their
     /// own keystrokes — see `UnsubscribeConfirmation`.
     var origin: ActionOrigin = .user
-    /// Escalate a sender to the in-app browser after the automated attempt failed.
-    var onManualFallback: (GroupID) -> Void
+    /// Hand the run's unfinished senders to the browser, opening on one of them.
+    ///
+    /// The whole run, not the sender pressed: this sheet is dismissed the moment
+    /// the browser opens, so anything it does not hand over is gone with it
+    /// (TASK-58).
+    var onManualFallback: ([AppModel.UnsubTarget], GroupID) -> Void
     @Environment(\.dismiss) private var dismiss
 
     @State private var stage: Stage = .confirm
@@ -226,6 +230,14 @@ struct UnsubscribeFlow: View {
             // ten is never read as a complete report of the two rows that fit.
             Text(report.contentsLine)
                 .font(.caption).foregroundStyle(.secondary)
+            // Says up front that the hand-off keeps the others. This sheet
+            // closing used to be where the rest of the run was lost, so a user
+            // who has been bitten once needs to see that it no longer is.
+            if browserCandidates.count > 1 {
+                Text("Opening any of these \(browserCandidates.count) queues them all — the browser works through them one after another.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
@@ -295,6 +307,11 @@ struct UnsubscribeFlow: View {
         results.filter { UnsubscribeReport.bucket(for: $0.outcome) == bucket }
     }
 
+    /// The run's senders that a person still has to finish in a browser.
+    private var browserCandidates: [AppModel.UnsubTarget] {
+        results.filter { model.browserReason(after: $0) != nil }
+    }
+
     /// Confirmed plus requested — the senders the footer may call unsubscribed.
     private var succeeded: [AppModel.UnsubTarget] {
         targets(in: .confirmed) + targets(in: .requested)
@@ -321,12 +338,22 @@ struct UnsubscribeFlow: View {
                         Text(t.name).font(.callout)
                         Spacer()
                         Text(detail(t.outcome)).font(.caption).foregroundStyle(.secondary)
-                        if case .failed = t.outcome {
-                            // Failed automated → hand off to the browser rather
-                            // than retry the same request that just failed.
+                        // Anything the run left to a person gets the button, not
+                        // just the failures: `needsManual` means nothing was even
+                        // sent, and those rows sat in this same bucket with no way
+                        // out of it at all. `browserReason(after:)` is the same
+                        // predicate the queue uses, so the two cannot disagree.
+                        if model.browserReason(after: t) != nil {
                             Button("Open in Browser") {
+                                // The whole run is handed over, not just this
+                                // row: the sheet is about to be destroyed and
+                                // the senders it holds exist nowhere else
+                                // (TASK-58). Dismiss first, in that order,
+                                // because the browser is a second sheet on the
+                                // same view and cannot be presented under one
+                                // that is still up.
                                 dismiss()
-                                onManualFallback(t.id)
+                                onManualFallback(results, t.id)
                             }
                             .controlSize(.small)
                         }

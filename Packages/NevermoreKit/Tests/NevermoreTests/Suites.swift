@@ -4235,6 +4235,125 @@ struct WhoNeedsABrowserTests {
     }
 }
 
+/// TASK-58. The results sheet hands its run to the browser queue, and what it
+/// hands over is decided here rather than in the sheet — a sheet is not
+/// something a test can look at, and the bug was that it kept one sender and
+/// dropped the rest.
+@Suite("Who a finished run leaves needing a browser")
+struct WhoAFinishedRunLeavesNeedingABrowserTests {
+    @Test("a failed automated attempt needs a browser, whatever was true before")
+    func aFailedAutomatedAttemptNeedsABrowser() {
+        // Nothing stored says this sender needs a person — they published a web
+        // link and had never been unsubscribed from. Only the run knows.
+        eq(
+            BrowserQueue.reason(afterRunOutcome: .failed(detail: "HTTP 500"), storedReason: nil),
+            .automatedAttemptFailed)
+        // And the freshest fact wins over the stored one: what just happened is
+        // that the request went out and was refused.
+        eq(
+            BrowserQueue.reason(
+                afterRunOutcome: .failed(detail: "timed out"),
+                storedReason: .ignoredAnUnsubscribe),
+            .automatedAttemptFailed)
+        expect(!BrowserReason.automatedAttemptFailed.explanation.isEmpty)
+    }
+
+    @Test("needs-manual is queued on the same footing as a failure")
+    func needsManualIsQueuedOnTheSameFooting() {
+        // AC #4. Nothing was sent for these, which is exactly why a person has
+        // to finish them — and they carry the reason stored about the sender,
+        // because that reason is still the true one.
+        eq(
+            BrowserQueue.reason(
+                afterRunOutcome: .needsManual(reason: "no unsubscribe link"),
+                storedReason: .noPublishedTarget),
+            .noPublishedTarget)
+        eq(
+            BrowserQueue.reason(
+                afterRunOutcome: .needsManual(reason: "delivered to an alias"),
+                storedReason: .wrongDeliveryAddress),
+            .wrongDeliveryAddress)
+        // A sender with no stored reason still gets queued rather than dropped;
+        // an entry with a blank explanation would be worse than an approximate
+        // one, and dropping it is the bug.
+        eq(
+            BrowserQueue.reason(
+                afterRunOutcome: .needsManual(reason: "no unsubscribe link"), storedReason: nil),
+            .noPublishedTarget)
+    }
+
+    @Test("a sender the run finished, or never touched, is not queued")
+    func aSenderTheRunFinishedIsNotQueued() {
+        expect(
+            BrowserQueue.reason(
+                afterRunOutcome: .confirmed(detail: "sender confirmed"), storedReason: nil) == nil)
+        expect(
+            BrowserQueue.reason(
+                afterRunOutcome: .requested(detail: "HTTP 204"), storedReason: nil) == nil)
+        // Cancelled part-way: never attempted, so not the browser's problem.
+        expect(BrowserQueue.reason(afterRunOutcome: nil, storedReason: .noPublishedTarget) == nil)
+        // Not even when something stored says they would need a browser: this
+        // sender was just unsubscribed from.
+        expect(
+            BrowserQueue.reason(
+                afterRunOutcome: .requested(detail: "HTTP 204"),
+                storedReason: .ignoredAnUnsubscribe) == nil)
+    }
+
+    /// The reported run: eleven senders, two left needing a person.
+    private func run() -> [(key: String, outcome: UnsubscribeEngine.Outcome)] {
+        (1...9).map { ("ok\($0).com", UnsubscribeEngine.Outcome.requested(detail: "HTTP 204")) }
+            + [
+                ("bad.com", .failed(detail: "HTTP 500")),
+                ("none.com", .needsManual(reason: "no unsubscribe link")),
+            ]
+    }
+
+    @Test("the second failure of a run is still reachable after the first is handled")
+    func theSecondFailureIsStillReachable() {
+        // AC #1 and #2, and the bug itself: pressing Open in Browser on one
+        // failure used to be the moment the other stopped existing.
+        var queue = BrowserQueue()
+        for (key, outcome) in run() {
+            guard let reason = BrowserQueue.reason(afterRunOutcome: outcome, storedReason: nil)
+            else { continue }
+            queue.queue(queueEntry(key, reason: reason))
+        }
+        eq(queue.pending.map(\.groupKey), ["domain:bad.com", "domain:none.com"])
+        eq(queue.position(of: "domain:bad.com"), 1)
+        eq(queue.count, 2, "so the header reads 1 of 2")
+
+        queue.record(.confirmed, for: "domain:bad.com")
+        eq(queue.next?.groupKey, "domain:none.com", "finishing one advances to the next")
+        eq(queue.position(of: "domain:none.com"), 2)
+        queue.record(.confirmed, for: "domain:none.com")
+        expect(queue.next == nil, "and then the sitting is over")
+    }
+
+    @Test("stopping part-way keeps the senders that were not reached")
+    func stoppingPartWayKeepsTheRest() throws {
+        // AC #3. Stopping is not answering: the user closes the browser after
+        // the first sender and the second is waiting for them, including across
+        // a relaunch, because the queue is where it lives now.
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("nevermore-run-\(UUID().uuidString).sqlite").path
+        var queue = BrowserQueue()
+        queue.queue([
+            queueEntry("bad.com", reason: .automatedAttemptFailed),
+            queueEntry("none.com", reason: .noPublishedTarget),
+        ])
+        queue.record(.confirmed, for: "domain:bad.com")
+        do {
+            let store = try MessageStore(path: path)
+            try store.setBrowserQueue(queue)
+        }
+        let read = try MessageStore(path: path).browserQueue()
+        eq(read.pending.map(\.groupKey), ["domain:none.com"])
+        eq(read.entry(for: "domain:bad.com")?.outcome, .confirmed)
+        eq(read.entry(for: "domain:bad.com")?.reason, .automatedAttemptFailed)
+    }
+}
+
 @Suite("The browser queue survives a relaunch")
 struct TheBrowserQueueSurvivesARelaunchTests {
     func temporaryPath() -> String {
