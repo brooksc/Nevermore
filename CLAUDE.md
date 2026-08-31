@@ -17,7 +17,7 @@ scripts/run                       # build (debug, host arch) and launch the app
 scripts/run --no-launch           # build only, print the bundle path
 cd Packages/NevermoreKit
 swift build                       # build everything
-swift test                        # the test suite — 479 tests
+swift test                        # the test suite — 590 tests
 swift run nevermore-probe         # CLI harness against a real mailbox, no UI
 ./make-app.sh release             # signed Nevermore.app
 ./make-dmg.sh --notarize          # notarized, stapled DMG
@@ -39,9 +39,20 @@ says so on launch when it sees the token file.
 
 **Tests use swift-testing in a real `.testTarget`** (TASK-19; they were an
 executable with a hand-rolled harness until then). `Tests/NevermoreTests/`
-holds `Suites.swift` — 76 `@Suite` structs — and `TestSupport.swift` for the
-shared fixtures. Add a case as `@Test("what it should do") func name() { … }`
-inside the relevant `@Suite`, `async` if the body awaits.
+holds `Suites.swift` — the `@Suite` structs covering NevermoreKit — and
+`TestSupport.swift` for the shared fixtures. Add a case as
+`@Test("what it should do") func name() { … }` inside the relevant `@Suite`,
+`async` if the body awaits.
+
+`AppModelSuites.swift` is the exception: the suites that drive `AppModel`
+itself, which lives in the `NevermoreApp` target rather than the kit. The test
+target depends on that target so they can (TASK-59 was a bug in an app-target
+rule that no reachable test could have caught), and reaches it through
+`AppModel.openForTesting(store:backend:)` — a DEBUG-only seam, because the
+real routes to a store want a Keychain password or overwrite the demo
+database. Linking the app target also drags in Sparkle, which is why the test
+target carries an `-rpath` linker flag; without it the whole bundle fails to
+load.
 
 Assertions go through the `expect` / `eq` helpers in `TestSupport.swift` rather
 than bare `#expect`. They record a non-fatal issue and carry on, and `eq`
