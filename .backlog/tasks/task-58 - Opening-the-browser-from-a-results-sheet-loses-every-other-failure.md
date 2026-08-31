@@ -1,13 +1,20 @@
 ---
 id: TASK-58
 title: Opening the browser from a results sheet loses every other failure
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-31 19:43'
-updated_date: '2026-08-31 19:44'
+updated_date: '2026-08-31 19:51'
 labels:
   - ui
 dependencies: []
+modified_files:
+  - Packages/NevermoreKit/Sources/NevermoreKit/Domain/BrowserQueue.swift
+  - Packages/NevermoreKit/Sources/NevermoreApp/Model/AppModel.swift
+  - >-
+    Packages/NevermoreKit/Sources/NevermoreApp/Views/Sheets/UnsubscribeFlow.swift
+  - Packages/NevermoreKit/Sources/NevermoreApp/Views/MainWindowView.swift
+  - Packages/NevermoreKit/Tests/NevermoreTests/Suites.swift
 priority: high
 type: bug
 ordinal: 24000
@@ -40,9 +47,23 @@ Two things to get right rather than assume:
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Every sender in a run that needs a browser is reachable after the first one is handled
-- [ ] #2 Finishing one advances to the next, and the position in the run is visible
-- [ ] #3 Abandoning the browser part-way leaves the remaining senders reachable rather than discarding them
-- [ ] #4 needsManual senders are queued on the same footing as failed ones, or the reason they are not is recorded
-- [ ] #5 The queue used is BrowserQueue, not a second list built for this sheet
+- [x] #1 Every sender in a run that needs a browser is reachable after the first one is handled
+- [x] #2 Finishing one advances to the next, and the position in the run is visible
+- [x] #3 Abandoning the browser part-way leaves the remaining senders reachable rather than discarding them
+- [x] #4 needsManual senders are queued on the same footing as failed ones, or the reason they are not is recorded
+- [x] #5 The queue used is BrowserQueue, not a second list built for this sheet
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+The hand-off now goes through `BrowserQueue` (AC #5). `UnsubscribeFlow` passes the whole run to `AppModel.queueRunForBrowser(_:startingWith:)`, which queues every sender the run left unfinished — pressed sender first — and returns the target to open on. `WebUnsubscribeSheet` already advances through a queue and shows "N of M", so nothing there changed.
+
+`needsManual` senders are queued on the same footing as `failed` (AC #4) and now get the "Open in Browser" button they never had, despite already sharing the FAILED bucket with the failures.
+
+New `BrowserReason.automatedAttemptFailed`, because none of the three existing reasons is decidable for a sender whose request went out and was refused — `browserReason(for:)` returns nil for exactly them, so `queueForBrowser` would have declined the failures this task is about. The decision lives in `BrowserQueue.reason(afterRunOutcome:storedReason:)` in NevermoreKit, where it is testable: `failed` → `automatedAttemptFailed` (the run's fact beats the stored one), `needsManual` → the stored reason, `confirmed`/`requested`/nil → not queued.
+
+Tests: 584 in 99 suites, up from 579/98. The three port-binding failures are the maintainer's running app holding a contract port, not this change.
+
+Not verifiable: the flow between the two sheets is app-target SwiftUI and has no test. The GUI was not launched.
+<!-- SECTION:NOTES:END -->
