@@ -190,6 +190,22 @@ final class AppModel {
         Self.current = self
     }
 
+    #if DEBUG
+        /// Open a store and backend directly, without a session.
+        ///
+        /// The only other routes to a store are `open(account:)`, which wants a
+        /// registered account and a Keychain password, and `openDemo()`, which
+        /// rebuilds a database at a fixed path in the user's container. Neither
+        /// is something a test of a rule that merely writes to the store should
+        /// have to arrange, and the second would trample real state. DEBUG only,
+        /// so it cannot exist in anything shipped.
+        func openForTesting(store: MessageStore, backend: (any MailBackend)? = nil) async {
+            self.store = store
+            self.backend = backend
+            await reloadFromStore()
+        }
+    #endif
+
     /// The running app's model, for App Intents (TASK-35).
     ///
     /// App Intents are instantiated by the system, not by the view tree, so
@@ -1705,17 +1721,30 @@ final class AppModel {
     /// present one message with one undo instead of a burst that clobbers itself.
     func ignore(_ ids: Set<GroupID>, silently: Bool = false) {
         guard let store else { return }
-        let targets = groups.filter { ids.contains($0.id) }
-        try? targets.forEach { try store.ignore($0.id) }
+        // Write from the ids, never from the groups they happen to match today.
+        // `store.ignore` takes a `GroupID` and nothing else, and a sender is
+        // still a sender after its last message has gone — which is exactly the
+        // case `trashAndIgnore` creates, having trashed the mail a moment
+        // earlier. Filtering through `groups` there left `targets` empty, so the
+        // ignore silently wrote nothing while the toast claimed it had (TASK-59).
+        // Sorted so the log line and the single-row offer below are stable.
+        let targets = ids.sorted { $0.storageKey < $1.storageKey }
+        try? targets.forEach { try store.ignore($0) }
         ignoredKeys = (try? store.ignoredGroupKeys()) ?? ignoredKeys
         selection.subtract(ids)
         retireFromProposal(ids, as: .ignore)
-        Log.app.event("ignored \(targets.count) sender(s): \(targets.map(\.id.key).joined(separator: ", "))")
+        Log.app.event("ignored \(targets.count) sender(s): \(targets.map(\.key).joined(separator: ", "))")
         guard !silently else { return }
         // Only ever offered off a single row. Ignoring a multi-row selection is
         // already a deliberate sweep, and "the other senders" would have to mean
         // several domains at once — which is not a question with one answer.
-        let offer = targets.count == 1 ? domainIgnoreOffer(after: targets[0].id) : nil
+        //
+        // Keyed on the ids too, not on present groups. `DomainIgnoreOffer` reads
+        // `groups` to find the *siblings* it would widen to; the sender just
+        // ignored need not be among them, and after a Trash and Ignore it will
+        // not be. Gating on its group would suppress the offer in the case where
+        // the user has most clearly said they want less from this company.
+        let offer = targets.count == 1 ? domainIgnoreOffer(after: targets[0]) : nil
         // Straight back through `ignore`, so accepting produces an ordinary
         // ignore with an ordinary undo rather than a widening that can only be
         // taken back row by row.
@@ -1728,7 +1757,7 @@ final class AppModel {
             undoLabel: "Undo",
             undo: { [weak self] in
                 guard let self, let store = self.store else { return }
-                try? targets.forEach { try store.unignore($0.id) }
+                try? targets.forEach { try store.unignore($0) }
                 self.ignoredKeys = (try? store.ignoredGroupKeys()) ?? self.ignoredKeys
             },
             actionLabel: offer?.actionLabel,
@@ -2525,7 +2554,7 @@ final class AppModel {
             undoLabel: restorable.isEmpty ? nil : "Undo"
         ) { [weak self] in
             guard let self, let store = self.store else { return }
-            try? targets.forEach { try store.unignore($0.id) }
+            try? store.unignore(id)
             self.ignoredKeys = (try? store.ignoredGroupKeys()) ?? self.ignoredKeys
             await self.untrash(restorable, archived: archived)
         }

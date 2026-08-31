@@ -61,12 +61,24 @@ let package = Package(
             // IMAPBackend.matched(_:) is stated in SwiftMail's types, so the
             // suite covering it imports them directly. A transitive module
             // happens to be importable today and is not promised to stay so.
+            // NevermoreApp is here so `AppModel` can be tested at all — it holds
+            // rules that only exist in the app target, and TASK-59 was a bug in
+            // one of them that no reachable test could have caught.
             dependencies: [
                 "NevermoreKit",
+                "NevermoreApp",
                 .product(name: "SwiftMail", package: "SwiftMail"),
             ],
             path: "Tests/NevermoreTests",
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            swiftSettings: [.swiftLanguageMode(.v6)],
+            // Linking NevermoreApp drags in Sparkle.xcframework. SwiftPM copies
+            // it beside the products but adds no rpath that resolves from inside
+            // an .xctest bundle, so without this the whole bundle fails to
+            // dlopen and every test "fails". Contents/MacOS is three levels
+            // below Products/Debug, where the framework lands.
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@loader_path/../../.."])
+            ]
         ),
         // The stdio->HTTP bridge an MCP client spawns. Depends on NevermoreKit for
         // the token path, the port contract and the tool catalog — the three things
