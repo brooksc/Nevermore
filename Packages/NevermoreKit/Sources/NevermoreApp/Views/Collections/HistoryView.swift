@@ -82,7 +82,13 @@ struct HistoryView: View {
     }
 
     private func row(_ record: MessageStore.UnsubscribeRecord) -> some View {
-        HStack(spacing: 12) {
+        // Vetted once for the whole row. The Manage button and the context menu
+        // are two exits onto the same sender-authored URL, and each remembering
+        // the check for itself is exactly how the context menu ended up without
+        // one (TASK-60) — so neither of them can name a URL the guard has not
+        // seen.
+        let vetted = VettedURL(string: record.url)
+        return HStack(spacing: 12) {
             Monogram(text: displayName(record), diameter: 30)
             VStack(alignment: .leading, spacing: 1) {
                 Text(displayName(record)).fontWeight(.medium).lineLimit(1)
@@ -101,11 +107,9 @@ struct HistoryView: View {
             // it gets the same check as every other use of it. Handing an
             // unvetted attacker-chosen link to the default browser was the one
             // remaining unguarded path.
-            if let urlString = record.url, let url = URL(string: urlString),
-                DestinationGuard.isAllowed(url)
-            {
+            if let vetted, let urlString = record.url {
                 Button {
-                    NSWorkspace.shared.open(url)
+                    ExternalBrowser.open(vetted)
                 } label: {
                     Label("Manage", systemImage: "arrow.up.forward.square")
                 }
@@ -129,8 +133,14 @@ struct HistoryView: View {
         }
         .padding(.vertical, 2)
         .contextMenu {
-            if let urlString = record.url, let url = URL(string: urlString) {
-                Button("Open Preferences Page") { NSWorkspace.shared.open(url) }
+            if let urlString = record.url {
+                // Only offered when the destination passed the guard. Copying is
+                // still offered either way: pasting somewhere is the user's own
+                // decision, and it is the only way to see what a refused sender
+                // pointed at.
+                if let vetted {
+                    Button("Open Preferences Page") { ExternalBrowser.open(vetted) }
+                }
                 Button("Copy Preferences URL") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(urlString, forType: .string)

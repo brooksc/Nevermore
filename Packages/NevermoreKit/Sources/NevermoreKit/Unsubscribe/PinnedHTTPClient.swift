@@ -168,14 +168,65 @@ public struct PinnedHTTPClient: Sendable {
             let defaultPort: UInt16 = useTLS ? 443 : 80
             guard let port = url.port.flatMap({ UInt16(exactly: $0) }) ?? defaultPort as UInt16?
             else { return nil }
+            // `url.path` is percent-DECODED by Foundation, so a sender writing
+            // `/unsub%0D%0AX-Injected:%20yes` gets a real CRLF back — and this
+            // string is joined into a request whose separators are CRLF. That is
+            // header injection, and the standard precondition for smuggling a
+            // second request through an intermediary. Take the encoded form
+            // instead, which is what belongs on the wire anyway (TASK-60).
+            guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            else { return nil }
+            let encodedPath = components.percentEncodedPath.isEmpty
+                ? "/" : components.percentEncodedPath
+            // Refuse rather than sanitise. A URL that decodes to a control
+            // character is not one this app should be visiting at all, and the
+            // same rule covers the query and the host so no component is trusted
+            // on the accident of which one Foundation happens to leave encoded.
+            guard Self.isSafeToSend(encodedPath), Self.isSafeToSend(host) else { return nil }
+            var pathAndQuery = encodedPath
+            if let query = components.percentEncodedQuery {
+                guard Self.isSafeToSend(query) else { return nil }
+                pathAndQuery += "?\(query)"
+            }
             self.host = host
             self.port = port
-            var path = url.path.isEmpty ? "/" : url.path
-            if let query = url.query { path += "?\(query)" }
-            pathAndQuery = path
+            self.pathAndQuery = pathAndQuery
             // IPv6 literals are bracketed in a Host header.
             let bracketed = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
             hostHeader = port == defaultPort ? bracketed : "\(bracketed):\(port)"
+        }
+
+        /// Whether a string carries a CR or an LF — literally, or as what it
+        /// percent-decodes to. Those two characters *are* the framing of the
+        /// message being built, so anything containing one can write a header of
+        /// its own, or a whole second request.
+        ///
+        /// Percent-encoding itself stays entirely welcome: real unsubscribe URLs
+        /// carry it routinely, in the path as much as the query. The rule keys on
+        /// the character that comes out, not on encoding being present.
+        ///
+        /// Scalars, not `Character`s: a decoded CRLF is a single grapheme
+        /// cluster, so `Character == "\r"` is false for the exact sequence this
+        /// exists to catch.
+        static func breaksFraming(_ s: String) -> Bool {
+            func hasLineBreak(_ s: String) -> Bool {
+                s.unicodeScalars.contains { $0 == "\r" || $0 == "\n" }
+            }
+            if hasLineBreak(s) { return true }
+            // Undecodable (e.g. a stray %FF) is not a refusal: nothing that fails
+            // to decode can produce a CR or an LF, and the literal form above has
+            // already been checked.
+            if let decoded = s.removingPercentEncoding, hasLineBreak(decoded) { return true }
+            return false
+        }
+
+        /// Whether a request-line or `Host:` component can be emitted as it
+        /// stands: no line break, and no space or other control character either
+        /// — a space would end the request target early. Header *values* get
+        /// `breaksFraming` alone, since a space is ordinary in one.
+        static func isSafeToSend(_ component: String) -> Bool {
+            guard !breaksFraming(component) else { return false }
+            return !component.unicodeScalars.contains { $0 == " " || $0.value < 0x20 }
         }
     }
 
@@ -282,6 +333,10 @@ public struct PinnedHTTPClient: Sendable {
             // Host and framing are this function's to decide, not the caller's.
             let lower = name.lowercased()
             guard lower != "host", lower != "content-length", lower != "connection" else { continue }
+            // Nothing sender-derived reaches here today, but a header carrying a
+            // CRLF would inject a line however it got in, and the serialiser is
+            // the right place for that to be impossible.
+            guard !Hop.breaksFraming(name), !Hop.breaksFraming(value) else { continue }
             lines.append("\(name): \(value)")
         }
         if let body {
