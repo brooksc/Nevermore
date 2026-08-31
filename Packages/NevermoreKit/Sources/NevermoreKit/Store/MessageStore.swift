@@ -381,7 +381,18 @@ public final class MessageStore: Sendable {
         case requested
         /// A confirmation page or reply positively acknowledged the request.
         case confirmed
+        /// The attempt was made and did not go through — a login wall, a dead
+        /// link, a form that refused the address. The record exists so the app
+        /// remembers the sender has already been tried; it is not an unsubscribe.
         case failed
+
+        /// Whether this record means the sender was actually unsubscribed from.
+        ///
+        /// The one question every consumer of the history is really asking, and
+        /// the reason it is spelled out here: reading "a record exists" as "they
+        /// are unsubscribed" is what filed a sender the user said they had *not*
+        /// unsubscribed from into the Unsubscribed archive (TASK-57).
+        public var isUnsubscribed: Bool { self != .failed }
     }
 
     /// A durable record of one unsubscribe, independent of whether the sender's

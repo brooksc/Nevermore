@@ -1113,6 +1113,10 @@ final class AppModel {
     /// the history table, so it survives after the sender's messages are gone.
     var unsubscribedRecords: [MessageStore.UnsubscribeRecord] {
         history.values
+            // An attempt that did not go through is not an unsubscribe, so it
+            // does not belong in the log of them — the sender is still in the
+            // working list, which is where the user expects to find it.
+            .filter { $0.outcome.isUnsubscribed }
             .filter { !isReappearedRecord($0) }
             // The search field stays visible on this collection, so it has to
             // work here too — it was silently doing nothing.
@@ -1461,7 +1465,10 @@ final class AppModel {
     private func state(of g: SenderGroup) -> SenderState {
         SenderState(
             isIgnored: ignoredKeys.contains(g.id.storageKey),
-            isUnsubscribed: history[g.id.storageKey] != nil,
+            // A `.failed` record says the user tried and could not finish, which
+            // is not an unsubscribe — the sender stays in All Senders where it
+            // can still be ignored or trashed (TASK-57).
+            isUnsubscribed: history[g.id.storageKey]?.outcome.isUnsubscribed == true,
             hasReappeared: isReappeared(g),
             hasMessages: !g.messages.isEmpty,
             isProposed: proposedKeys.contains(g.id.storageKey))
@@ -1624,7 +1631,9 @@ final class AppModel {
             // An Unsubscribed row whose messages have been deleted has a record
             // and nothing to act on.
             withMessages: visible.filter { group(for: $0) != nil }.count,
-            alreadyUnsubscribed: visible.filter { history[$0.storageKey] != nil }.count)
+            alreadyUnsubscribed: visible.filter {
+                history[$0.storageKey]?.outcome.isUnsubscribed == true
+            }.count)
     }
 
     /// Whether an action can run on the current selection.
@@ -2190,7 +2199,15 @@ final class AppModel {
     }
 
     /// Record the result of a manual browser unsubscribe and drop the sender.
-    func recordManual(_ id: GroupID, confirmed: Bool, offerDelete: Bool = true) {
+    ///
+    /// Takes the store's outcome rather than a Bool. A Bool could only say
+    /// `confirmed` or `requested`, so "I did not unsubscribe" was written as
+    /// *the request was sent and accepted* — the one thing the four-outcome
+    /// vocabulary exists to stop the app claiming (TASK-57). A declined attempt
+    /// is `.failed`: a real record, so the sender is known to have been tried
+    /// and the automated path is not offered again, but not an unsubscribe, so
+    /// the sender stays in the working list.
+    func recordManual(_ id: GroupID, outcome: MessageStore.Outcome, offerDelete: Bool = true) {
         guard let store, let group = self.group(for: id) else { return }
         let source = group.unsubscribeSource
         let url = source?.unsubscribe?.webTargets.first?.absoluteString
@@ -2200,7 +2217,7 @@ final class AppModel {
             senderEmail: source?.sender.address ?? group.id.key,
             senderDomain: source?.sender.host ?? "",
             url: url,
-            outcome: confirmed ? .confirmed : .requested)
+            outcome: outcome)
         history = (try? store.unsubscribeHistory()) ?? history
         // Updating attemptedAt to now clears the reappeared state — old messages
         // predate it — so a re-unsubscribed sender leaves Reappeared.
@@ -2210,8 +2227,8 @@ final class AppModel {
         // succeeds; the manual flow didn't offer it at all, so finishing in the
         // browser left every message behind with no hint that deleting was even
         // an option. Offer, don't assume — this is the user's mail.
-        guard offerDelete, confirmed else { return }
-        offerBacklogDelete(id, isEscalation: false)
+        guard offerDelete, outcome.isUnsubscribed else { return }
+        offerBacklogDelete(id, context: .unsubscribed)
     }
 
     /// Offer to clear a sender's backlog from the status bar.
@@ -2221,12 +2238,12 @@ final class AppModel {
     /// closing the sheet on the result step. Deliberately not fired when the user
     /// answered "Keep Messages" — an offer that comes back after being declined
     /// is a nag, and the user has already said no.
-    func offerBacklogDelete(_ id: GroupID, isEscalation: Bool) {
+    func offerBacklogDelete(_ id: GroupID, context: BacklogOffer.Context) {
         guard let group = self.group(for: id),
             let offer = BacklogOffer(
                 senderName: group.displayName,
                 messageCount: group.messages.count,
-                isEscalation: isEscalation)
+                context: context)
         else { return }
         showToast(offer.toastMessage, actionLabel: offer.toastActionLabel) { [weak self] in
             switch offer.accept {
@@ -2239,7 +2256,7 @@ final class AppModel {
     /// Record a manual unsubscribe and clear the sender's backlog in one step.
     func recordManualAndDelete(_ id: GroupID) {
         // Suppress the "Delete N Messages" offer: the user just chose it.
-        recordManual(id, confirmed: true, offerDelete: false)
+        recordManual(id, outcome: .confirmed, offerDelete: false)
         Task { await trash([id]) }
     }
 

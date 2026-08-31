@@ -2379,6 +2379,111 @@ struct SenderCollectionMembershipTests {
     }
 }
 
+/// An attempt the user said did not go through (TASK-57).
+///
+/// Reported from use: the user opened a sender's page, hit a login wall,
+/// answered honestly that they had not unsubscribed, and the sender left the
+/// working list for the Unsubscribed archive — where they never thought to look
+/// for the sender they now wanted to block. Two rules had to hold and did not:
+/// the record must not claim `requested`, and a record that is not an
+/// unsubscribe must not file the sender as one.
+@Suite("Declined manual unsubscribe")
+struct DeclinedManualUnsubscribeTests {
+    /// `attemptedAt` sits *after* the fixture's mail unless a test says
+    /// otherwise, so the sender has not reappeared and the collection under test
+    /// is decided by the outcome alone.
+    func record(
+        _ outcome: MessageStore.Outcome, attemptedAt: TimeInterval = 1_800_000_000
+    ) -> MessageStore.UnsubscribeRecord {
+        MessageStore.UnsubscribeRecord(
+            groupKey: "domain:acme.com", senderName: "Acme", senderEmail: "hi@acme.com",
+            senderDomain: "acme.com", url: nil,
+            attemptedAt: Date(timeIntervalSince1970: attemptedAt), outcome: outcome)
+    }
+
+    /// The snapshot derives `SenderState` from stored history by exactly the
+    /// rule `AppModel` does, so it is where that rule can be driven end to end
+    /// without a window.
+    func snapshot(
+        _ outcome: MessageStore.Outcome?, attemptedAt: TimeInterval = 1_800_000_000
+    ) -> MCPSnapshot {
+        let group = SenderGroup(
+            id: GroupID(kind: .domain, key: "acme.com"),
+            messages: [makeMessage(1, from: "Acme <hi@acme.com>")])
+        return MCPSnapshot(
+            account: "me@ex.com", groups: [group], ignoredKeys: [],
+            history: outcome.map { ["domain:acme.com": record($0, attemptedAt: attemptedAt)] } ?? [:],
+            decisions: [:], syncToken: nil, messageCount: 1)
+    }
+
+    @Test("only a request that went out counts as an unsubscribe") func onlyARequestThatWentOutCountsAsAnUnsubscribe() {
+        expect(MessageStore.Outcome.confirmed.isUnsubscribed, "the sender said so")
+        expect(MessageStore.Outcome.requested.isUnsubscribed, "sent and accepted")
+        expect(!MessageStore.Outcome.failed.isUnsubscribed, "tried, and it did not go through")
+    }
+
+    // The complaint itself: the sender has to stay where it can be ignored or
+    // trashed, which is the working list.
+    @Test("a failed attempt leaves the sender in All Senders") func aFailedAttemptLeavesTheSenderInAllSenders() {
+        let snap = snapshot(.failed)
+        guard let group = snap.groups.first else { return expect(false, "expected a group") }
+        eq(snap.collection(of: group), .allSenders)
+        expect(!snap.state(of: group).isUnsubscribed, "not an unsubscribe")
+    }
+
+    @Test("a successful attempt still archives the sender") func aSuccessfulAttemptStillArchivesTheSender() {
+        for outcome in [MessageStore.Outcome.requested, .confirmed] {
+            let snap = snapshot(outcome)
+            guard let group = snap.groups.first else { return expect(false, "expected a group") }
+            eq(snap.collection(of: group), .unsubscribed, "\(outcome) archives")
+        }
+    }
+
+    // Reappeared means "I unsubscribed and they kept mailing". A failed attempt
+    // is not an unsubscribe, so mail arriving after it is not a sender ignoring
+    // one — it is a sender the user never managed to leave. It belongs in the
+    // working list, and the escalation banner Reappeared drives would otherwise
+    // claim an automated attempt that was never made.
+    @Test("mail after a failed attempt is not a reappearance") func mailAfterAFailedAttemptIsNotAReappearance() {
+        // Back-dated behind the fixture's message, so mail has landed since.
+        let snap = snapshot(.failed, attemptedAt: 1_600_000_000)
+        guard let group = snap.groups.first else { return expect(false, "expected a group") }
+        expect(snap.hasReappeared(group), "mail did arrive after the attempt")
+        eq(snap.collection(of: group), .allSenders, "and it is still just a sender to deal with")
+    }
+
+    @Test("a sender with no record at all is in the working list too") func aSenderWithNoRecordAtAllIsInTheWorkingListToo() {
+        let snap = snapshot(nil)
+        guard let group = snap.groups.first else { return expect(false, "expected a group") }
+        eq(snap.collection(of: group), .allSenders)
+    }
+
+    // The breadcrumb, and the reason the fix records `.failed` rather than
+    // nothing: the app has to be able to tell a sender it has already been
+    // through from one it has never touched, or the escalation to the browser
+    // and the row's "Tried" mark both have nothing to read.
+    @Test("an attempted sender is distinguishable from one never tried") func anAttemptedSenderIsDistinguishableFromOneNeverTried() {
+        do {
+            let store = try MessageStore.inMemory()
+            let tried = GroupID(kind: .domain, key: "acme.com")
+            let untouched = GroupID(kind: .domain, key: "other.com")
+            try store.recordUnsubscribe(
+                tried, senderName: "Acme", senderEmail: "hi@acme.com",
+                senderDomain: "acme.com", url: nil, outcome: .failed)
+            let history = try store.unsubscribeHistory()
+            eq(history[tried.storageKey]?.outcome, .failed, "the attempt is on file")
+            expect(history[untouched.storageKey] == nil, "and this one was never tried")
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    // The failed record is not an unsubscribe, so it must not appear in the log
+    // of them either — the Unsubscribed list and its sidebar count read this.
+    @Test("a failed attempt is not listed among the unsubscribes") func aFailedAttemptIsNotListedAmongTheUnsubscribes() {
+        let records = [record(.failed), record(.requested), record(.confirmed)]
+        eq(records.filter { $0.outcome.isUnsubscribed }.count, 2)
+    }
+}
+
 @Suite("Selection across collections")
 struct SelectionAcrossCollectionsTests {
     func ids(_ names: [String]) -> [GroupID] { names.map { GroupID(kind: .domain, key: $0) } }
@@ -4906,6 +5011,35 @@ struct BacklogOfferTests {
         // A toast has no room for the question, so the escalation's button has
         // to carry the count the sheet's question would have carried.
         eq(escalated.toastActionLabel, "Trash 12 and Ignore")
+    }
+
+    // TASK-57. The login wall is the moment ignoring or trashing the sender is
+    // obviously the next thing to do, and the sheet was closing without
+    // offering either — so the user went looking for a sender that had by then
+    // been filed as unsubscribed.
+    @Test("the offer at a login wall claims no unsubscribe") func theOfferAtALoginWallClaimsNoUnsubscribe() {
+        guard let offer = BacklogOffer(
+            senderName: "Acme", messageCount: 6, context: .couldNotUnsubscribe)
+        else { return expect(false, "expected an offer") }
+        expect(!offer.question.contains("Unsubscribed"), "nothing was unsubscribed")
+        expect(offer.question.contains("Nothing was unsubscribed"), "and it says so")
+        expect(!offer.toastMessage.contains("Unsubscribed from"), "nor does the toast")
+        eq(offer.toastMessage, "Couldn't unsubscribe from Acme")
+        // Trash alone would leave the sender in the working list to be met
+        // again next sync; the user has just said they cannot get rid of it.
+        eq(offer.accept, .trashAndIgnore)
+        eq(offer.acceptLabel, "Trash and Ignore")
+        // Declining leaves the sender listed — that is the whole point of the
+        // fix, so the button must not say "Keep Messages" as though the sender
+        // were being retired either way.
+        eq(offer.declineLabel, "Leave in My List")
+        expect(offer.namesWhatItWillDo, "still names the count and the destination")
+    }
+
+    @Test("a login wall with no mail left has nothing to offer") func aLoginWallWithNoMailLeftHasNothingToOffer() {
+        expect(
+            BacklogOffer(senderName: "Acme", messageCount: 0, context: .couldNotUnsubscribe) == nil,
+            "no mail, no offer — the sheet just moves on")
     }
 }
 
