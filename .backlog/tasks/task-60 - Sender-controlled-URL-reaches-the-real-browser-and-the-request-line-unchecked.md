@@ -39,8 +39,8 @@ The request goes to the sender's own host, which limits direct gain, but it brea
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Every path that opens a sender-supplied URL externally passes DestinationGuard, with no route around it
-- [ ] #2 A URL whose path or query decodes to contain CR or LF is refused rather than sent
-- [ ] #3 The request target is built from the encoded path, not the decoded one
-- [ ] #4 Tests cover a percent-encoded CRLF and a private-address URL reaching each exit
+- [x] #1 Every path that opens a sender-supplied URL externally passes DestinationGuard, with no route around it
+- [x] #2 A URL whose path or query decodes to contain CR or LF is refused rather than sent
+- [x] #3 The request target is built from the encoded path, not the decoded one
+- [x] #4 Tests cover a percent-encoded CRLF and a private-address URL reaching each exit
 <!-- AC:END -->

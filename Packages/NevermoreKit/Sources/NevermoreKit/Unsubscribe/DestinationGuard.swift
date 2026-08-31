@@ -117,6 +117,31 @@ public enum DestinationGuard {
     }
 }
 
+/// A sender-supplied URL that has passed `DestinationGuard`.
+///
+/// The only initialisers run the check and return nil when it fails, so holding
+/// one of these *is* the proof that the check happened. Every exit that hands a
+/// `List-Unsubscribe` URL to something outside the app takes a `VettedURL`
+/// rather than a `URL`, which is what stops the next call site from forgetting:
+/// two exits on one History row disagreed precisely because each was expected to
+/// remember the check on its own (TASK-60).
+public struct VettedURL: Sendable, Equatable {
+    public let url: URL
+
+    public init?(_ url: URL) {
+        guard DestinationGuard.isAllowed(url) else { return nil }
+        self.url = url
+    }
+
+    /// The stored form is a string — `MessageStore.UnsubscribeRecord.url` — so
+    /// parsing and vetting are one step, and there is no intermediate `URL` for
+    /// a caller to reach for by mistake.
+    public init?(string: String?) {
+        guard let string, let url = URL(string: string) else { return nil }
+        self.init(url)
+    }
+}
+
 extension DestinationGuard.IPAddress {
     var isIPv6: Bool {
         if case .v6 = self { return true }

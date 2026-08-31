@@ -1555,6 +1555,37 @@ struct DestinationGuardSSRFTests {
     }
 }
 
+/// A sender's `List-Unsubscribe` link is attacker-chosen, and the user's real
+/// browser carries their cookies and their position on the LAN. `VettedURL` is
+/// the only currency the app's external exits accept, so a link a sender points
+/// at a router, a printer or a localhost dev service cannot be minted into one.
+@Suite("A sender cannot aim the user's browser at their own network")
+struct VettedURLTests {
+    @Test("a link to the LAN, the loopback or the metadata service cannot be vetted") func aLinkToTheLANTheLoopbackOrTheMetadataServiceCannotBeVetted() {
+        for hostile in [
+            "http://192.168.1.1/admin/reboot",  // the router the audit named
+            "http://127.0.0.1:8775/",  // Nevermore's own local server
+            "http://10.0.0.5/printer",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/",
+        ] {
+            expect(VettedURL(string: hostile) == nil, "minted a VettedURL for \(hostile)")
+        }
+    }
+
+    @Test("a non-http scheme cannot be vetted either") func aNonHttpSchemeCannotBeVettedEither() {
+        expect(VettedURL(string: "file:///etc/passwd") == nil, "file")
+        expect(VettedURL(string: "javascript:alert(1)") == nil, "javascript")
+        expect(VettedURL(string: nil) == nil, "no URL recorded at all")
+        expect(VettedURL(string: "not a url at all") == nil, "unparseable")
+    }
+
+    @Test("an ordinary public preferences page still opens") func anOrdinaryPublicPreferencesPageStillOpens() {
+        let vetted = VettedURL(string: "https://93.184.216.34/preferences?id=7")
+        eq(vetted?.url.absoluteString, "https://93.184.216.34/preferences?id=7")
+    }
+}
+
 @Suite("Demo mailbox")
 struct DemoMailboxTests {
     let messages = DemoData.messages()
@@ -5032,6 +5063,58 @@ struct PinnedHTTPClientWireFormatTests {
         expect(text.contains("Content-Length: 26\r\n"), "length of the body")
         expect(text.contains("Connection: close\r\n"), "one-shot")
         expect(text.hasSuffix("\r\n\r\nList-Unsubscribe=One-Click"), "body follows the head")
+    }
+
+    /// `url.path` is percent-decoded, so `%0D%0A` used to come back as a real
+    /// CRLF and land in a request whose separators are CRLF — the sender writing
+    /// their own headers, or a whole second request, into ours.
+    @Test("a sender cannot smuggle a header into the request line") func aSenderCannotSmuggleAHeaderIntoTheRequestLine() {
+        expect(
+            hop("https://acme.test/unsub%0D%0AX-Injected:%20yes") == nil,
+            "encoded CRLF in the path")
+        expect(
+            hop("https://acme.test/unsub?id=%0D%0AX-Injected:%20yes") == nil,
+            "encoded CRLF in the query")
+        expect(
+            hop("https://acme.test/a%0D%0A%0D%0AGET%20/admin%20HTTP/1.1") == nil,
+            "a second request, not just a header")
+        expect(hop("https://acme.test/a%0Ab") == nil, "a bare LF is enough")
+    }
+
+    @Test("a refused request line never reaches the network") func aRefusedRequestLineNeverReachesTheNetwork() async {
+        // No resolver call and no socket: the URL is rejected before either.
+        let client = PinnedHTTPClient { _ in
+            expect(false, "resolved a host for a URL that should never be sent")
+            return []
+        }
+        let result = await client.send(
+            method: "POST", url: URL(string: "https://acme.test/unsub%0D%0AX-Injected:%20yes")!)
+        if case .failure(let failure) = result {
+            eq(failure, .blocked(host: "acme.test"))
+        } else {
+            expect(false, "a CRLF-carrying URL was sent")
+        }
+    }
+
+    @Test("ordinary percent-encoding survives, encoded rather than decoded") func ordinaryPercentEncodingSurvivesEncodedRatherThanDecoded() {
+        // Real unsubscribe links carry this routinely; the rule is about control
+        // characters, not about encoding being present.
+        eq(
+            hop("https://acme.test/u/a%2Fb%20c?to=me%40acme.test")?.pathAndQuery,
+            "/u/a%2Fb%20c?to=me%40acme.test",
+            "the wire form is the encoded one")
+        eq(hop("https://acme.test/caf%C3%A9")?.pathAndQuery, "/caf%C3%A9", "non-ASCII stays encoded")
+    }
+
+    @Test("a caller cannot inject a header line through a header value") func aCallerCannotInjectAHeaderLineThroughAHeaderValue() {
+        let text = String(
+            decoding: PinnedHTTPClient.requestBytes(
+                hop: hop("http://acme.test/unsub")!,
+                method: "GET",
+                headers: ["User-Agent": "nevermore\r\nX-Injected: yes"],
+                body: nil),
+            as: UTF8.self)
+        expect(!text.contains("X-Injected"), "dropped rather than emitted; got \(text)")
     }
 
     @Test("a response head parses into status and lowercased headers") func aResponseHeadParsesIntoStatusAndLowercasedHeaders() {
