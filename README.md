@@ -41,6 +41,13 @@ endpoint returning success proves nothing.
 `i` ignores a sender for good; `⌘⌫` moves everything they've sent to your
 provider's Trash, where you can still get it back.
 
+Big companies mail you from more than one address, so ignoring one of them
+leaves the rest arriving. When you ignore a single address and Nevermore can
+see other senders at the same company, it asks — once, naming the company and
+how many — whether to ignore those too. It never asks for a newsletter platform
+like Substack, where every publication is deliberately its own sender, and it
+does not ask again about a company you have said no to.
+
 ![Ignoring a sender, then trashing another sender's messages](docs/media/triage.gif)
 
 ### And it catches the ones that come back

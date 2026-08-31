@@ -1401,6 +1401,39 @@ struct MessageStoreTests {
         } catch { expect(false, "threw: \(error)") }
     }
 
+    @Test("persists declined domain-ignore offers") func persistsDeclinedDomainIgnoreOffers() {
+        do {
+            let store = try MessageStore.inMemory()
+            expect(store.declinedDomainIgnores().isEmpty, "nothing declined yet")
+            store.declineDomainIgnore("costco.com")
+            store.declineDomainIgnore("citi.com")
+            // Declining twice is not an error and does not duplicate.
+            store.declineDomainIgnore("costco.com")
+            eq(store.declinedDomainIgnores(), ["costco.com", "citi.com"])
+        } catch { expect(false, "threw: \(error)") }
+    }
+
+    @Test("a declined domain-ignore offer survives reopening the database")
+    func declinedDomainIgnoresSurviveReopening() {
+        do {
+            let path = FileManager.default.temporaryDirectory
+                .appendingPathComponent("nm-declined-\(UUID().uuidString).sqlite").path
+            do {
+                let store = try MessageStore(path: path)
+                store.declineDomainIgnore("costco.com")
+            }
+            let reopened = try MessageStore(path: path)
+            eq(reopened.declinedDomainIgnores(), ["costco.com"])
+            // Per mailbox, like the ignores themselves.
+            expect(
+                try MessageStore.inMemory().declinedDomainIgnores().isEmpty,
+                "not shared between accounts")
+            for suffix in ["", "-wal", "-shm"] {
+                try? FileManager.default.removeItem(atPath: path + suffix)
+            }
+        } catch { expect(false, "threw: \(error)") }
+    }
+
     @Test("persists sync token round-trip") func persistsSyncTokenRoundTrip() {
         do {
             let store = try MessageStore.inMemory()
@@ -4873,6 +4906,151 @@ struct BacklogOfferTests {
         // A toast has no room for the question, so the escalation's button has
         // to carry the count the sheet's question would have carried.
         eq(escalated.toastActionLabel, "Trash 12 and Ignore")
+    }
+}
+
+@Suite("DomainIgnoreOffer")
+struct DomainIgnoreOfferTests {
+    /// The Costco case: one company, several addresses, split into rows because
+    /// the display names differ.
+    private func costco() -> [SenderGroup] {
+        Grouping().group([
+            msg(1, from: "Costco Orders <order-refund@costco.com>"),
+            msg(2, from: "Costco Membership <membership@costco.com>"),
+            msg(3, from: "Costco Travel <travel@news.costco.com>"),
+        ])
+    }
+
+    private let costcoRefund = GroupID(kind: .address, key: "order-refund@costco.com")
+
+    private func offer(
+        after id: GroupID, groups: [SenderGroup], ignored: Set<String> = [],
+        grouping: Grouping = Grouping(), declined: Set<String> = []
+    ) -> DomainIgnoreOffer? {
+        DomainIgnoreOffer(
+            after: id, groups: groups, ignoredKeys: ignored, grouping: grouping,
+            declinedDomains: declined)
+    }
+
+    @Test("offers the other senders at the same company, naming domain and count")
+    func offersTheOtherSendersAtTheSameCompany() {
+        let groups = costco()
+        eq(groups.count, 3)
+        guard let made = offer(after: costcoRefund, groups: groups, ignored: ["address:order-refund@costco.com"])
+        else { return expect(false, "expected an offer") }
+        eq(made.domain, "costco.com")
+        eq(made.count, 2)
+        eq(
+            made.targets,
+            [
+                GroupID(kind: .address, key: "membership@costco.com"),
+                GroupID(kind: .address, key: "travel@news.costco.com"),
+            ])
+        expect(made.question.contains("costco.com"), "names the domain: \(made.question)")
+        expect(made.question.contains("2"), "names the count: \(made.question)")
+        expect(made.actionLabel.contains("costco.com"), "button names the domain")
+        expect(made.actionLabel.contains("2"), "button names the count")
+    }
+
+    /// A sibling *host* is the reported leak: `info11.citi.com` kept arriving
+    /// against an ignore on `citi.com`. Both reduce to the same eTLD+1.
+    @Test("reaches a sibling host of the same registrable domain")
+    func reachesASiblingHostOfTheSameRegistrableDomain() {
+        let groups = Grouping().group([
+            msg(1, from: "Citi Cards <citicards@info11.citi.com>"),
+            msg(2, from: "Citi Client Experience <clientexperience@citi.com>"),
+        ])
+        let made = offer(after: GroupID(kind: .address, key: "clientexperience@citi.com"), groups: groups)
+        eq(made?.domain, "citi.com")
+        eq(made?.targets, [GroupID(kind: .address, key: "citicards@info11.citi.com")])
+    }
+
+    /// The one that must never fire. Every Substack is its own row on purpose,
+    /// and an accepted offer here would silence newsletters the user still
+    /// wants — invisibly, because mail just stops appearing.
+    @Test("never offers to widen an ignore across a shared sending platform")
+    func neverOffersAcrossASharedSendingPlatform() {
+        let groups = Grouping().group([
+            msg(1, from: "Alice Writes <alice@substack.com>"),
+            msg(2, from: "Bob Reports <bob@substack.com>"),
+            msg(3, from: "Carol Explains <carol@mail.substack.com>"),
+        ])
+        eq(groups.count, 3)
+        expect(
+            offer(after: GroupID(kind: .address, key: "alice@substack.com"), groups: groups) == nil,
+            "ignoring one Substack must not offer to ignore the rest")
+        // Not a Substack special case: the whole platform list is excluded.
+        for platform in ["beehiiv.com", "mcsv.net", "sendgrid.net", "ghost.io"] {
+            let groups = Grouping().group([
+                msg(1, from: "One <a@\(platform)>"),
+                msg(2, from: "Two <b@\(platform)>"),
+            ])
+            expect(
+                offer(after: GroupID(kind: .address, key: "a@\(platform)"), groups: groups) == nil,
+                "offered across \(platform)")
+        }
+    }
+
+    @Test("makes no offer when there is nothing else on the domain")
+    func makesNoOfferWhenThereIsNothingElseOnTheDomain() {
+        // A split rule is the only way one address group ends up alone on its
+        // domain — auto-grouping would have made it a domain group.
+        let alone = Grouping(rules: ["solo.com": .split]).group([msg(1, from: "Solo <a@solo.com>")])
+        eq(alone.first?.id.kind, .address)
+        expect(
+            offer(
+                after: GroupID(kind: .address, key: "a@solo.com"), groups: alone,
+                grouping: Grouping(rules: ["solo.com": .split])) == nil,
+            "one sender, nothing to widen to")
+        // Nor when every sibling is already ignored — those are not senders the
+        // user would be silencing, so there is no question left to ask.
+        expect(
+            offer(
+                after: costcoRefund, groups: costco(),
+                ignored: [
+                    "address:order-refund@costco.com", "address:membership@costco.com",
+                    "address:travel@news.costco.com",
+                ]) == nil,
+            "all siblings already ignored")
+    }
+
+    @Test("a single remaining sender is still worth asking about")
+    func aSingleRemainingSenderIsStillWorthAskingAbout() {
+        // Most of the measured leaks were exactly one sibling host, so a
+        // threshold of two would have suppressed the clearest cases there were.
+        let made = offer(
+            after: costcoRefund, groups: costco(), ignored: ["address:membership@costco.com"])
+        eq(made?.count, 1)
+        eq(made?.question, "Also ignore the other 1 sender at costco.com?")
+    }
+
+    @Test("never offers off a domain group, which already covers the domain")
+    func neverOffersOffADomainGroup() {
+        let groups = Grouping().group([
+            msg(1, from: "Amazon <a@amazon.com>"),
+            msg(2, from: "Amazon <b@emailinfo.amazon.com>"),
+        ])
+        eq(groups.first?.id.kind, .domain)
+        expect(
+            offer(after: GroupID(kind: .domain, key: "amazon.com"), groups: groups) == nil,
+            "the ignore already covered every sender on the domain")
+    }
+
+    @Test("a declined domain is not asked about again")
+    func aDeclinedDomainIsNotAskedAboutAgain() {
+        expect(
+            offer(after: costcoRefund, groups: costco(), declined: ["costco.com"]) == nil,
+            "the user already said no to this company")
+        // The decline is per domain, not global.
+        expect(
+            offer(after: costcoRefund, groups: costco(), declined: ["chase.com"]) != nil,
+            "a different company is still a fresh question")
+    }
+
+    @Test("a group id knows its registrable domain") func aGroupIDKnowsItsRegistrableDomain() {
+        eq(GroupID(kind: .address, key: "citicards@info11.citi.com").registrableDomain, "citi.com")
+        eq(GroupID(kind: .domain, key: "citi.com").registrableDomain, "citi.com")
+        eq(GroupID(kind: .address, key: "a@mail.example.co.uk").registrableDomain, "example.co.uk")
     }
 }
 
