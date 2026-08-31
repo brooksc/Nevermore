@@ -1,7 +1,7 @@
 ---
 id: TASK-60
 title: Sender-controlled URL reaches the real browser and the request line unchecked
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-08-31 23:09'
 updated_date: '2026-08-31 23:10'
