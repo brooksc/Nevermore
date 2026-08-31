@@ -100,6 +100,18 @@ public struct GroupID: Hashable, Sendable, Codable {
         else { return nil }
         self.init(kind: kind, key: String(storageKey[storageKey.index(after: sep)...]))
     }
+
+    /// The company this row belongs to. A domain group's key already is one; an
+    /// address group's is the eTLD+1 of the address's host, so
+    /// `citicards@info11.citi.com` and `clientexperience@citi.com` agree on
+    /// `citi.com`.
+    public var registrableDomain: String {
+        switch kind {
+        case .domain: key
+        case .address:
+            RegistrableDomain.of(key.split(separator: "@").last.map(String.init) ?? "")
+        }
+    }
 }
 
 /// A group of messages from one sender, as shown in one table row.

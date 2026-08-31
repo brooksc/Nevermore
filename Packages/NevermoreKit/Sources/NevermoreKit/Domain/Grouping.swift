@@ -62,6 +62,16 @@ public struct Grouping: Sendable {
         "substack.com", "beehiiv.com", "ghost.io", "buttondown.email", "convertkit-mail.com",
     ]
 
+    /// Whether a registrable domain is a bulk-sending platform rather than a
+    /// brand.
+    ///
+    /// Exposed so callers that must leave platforms alone — the domain-ignore
+    /// offer, above all — can ask the type that already knows, instead of
+    /// growing a second list that would drift out of step with this one.
+    public func isSharedSendingPlatform(_ domain: String) -> Bool {
+        Grouping.sharedSendingPlatforms.contains(domain)
+    }
+
     /// A user correction to the automatic grouping of one registrable domain.
     public enum Rule: String, Sendable, Codable {
         /// Force this domain to split into one group per sender address

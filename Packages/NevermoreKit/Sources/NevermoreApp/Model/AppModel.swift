@@ -50,6 +50,9 @@ final class AppModel {
 
     private(set) var groups: [SenderGroup] = []
     private var ignoredKeys: Set<String> = []
+    /// Domains whose "also ignore the rest" offer has been turned down. Read
+    /// from the store so a declined question stays declined across relaunches.
+    private var declinedDomains: Set<String> = []
     private var history: [String: MessageStore.UnsubscribeRecord] = [:]
     private(set) var sendAsAddresses: [String] = []
 
@@ -177,6 +180,9 @@ final class AppModel {
     var canUndo: Bool { toast?.undo != nil }
     private var pendingUndo: (@MainActor () async -> Void)?
     private var pendingAction: (@MainActor () async -> Void)?
+    /// What to record if the current toast's offer goes away unaccepted — an
+    /// offer nobody took is an offer declined, and the question is asked once.
+    private var pendingDecline: (@MainActor () -> Void)?
 
     init() {
         accounts = registry.accounts()
@@ -399,6 +405,7 @@ final class AppModel {
         browserQueue = BrowserQueue()
         selection = []
         ignoredKeys = []
+        declinedDomains = []
         history = [:]
         groupingRules = [:]
         sendAsAddresses = []
@@ -789,6 +796,7 @@ final class AppModel {
             groupingRules = store.groupingRules()
             groups = Grouping(rules: groupingRules).group(messages)
             ignoredKeys = try store.ignoredGroupKeys()
+            declinedDomains = store.declinedDomainIgnores()
             history = try store.unsubscribeHistory()
             proposal = store.proposal()
             browserQueue = store.browserQueue()
@@ -830,12 +838,8 @@ final class AppModel {
     /// The registrable domain a group belongs to (the group key for a domain
     /// group, or the address's host reduced to eTLD+1 for an address group).
     private func domain(of id: GroupID) -> String? {
-        switch id.kind {
-        case .domain: return id.key
-        case .address:
-            let host = id.key.split(separator: "@").last.map(String.init) ?? ""
-            return RegistrableDomain.of(host)
-        }
+        let domain = id.registrableDomain
+        return domain.isEmpty ? nil : domain
     }
 
     /// Private so every caller goes through `startSync()` and its
@@ -1699,14 +1703,57 @@ final class AppModel {
         retireFromProposal(ids, as: .ignore)
         Log.app.event("ignored \(targets.count) sender(s): \(targets.map(\.id.key).joined(separator: ", "))")
         guard !silently else { return }
+        // Only ever offered off a single row. Ignoring a multi-row selection is
+        // already a deliberate sweep, and "the other senders" would have to mean
+        // several domains at once — which is not a question with one answer.
+        let offer = targets.count == 1 ? domainIgnoreOffer(after: targets[0].id) : nil
+        // Straight back through `ignore`, so accepting produces an ordinary
+        // ignore with an ordinary undo rather than a widening that can only be
+        // taken back row by row.
+        var accept: (@MainActor () async -> Void)?
+        if let offer {
+            accept = { [weak self] in self?.ignore(Set(offer.targets)) }
+        }
         showToast(
             "Ignored \(targets.count) sender\(targets.count == 1 ? "" : "s")",
-            undoLabel: "Undo"
-        ) { [weak self] in
-            guard let self, let store = self.store else { return }
-            try? targets.forEach { try store.unignore($0.id) }
-            self.ignoredKeys = (try? store.ignoredGroupKeys()) ?? self.ignoredKeys
+            undoLabel: "Undo",
+            undo: { [weak self] in
+                guard let self, let store = self.store else { return }
+                try? targets.forEach { try store.unignore($0.id) }
+                self.ignoredKeys = (try? store.ignoredGroupKeys()) ?? self.ignoredKeys
+            },
+            actionLabel: offer?.actionLabel,
+            action: accept)
+        // Set after `showToast`, which retires whatever offer it replaced.
+        if let offer {
+            pendingDecline = { [weak self] in self?.recordDomainIgnoreDecline(offer.domain) }
         }
+    }
+
+    /// The "also ignore the rest of this company" offer for a row just ignored.
+    ///
+    /// The rule itself is `DomainIgnoreOffer` in NevermoreKit — including the
+    /// shared-platform exclusion that keeps one Substack from silencing the
+    /// rest. All that belongs here is the state it reads.
+    private func domainIgnoreOffer(after id: GroupID) -> DomainIgnoreOffer? {
+        DomainIgnoreOffer(
+            after: id,
+            groups: groups,
+            ignoredKeys: ignoredKeys,
+            grouping: Grouping(rules: groupingRules),
+            declinedDomains: declinedDomains)
+    }
+
+    /// Remember that the offer for `domain` was turned down.
+    ///
+    /// Asked once means once. The alternative is re-asking every time another
+    /// address from the same company turns up, which is how a considered
+    /// question becomes a prompt people dismiss without reading.
+    private func recordDomainIgnoreDecline(_ domain: String) {
+        guard let store else { return }
+        store.declineDomainIgnore(domain)
+        declinedDomains = store.declinedDomainIgnores()
+        Log.app.event("declined the domain-ignore offer for \(domain)")
     }
 
     func unignore(_ ids: Set<GroupID>) {
@@ -2342,6 +2389,7 @@ final class AppModel {
         action: (@MainActor () async -> Void)? = nil
     ) {
         toastTask?.cancel()
+        retirePendingOffer()
         pendingUndo = undo
         pendingAction = action
         let shown = Toast(
@@ -2354,7 +2402,15 @@ final class AppModel {
             guard !Task.isCancelled, let self, self.toast == shown else { return }
             self.toast = nil
             self.pendingUndo = nil
+            self.retirePendingOffer()
         }
+    }
+
+    /// Take the decline for an offer that is going away without being accepted.
+    private func retirePendingOffer() {
+        let decline = pendingDecline
+        pendingDecline = nil
+        decline?()
     }
 
     private func showToast(
@@ -2366,6 +2422,9 @@ final class AppModel {
     func runUndo() async {
         await pendingUndo?()
         pendingUndo = nil
+        // Not a decline: undoing the ignore takes back the premise of the
+        // question, so the offer should still be made next time it applies.
+        pendingDecline = nil
         toast = nil
         await reloadFromStore()
     }
@@ -2374,6 +2433,7 @@ final class AppModel {
     func runToastAction() async {
         let action = pendingAction
         pendingAction = nil
+        pendingDecline = nil
         toast = nil
         await action?()
     }
@@ -2383,6 +2443,7 @@ final class AppModel {
         toast = nil
         pendingUndo = nil
         pendingAction = nil
+        retirePendingOffer()
     }
 
     /// Trash a sender's messages and ignore them, as one undoable step.

@@ -17,7 +17,11 @@ struct StatusBarView: View {
                 if let undo = toast.undo {
                     Button(undo.label) { Task { await model.runUndo() } }
                         .buttonStyle(.link)
-                } else if let action = toast.action {
+                }
+                // Both, when both are offered: an ignore that also asks about
+                // the rest of the domain must not lose its Undo to the question
+                // (TASK-56).
+                if let action = toast.action {
                     Button(action.label) { Task { await model.runToastAction() } }
                         .buttonStyle(.link)
                 }

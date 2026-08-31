@@ -721,6 +721,44 @@ public final class MessageStore: Sendable {
         }
     }
 
+    // MARK: - Declined domain-ignore offers (TASK-56)
+
+    private static let declinedDomainsKey = "declinedDomainIgnores"
+
+    /// Registrable domains whose "also ignore the rest" offer the user turned
+    /// down.
+    ///
+    /// Stored beside the grouping rules rather than in UserDefaults because it
+    /// is a fact about *this mailbox* — the same domain can be worth ignoring in
+    /// one account and not another — and because it has to survive a relaunch
+    /// for the offer to be a question asked once rather than a nag.
+    public func declinedDomainIgnores() -> Set<String> {
+        let raw = try? pool.read { db in
+            try String.fetchOne(
+                db, sql: "SELECT value FROM syncState WHERE key = ?",
+                arguments: [Self.declinedDomainsKey])
+        }
+        guard let value = raw ?? nil, let data = value.data(using: .utf8),
+            let decoded = try? JSONDecoder().decode([String].self, from: data)
+        else { return [] }
+        return Set(decoded)
+    }
+
+    public func declineDomainIgnore(_ domain: String) {
+        var declined = declinedDomainIgnores()
+        guard declined.insert(domain).inserted else { return }
+        let json = (try? JSONEncoder().encode(declined.sorted()))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        try? pool.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO syncState (key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                arguments: [Self.declinedDomainsKey, json])
+        }
+    }
+
     // MARK: - Agent proposal
 
     private static let proposalKey = "agentProposal"
