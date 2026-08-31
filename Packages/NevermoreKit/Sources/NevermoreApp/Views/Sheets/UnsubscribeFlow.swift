@@ -237,7 +237,13 @@ struct UnsubscribeFlow: View {
                 // Room for the fade below, so it never eats the last row.
                 .padding(.bottom, 12)
             }
-            .frame(maxHeight: 420)
+            // A floor as well as a ceiling, and the floor is the load-bearing
+            // half. A ScrollView has no intrinsic height along its scroll axis,
+            // so inside a sheet that sizes itself to its content it collapses to
+            // a couple of rows and `maxHeight` never comes into it — which is
+            // why raising the ceiling from 280 to 420 changed nothing, and why a
+            // thirty-sender report still showed one clipped line.
+            .frame(minHeight: 260, maxHeight: 420)
             // macOS overlay indicators stay hidden until you scroll, which is
             // exactly the state that needs an indicator.
             .scrollIndicators(.visible)
