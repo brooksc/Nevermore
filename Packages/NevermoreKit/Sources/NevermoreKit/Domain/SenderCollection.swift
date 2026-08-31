@@ -33,7 +33,12 @@ public enum SenderCollection: String, CaseIterable, Identifiable, Hashable, Send
 public struct SenderState: Hashable, Sendable {
     /// Hidden on this Mac. Local-only; nothing is touched on the server.
     public var isIgnored: Bool
-    /// There is a recorded unsubscribe attempt for this sender.
+    /// This sender was actually unsubscribed from — a record whose outcome is
+    /// `requested` or `confirmed`.
+    ///
+    /// Not "there is a record": an attempt the user said did not go through
+    /// (`.failed`) leaves a record too, and reading that as an unsubscribe is
+    /// what moved a sender the user wanted to block into the archive (TASK-57).
     public var isUnsubscribed: Bool
     /// They mailed again *after* that attempt — the request didn't stick.
     public var hasReappeared: Bool

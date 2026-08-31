@@ -136,6 +136,13 @@ secondary-styled numbers. No action buttons live here.
 - **Unsubscribed** — history, with outcome state (`checkmark.circle`)
 - **Ignored** — hidden locally, never touched in Gmail (`eye.slash`)
 
+Unsubscribed lists the records that are unsubscribes — `requested` and
+`confirmed`. A `failed` record is an attempt the user made and could not finish,
+so the sender stays in All Senders where it can still be ignored or trashed, and
+carries a **Tried** mark so it is not mistaken for one never touched (TASK-57).
+Reappeared reads the same rule: it means a sender ignored an unsubscribe, which a
+failed attempt never was.
+
 The two archives may list the same sender, and that is intended (TASK-50). They
 answer different questions — *who did I ask to stop* and *who did I mute* — and a
 sender can honestly be both. Hiding the unsubscribe record because the sender was

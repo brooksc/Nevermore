@@ -33,9 +33,11 @@ struct WebUnsubscribeSheet: View {
     @State private var askOutcome = false
     /// Set when the loaded page looks like a successful-unsubscribe confirmation.
     @State private var detectedConfirmation = false
-    /// Shown after a confirmed unsubscribe: the backlog offer, and the way on to
-    /// the next sender.
-    @State private var showingResult = false
+    /// Non-nil while the result step is up, holding what it is the result *of*.
+    /// A Bool used to be enough because only a confirmed unsubscribe reached this
+    /// step; a declined attempt now does too, and the two must not read alike
+    /// (TASK-57).
+    @State private var result: BacklogOffer.Context?
 
     init(model: AppModel, target: AppModel.ManualUnsubscribe) {
         self._model = Bindable(model)
@@ -46,8 +48,8 @@ struct WebUnsubscribeSheet: View {
         VStack(spacing: 0) {
             header
             Divider()
-            if showingResult {
-                resultStep
+            if let result {
+                resultStep(result)
             } else {
                 ZStack(alignment: .top) {
                     // Identity by sender: without this the same WKWebView would
@@ -105,8 +107,8 @@ struct WebUnsubscribeSheet: View {
         // "not now" rather than "keep them". The toast is the fallback for that
         // one exit, and only for it: re-offering after an explicit Keep Messages
         // would be the nag this task exists to remove, not a second chance.
-        if showingResult, offer != nil {
-            model.offerBacklogDelete(current.id, isEscalation: current.isEscalation)
+        if let result, offer(result) != nil {
+            model.offerBacklogDelete(current.id, context: result)
         }
         dismiss()
     }
@@ -119,13 +121,14 @@ struct WebUnsubscribeSheet: View {
     private func confirm() {
         recorded = true
         detectedConfirmation = false
-        model.recordManual(current.id, confirmed: true, offerDelete: false)
+        model.recordManual(current.id, outcome: .confirmed, offerDelete: false)
         model.recordBrowserOutcome(current.id, .confirmed)
         // The delete offer used to be a twelve-second toast in the status bar
         // while attention was on the sheet closing (TASK-23). It belongs in the
         // interaction that just happened.
-        if offer != nil || current.queue != nil {
-            showingResult = true
+        let context: BacklogOffer.Context = current.isEscalation ? .escalated : .unsubscribed
+        if offer(context) != nil || current.queue != nil {
+            result = context
         } else {
             advance()
         }
@@ -135,18 +138,32 @@ struct WebUnsubscribeSheet: View {
     private func record(_ outcome: BrowserQueue.Outcome) {
         recorded = true
         detectedConfirmation = false
-        if outcome == .couldNotUnsubscribe {
-            // Still an attempt, and the record is what stops the app offering
-            // the same automated path again.
-            model.recordManual(current.id, confirmed: false)
+        guard outcome == .couldNotUnsubscribe else {
+            // Skipped: looked at and not answered. Nothing happened to this
+            // sender, so nothing is recorded against it.
+            model.recordBrowserOutcome(current.id, outcome)
+            advance()
+            return
         }
+        // Still an attempt, and the record is what stops the app offering the
+        // same automated path again — but recorded as `.failed`, so it does not
+        // claim an unsubscribe that did not happen and does not move the sender
+        // out of the working list (TASK-57).
+        model.recordManual(current.id, outcome: .failed, offerDelete: false)
         model.recordBrowserOutcome(current.id, outcome)
-        advance()
+        // The login wall is the moment ignoring or trashing this sender is
+        // obviously the next thing to do, so offer it here rather than leaving
+        // the user to find the sender again afterwards.
+        if offer(.couldNotUnsubscribe) != nil {
+            result = .couldNotUnsubscribe
+        } else {
+            advance()
+        }
     }
 
     /// On to the next queued sender, or out.
     private func advance() {
-        showingResult = false
+        result = nil
         guard current.queue != nil, let next = model.nextBrowserTarget() else {
             dismiss()
             return
@@ -232,14 +249,19 @@ struct WebUnsubscribeSheet: View {
 
     /// What to do with the mail that is already here, asked where the user is
     /// looking (TASK-23), and the way on to the next sender (TASK-47).
-    private var resultStep: some View {
-        VStack(spacing: 18) {
+    private func resultStep(_ context: BacklogOffer.Context) -> some View {
+        let failed = context == .couldNotUnsubscribe
+        return VStack(spacing: 18) {
             Spacer()
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 44)).foregroundStyle(.green)
-            Text("Unsubscribed from \(current.name)").font(.title3.weight(.semibold))
+            Image(systemName: failed ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
+                .font(.system(size: 44)).foregroundStyle(failed ? .orange : .green)
+            Text(
+                failed
+                    ? "Still subscribed to \(current.name)"
+                    : "Unsubscribed from \(current.name)"
+            ).font(.title3.weight(.semibold))
 
-            if let offer {
+            if let offer = offer(context) {
                 Text(offer.question).font(.callout).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center).frame(width: 420)
                 HStack(spacing: 10) {
@@ -275,23 +297,23 @@ struct WebUnsubscribeSheet: View {
 
     /// The backlog question for the sender on screen, or nil when they have no
     /// mail left to clear.
-    private var offer: BacklogOffer? {
+    private func offer(_ context: BacklogOffer.Context) -> BacklogOffer? {
         BacklogOffer(
             senderName: current.name,
             messageCount: current.messageCount,
-            isEscalation: current.isEscalation)
+            context: context)
     }
 
     // MARK: - Footer
 
     private var footer: some View {
         HStack {
-            if showingResult, let queue = current.queue, queue.remaining > 0 {
+            if result != nil, let queue = current.queue, queue.remaining > 0 {
                 Label(
                     "\(queue.remaining) more sender\(queue.remaining == 1 ? "" : "s") to go",
                     systemImage: "list.bullet")
                     .font(.caption).foregroundStyle(.secondary)
-            } else if let queue = current.queue, !showingResult {
+            } else if let queue = current.queue, result == nil {
                 Label(queue.reason.explanation, systemImage: "hand.raised")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(2)
             } else if current.isEscalation {
@@ -303,7 +325,7 @@ struct WebUnsubscribeSheet: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            if !showingResult {
+            if result == nil {
                 if current.queue != nil {
                     Button("Skip This One") { record(.abandoned) }
                         .help("Leave this sender unanswered and move on. It stays out of the queue.")

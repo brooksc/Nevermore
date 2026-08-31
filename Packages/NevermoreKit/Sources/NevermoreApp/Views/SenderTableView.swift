@@ -17,9 +17,24 @@ struct SenderTableView: View {
         Table(rows, selection: $model.selection, sortOrder: $model.sortOrder) {
             TableColumn("Sender", value: \.name) { row in
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(row.name)
-                        .fontWeight(row.unreadPercent > 0 ? .semibold : .regular)
-                        .lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(row.name)
+                            .fontWeight(row.unreadPercent > 0 ? .semibold : .regular)
+                            .lineLimit(1)
+                        // A sender the user opened and could not finish stays in
+                        // this list, so it needs to say it has already been
+                        // tried — otherwise the only way to tell it apart from
+                        // one never touched is to open its page again (TASK-57).
+                        if row.priorOutcome == .failed {
+                            Text("Tried")
+                                .font(.caption2)
+                                .padding(.horizontal, 5).padding(.vertical, 1)
+                                .background(.orange.opacity(0.2), in: Capsule())
+                                .foregroundStyle(.secondary)
+                                .help("You opened this sender's page and couldn't finish "
+                                    + "unsubscribing. They are still subscribed.")
+                        }
+                    }
                     Text(row.email)
                         .font(.caption)
                         .foregroundStyle(.secondary)

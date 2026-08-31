@@ -79,7 +79,9 @@ public struct MCPSnapshot: Sendable {
     public func state(of group: SenderGroup) -> SenderState {
         SenderState(
             isIgnored: ignoredKeys.contains(group.id.storageKey),
-            isUnsubscribed: history[group.id.storageKey] != nil,
+            // A record whose outcome is `.failed` is an attempt, not an
+            // unsubscribe: the sender stays where it can still be acted on.
+            isUnsubscribed: history[group.id.storageKey]?.outcome.isUnsubscribed == true,
             hasReappeared: hasReappeared(group),
             hasMessages: !group.messages.isEmpty)
     }
